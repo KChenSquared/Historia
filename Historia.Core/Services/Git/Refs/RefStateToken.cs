@@ -10,7 +10,8 @@ namespace Historia.Services.Git;
 /// for a linked worktree, its own <c>refs/</c>; the contents of <c>HEAD</c>; the stash reflog
 /// (older stashes live only there); and, for the reftable backend, the contents of
 /// <c>reftable/tables.list</c> (tables are immutable and uniquely named, so the list alone
-/// changes on every write).</para>
+/// changes on every write). Also <c>shallow</c> and <c>info/grafts</c>, which change the history
+/// a ref reaches without moving any ref (<see cref="HistoryShape"/>).</para>
 /// <para>Blind spot: on a filesystem with coarse timestamps (FAT, some network shares) a
 /// same-size <c>packed-refs</c> rewrite within the timestamp granularity is not seen until the
 /// next change.</para>
@@ -31,6 +32,8 @@ public static class RefStateToken
         if (!PathsEqual(gitDir, commonDir))
             FeedTree(Feed, "worktree:", Path.Combine(gitDir, "refs"));
         FeedFile(Feed, "stash-log", Path.Combine(commonDir, "logs", "refs", "stash"), withCreation: false);
+        FeedFile(Feed, "shallow", Path.Combine(commonDir, "shallow"), withCreation: true);
+        FeedFile(Feed, "grafts", Path.Combine(commonDir, "info", "grafts"), withCreation: false);
 
         var tablesList = Path.Combine(commonDir, "reftable", "tables.list");
         var isReftable = File.Exists(tablesList);
@@ -70,6 +73,25 @@ public static class RefStateToken
             Feed("reftable:" + ReadAllTextOrEmpty(tablesList));
 
         return unchecked((long)h);
+    }
+
+    /// <summary>
+    /// A stamp of the files that cut or rewrite history without moving a ref: <c>shallow</c>
+    /// (the boundary commits of a shallow clone, which a deepen or unshallow rewrites or removes)
+    /// and <c>info/grafts</c>. FNV-1a over their contents in hex, or <c>""</c> when neither file
+    /// exists, so a repository that never had either keeps the stamp every other one has.
+    /// </summary>
+    public static string HistoryShape(string gitDir)
+    {
+        var commonDir = ResolveCommonDir(gitDir);
+        var shallow = Path.Combine(commonDir, "shallow");
+        var grafts = Path.Combine(commonDir, "info", "grafts");
+        if (!File.Exists(shallow) && !File.Exists(grafts))
+            return "";
+        var h = StableHash.Fnv64OffsetBasis;
+        h = StableHash.Fnv1a64Step(h, "shallow:" + ReadAllTextOrEmpty(shallow));
+        h = StableHash.Fnv1a64Step(h, "grafts:" + ReadAllTextOrEmpty(grafts));
+        return h.ToString("x16", CultureInfo.InvariantCulture);
     }
 
     /// <summary>The directory shared by every worktree of the repo — where <c>packed-refs</c>
