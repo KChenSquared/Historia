@@ -53,6 +53,7 @@ public sealed partial class GraphLayoutService
     private static async Task<(
         long WalkKey,
         string[] Tips,
+        string HistoryShape,
         (bool Ok, int RowCount, bool Exhausted) Current,
         (bool Ok, long WalkKey, int RowCount, int RecordCount, int OrderVersion, bool Exhausted, long LastFullWalkMs) Existing)?> ProbeStoreAsync(
         RepositoryContext context, GraphQuery query, CancellationToken ct)
@@ -62,10 +63,11 @@ public sealed partial class GraphLayoutService
         var repoPath = context.RepositoryPath;
         if (await TryGetRefStateAsync(context, query, ct).ConfigureAwait(false) is not { } state)
             return null;
-        var (_, _, tips, walkKey) = state;
+        var (snapshot, _, tips, walkKey) = state;
         return (
             WalkKey: walkKey,
             Tips: tips,
+            HistoryShape: snapshot.HistoryShape,
             Current: GraphMetaStore.Probe(repoPath, walkKey, query.IncludeRemoteBranches),
             Existing: GraphMetaStore.ProbeExisting(repoPath, query.IncludeRemoteBranches));
     }
@@ -124,7 +126,7 @@ public sealed partial class GraphLayoutService
             if (_settings.Current.EnableGraphSplice)
             {
                 var splicedRows = await TryHeadlessSpliceAsync(
-                    context, query, repoPath, probe.Tips, probe.WalkKey, probe.Existing, ct).ConfigureAwait(false);
+                    context, query, repoPath, probe.Tips, probe.WalkKey, probe.HistoryShape, probe.Existing, ct).ConfigureAwait(false);
                 if (splicedRows >= 0)
                     return;
             }
@@ -144,7 +146,7 @@ public sealed partial class GraphLayoutService
     /// correctness problem, only a missed optimization.
     /// </summary>
     private async Task<int> TryHeadlessSpliceAsync(
-        RepositoryContext context, GraphQuery query, string repoPath, string[] newSortedTips, long newWalkKey,
+        RepositoryContext context, GraphQuery query, string repoPath, string[] newSortedTips, long newWalkKey, string historyShape,
         (bool Ok, long WalkKey, int RowCount, int RecordCount, int OrderVersion, bool Exhausted, long LastFullWalkMs) oldProbe,
         CancellationToken ct)
     {
@@ -162,6 +164,17 @@ public sealed partial class GraphLayoutService
         if (oldTips is not { Count: > 0 })
             return -1;
         var oldTipShas = oldTips.Select(t => t.ToString()).ToArray();
+
+        // Guard 1 continued: `.meta.tips` is a separate file from the header, so it must hash to
+        // the key the old order was committed under. A tips write that failed while its header
+        // write succeeded would otherwise make the deltas below run from the wrong base and add
+        // commits the order already holds.
+        var oldTipsMatch = ComputeWalkKey(oldTipShas, query, historyShape) == oldProbe.WalkKey;
+        if (!oldTipsMatch)
+        {
+            Diagnostics.PerfLog.Mark($"graph splice rejected: .meta.tips does not match the store's walk key ({repoPath})");
+            return -1;
+        }
 
         // Guard 2 (simplified, same scope cut as GraphMetaSplice's own doc comment): only the
         // CURRENT shallow state is checked, not "unchanged since the old order was built".
@@ -230,7 +243,7 @@ public sealed partial class GraphLayoutService
 
             var guard = GraphMetaSplice.Evaluate(
                 storeExhausted: oldProbe.Exhausted,
-                oldTipsMatch: true,
+                oldTipsMatch: oldTipsMatch,
                 repoIsShallow: repoIsShallow,
                 oldRowCount: oldProbe.RowCount,
                 addedQueryElapsed: addedSw.Elapsed,
