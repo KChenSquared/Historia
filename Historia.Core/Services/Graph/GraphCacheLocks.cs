@@ -14,8 +14,11 @@ namespace Historia.Services.Graph;
 internal static class GraphCacheLocks
 {
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, object> Locks =
-        new(StringComparer.Ordinal);
+        new(StringComparer.OrdinalIgnoreCase);
 
-    public static object For(string repoPath) =>
-        Locks.GetOrAdd(GraphCachePaths.Stem(repoPath), static _ => new object());
+    public static object For(string repoPath) => ForStem(GraphCachePaths.Stem(repoPath));
+
+    /// <summary>The lock for a stem read off a cache file name, for a caller that has no repo path
+    /// (<see cref="GraphCacheJanitor"/>).</summary>
+    public static object ForStem(string stem) => Locks.GetOrAdd(stem, static _ => new object());
 }

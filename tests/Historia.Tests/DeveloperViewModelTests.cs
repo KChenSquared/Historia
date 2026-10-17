@@ -381,6 +381,7 @@ public sealed class DeveloperViewModelTests
         public void EnqueueInactiveTabCaching(RepositoryContext context, GraphQuery query) => throw new NotSupportedException();
         public Task CancelInactiveTabCachingAsync(RepositoryContext context) => throw new NotSupportedException();
         public void RefreshCommitGraphAfterFetch(RepositoryContext context) => throw new NotSupportedException();
+        public void SweepDiskCache(IReadOnlyCollection<string> openRepositoryPaths) { }
         public Task PrecacheClonedRepositoryAsync(RepositoryContext context, GraphQuery query, IProgress<GitProgress>? progress, CancellationToken ct) => throw new NotSupportedException();
     }
 }

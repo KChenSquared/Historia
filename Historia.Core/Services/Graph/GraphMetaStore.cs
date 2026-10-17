@@ -131,7 +131,10 @@ internal sealed class GraphMetaStore
                     && again.Fingerprint == hdr.Fingerprint
                     && again.Generation == hdr.Generation
                     && again.OrderVersion == hdr.OrderVersion)
+                {
+                    MarkUsed(repoPath);
                     return store;
+                }
             }
             catch (InvalidDataException)
             {
@@ -184,6 +187,25 @@ internal sealed class GraphMetaStore
             var discarded = new GraphMetaWriter(repoPath, hdr.Fingerprint, includeRemoteBranches).Reset();
             Diagnostics.PerfLog.Mark($"graph cache discarded a torn store ({repoPath}): {(discarded ? "deleted" : "delete blocked")}");
             return discarded;
+        }
+    }
+
+    /// <summary>Refreshes the header's write time, which <see cref="GraphCacheJanitor"/> reads as
+    /// the store's last use. At most hourly, and under the writer lock so it never races a header
+    /// rename. Best effort: a store that can't be stamped only ranks as older.</summary>
+    private static void MarkUsed(string repoPath)
+    {
+        try
+        {
+            var hdr = new FileInfo(GraphCachePaths.File(repoPath, HdrExt));
+            var now = DateTime.UtcNow;
+            if (!hdr.Exists || now - hdr.LastWriteTimeUtc < TimeSpan.FromHours(1))
+                return;
+            lock (GraphCacheLocks.For(repoPath))
+                File.SetLastWriteTimeUtc(hdr.FullName, now);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
         }
     }
 

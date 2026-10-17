@@ -58,6 +58,7 @@ public sealed class GraphExtendPumpFaultTests
         public void EnqueueInactiveTabCaching(RepositoryContext context, GraphQuery query) { }
         public Task CancelInactiveTabCachingAsync(RepositoryContext context) => inner.CancelInactiveTabCachingAsync(context);
         public void RefreshCommitGraphAfterFetch(RepositoryContext context) { }
+        public void SweepDiskCache(IReadOnlyCollection<string> openRepositoryPaths) { }
         public Task PrecacheClonedRepositoryAsync(RepositoryContext context, GraphQuery query, IProgress<GitProgress>? progress, CancellationToken ct)
             => inner.PrecacheClonedRepositoryAsync(context, query, progress, ct);
     }

@@ -294,7 +294,7 @@
                         <CheckBox Content="Auto hide notices" IsChecked="{Binding AutoHideNotices}" />
                     </DockPanel>
                     <DockPanel Classes="hinted">
-                        <ctl:HelpHint Text="Reads commit messages, authors and dates from a disk cache to save memory on large repositories. Takes effect after restart." />
+                        <ctl:HelpHint Text="Reads commit messages, authors and dates from a disk cache to save memory on large repositories. Turning it off deletes the cache. Takes effect after restart." />
                         <CheckBox Content="Keep commit details on disk" IsChecked="{Binding GraphMetadataFromDisk}" />
                     </DockPanel>
                     <DockPanel Classes="hinted">

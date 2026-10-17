@@ -807,6 +807,8 @@ public sealed class AutoFetchServiceTests : IAsyncDisposable
                 _refreshed.Add(context);
         }
 
+        public void SweepDiskCache(IReadOnlyCollection<string> openRepositoryPaths) { }
+
         public void EnqueueInactiveTabCaching(RepositoryContext context, GraphQuery query)
         {
             if (ThrowOnEnqueue)
