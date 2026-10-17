@@ -133,6 +133,14 @@ internal sealed class GraphMetaStore
                     && again.OrderVersion == hdr.OrderVersion)
                     return store;
             }
+            catch (InvalidDataException)
+            {
+                // The files don't hold what the header names: torn by a crash, or swapped by a
+                // reset mid-open. DiscardIfTorn tells the two apart under the writer lock.
+                store?.Dispose();
+                DiscardIfTorn(repoPath, includeRemoteBranches);
+                return null;
+            }
             catch
             {
                 // fall through: the files or the header moved under this open
@@ -140,6 +148,43 @@ internal sealed class GraphMetaStore
             store?.Dispose();
         }
         return null;
+    }
+
+    /// <summary>
+    /// Deletes the store when its files do not hold what its header names (see
+    /// <see cref="DiskCommitStore"/>'s open checks): a header that survived a crash its data did
+    /// not. Checked again under the repo's writer lock, where no append or reset is in flight, so
+    /// a reader that only raced a rewrite never deletes a good store. The next walk re-spills
+    /// from row 0. Returns whether the store was deleted.
+    /// </summary>
+    internal static bool DiscardIfTorn(string repoPath, bool includeRemoteBranches)
+    {
+        lock (GraphCacheLocks.For(repoPath))
+        {
+            Header? hdr;
+            try { hdr = ReadHeader(repoPath); }
+            catch { return false; }
+            if (hdr is null || hdr.Version != Version || hdr.IncludeRemoteBranches != includeRemoteBranches
+                || hdr.WalkEngine != GraphWalkCache.CliWalkMarker)
+                return false;
+            try
+            {
+                using var store = DiskCommitStore.Open(
+                    repoPath, hdr.RowCount, hdr.RecordCount, hdr.OrderVersion, hdr.HashSize, hdr.Generation);
+                return false;
+            }
+            catch (Exception ex) when (ex is InvalidDataException or FileNotFoundException)
+            {
+                // Torn: reset below.
+            }
+            catch
+            {
+                return false;
+            }
+            var discarded = new GraphMetaWriter(repoPath, hdr.Fingerprint, includeRemoteBranches).Reset();
+            Diagnostics.PerfLog.Mark($"graph cache discarded a torn store ({repoPath}): {(discarded ? "deleted" : "delete blocked")}");
+            return discarded;
+        }
     }
 
     private static Header? ReadHeader(string repoPath)

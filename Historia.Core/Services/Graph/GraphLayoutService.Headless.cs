@@ -411,8 +411,18 @@ public sealed partial class GraphLayoutService
         Diagnostics.PerfLog.Memory($"reorder start ({repoPath})");
 
         GraphMetaReorderBuilder builder;
-        using (var oldStore = DiskCommitStore.Open(repoPath, oldProbe.RowCount, oldProbe.RecordCount, oldProbe.OrderVersion))
+        try
+        {
+            using var oldStore = DiskCommitStore.Open(repoPath, oldProbe.RowCount, oldProbe.RecordCount, oldProbe.OrderVersion);
             builder = new GraphMetaReorderBuilder(oldStore.BuildShaIndex(), oldStore.RecordCount);
+        }
+        catch (InvalidDataException)
+        {
+            // A torn old store has no records worth reusing: drop it and spool afresh.
+            if (GraphMetaStore.DiscardIfTorn(repoPath, query.IncludeRemoteBranches))
+                await RunHeadlessSpoolAsync(context, query, sortedTips, newWalkKey, ct).ConfigureAwait(false);
+            return;
+        }
 
         var writer = new GraphMetaWriter(repoPath, newWalkKey, query.IncludeRemoteBranches);
         // Committed to the probed walk: the order is written under newWalkKey with sortedTips, so

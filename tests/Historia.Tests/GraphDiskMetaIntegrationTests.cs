@@ -82,6 +82,30 @@ public sealed class GraphDiskMetaIntegrationTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Relaunch_over_a_torn_store_rewalks_the_full_history()
+    {
+        var svc = await DiskBackedServiceAsync();
+        await using (var ctx = _host.Open(_repo.Path))
+        {
+            var first = await svc.ComputeLayoutAsync(ctx, new GraphQuery { RefScope = GraphRefScope.AllRefs });
+            Assert.Equal(CommitCount, first.Layout.RowCount);
+            Assert.True(GraphMetaStore.ProbeExisting(_repo.Path, includeRemoteBranches: true) is { Ok: true, Exhausted: true });
+            svc.Forget(ctx);
+        }
+
+        // A crash kept the header but lost the tail of the index.
+        using (var idx = new FileStream(GraphCachePaths.File(_repo.Path, GraphMetaStore.IdxExt), FileMode.Open, FileAccess.Write))
+            idx.SetLength((CommitCount - 10) * 8);
+
+        var relaunched = new GraphLayoutService(_host.Settings, _host.Locator);
+        await using var ctx2 = _host.Open(_repo.Path);
+        var result = await relaunched.ComputeLayoutAsync(ctx2, new GraphQuery { RefScope = GraphRefScope.AllRefs });
+        Assert.Equal(CommitCount, result.Layout.RowCount);
+        Assert.Equal("commit 00", result.Layout.Commits[CommitCount - 1].MessageShort);
+        relaunched.Forget(ctx2);
+    }
+
+    [Fact]
     public async Task Search_over_the_disk_store_finds_message_and_sha()
     {
         var svc = await DiskBackedServiceAsync();
