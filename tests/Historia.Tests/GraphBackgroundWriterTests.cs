@@ -21,7 +21,20 @@ public sealed class GraphBackgroundWriterTests : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _repo.Dispose();
+        foreach (var other in _others)
+            other.Dispose();
         await _host.DisposeAsync();
+    }
+
+    private readonly List<TestRepositoryBuilder> _others = [];
+
+    /// <summary>A tab on a repository of its own. Inactive jobs are tracked by on-disk store, and
+    /// two tabs on one path share a store, so tests of distinct tabs need distinct paths.</summary>
+    private RepositoryContext OpenOtherTab()
+    {
+        var repo = TestRepositoryBuilder.FromTemplate("seed-1", b => b.WriteFile("f.txt", "1\n").Stage().Commit("c1"));
+        _others.Add(repo);
+        return _host.Open(repo.Path);
     }
 
     private void WriteStubGraph()
@@ -227,10 +240,10 @@ public sealed class GraphBackgroundWriterTests : IAsyncDisposable
     public async Task EnqueueInactiveTab_runs_jobs_one_at_a_time_in_enqueue_order()
     {
         var writer = new GraphBackgroundWriter(new RecordingGitCliService());
-        // Two distinct contexts — EnqueueInactiveTab de-dupes by context, so
-        // this ordering test must not enqueue the same context twice.
+        // Two distinct stores — EnqueueInactiveTab de-dupes by store, so
+        // this ordering test must not enqueue the same store twice.
         await using var ctx1 = _host.Open(_repo.Path);
-        await using var ctx2 = _host.Open(_repo.Path);
+        await using var ctx2 = OpenOtherTab();
 
         var order = new List<int>();
         var sync = new object();
@@ -266,9 +279,9 @@ public sealed class GraphBackgroundWriterTests : IAsyncDisposable
     public async Task EnqueueInactiveTab_one_jobs_failure_does_not_stall_the_rest()
     {
         var writer = new GraphBackgroundWriter(new RecordingGitCliService());
-        // Two distinct contexts — see the ordering test above for why.
+        // Two distinct stores — see the ordering test above for why.
         await using var ctx1 = _host.Open(_repo.Path);
-        await using var ctx2 = _host.Open(_repo.Path);
+        await using var ctx2 = OpenOtherTab();
 
         var secondRan = new TaskCompletionSource();
         writer.EnqueueInactiveTab(ctx1, _ => throw new InvalidOperationException("boom"));
@@ -299,7 +312,7 @@ public sealed class GraphBackgroundWriterTests : IAsyncDisposable
     {
         var writer = new GraphBackgroundWriter(new RecordingGitCliService());
         await using var ctxA = _host.Open(_repo.Path);
-        await using var ctxB = _host.Open(_repo.Path);
+        await using var ctxB = OpenOtherTab();
 
         var blockA = new TaskCompletionSource();
         writer.EnqueueInactiveTab(ctxA, async ct => await blockA.Task.WaitAsync(ct));
@@ -395,7 +408,7 @@ public sealed class GraphBackgroundWriterTests : IAsyncDisposable
         var gate = new FocusTrackingGate();
         var writer = new GraphBackgroundWriter(new RecordingGitCliService(), gate);
         await using var focused = _host.Open(_repo.Path);
-        await using var other = _host.Open(_repo.Path);
+        await using var other = OpenOtherTab();
         gate.Focused = focused;
         gate.Open();
 
@@ -435,8 +448,8 @@ public sealed class GraphBackgroundWriterTests : IAsyncDisposable
     {
         var writer = new GraphBackgroundWriter(new RecordingGitCliService());
         await using var running = _host.Open(_repo.Path);
-        await using var queued = _host.Open(_repo.Path);
-        await using var after = _host.Open(_repo.Path);
+        await using var queued = OpenOtherTab();
+        await using var after = OpenOtherTab();
 
         var started = new TaskCompletionSource();
         var release = new TaskCompletionSource();
