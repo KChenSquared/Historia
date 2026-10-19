@@ -139,10 +139,12 @@ internal sealed class GraphMetaStore
             catch (InvalidDataException)
             {
                 // The files don't hold what the header names: torn by a crash, or swapped by a
-                // reset mid-open. DiscardIfTorn tells the two apart under the writer lock.
+                // reset mid-open. DiscardIfTorn tells the two apart under the writer lock; a store
+                // it leaves in place only raced a rewrite, so the next attempt reads it afresh.
                 store?.Dispose();
-                DiscardIfTorn(repoPath, includeRemoteBranches);
-                return null;
+                if (DiscardIfTorn(repoPath, includeRemoteBranches))
+                    return null;
+                continue;
             }
             catch
             {

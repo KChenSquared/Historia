@@ -104,4 +104,17 @@ public sealed class GraphMetaTornStoreTests : IDisposable
         using var store = GraphMetaStore.TryOpen(Repo, WalkKey, includeRemoteBranches: true, wantCount: Rows);
         Assert.NotNull(store);
     }
+
+    [Fact]
+    public void A_last_record_longer_than_the_read_window_opens()
+    {
+        var rows = Enumerable.Range(0, Rows).Select(Commit).ToList();
+        var last = rows[^1];
+        rows[^1] = last with { Metadata = last.Metadata with { MessageShort = new string('m', 100_000) } };
+        new GraphMetaWriter(Repo, WalkKey, includeRemoteBranches: true).AppendSpillBatch(rows, from: 0, to: Rows, exhausted: true);
+
+        using var store = GraphMetaStore.TryOpen(Repo, WalkKey, includeRemoteBranches: true, wantCount: Rows);
+        Assert.NotNull(store);
+        Assert.Equal(Rows, store.Count);
+    }
 }

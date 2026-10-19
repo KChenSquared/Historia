@@ -186,20 +186,36 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
 
     /// <summary>Whether the last record holds real bytes. A crash can leave the tail of
     /// <c>.dat</c> zero-filled, which decodes without error as a commit with a zero id and a
-    /// zero timestamp.</summary>
+    /// zero timestamp. Reads a bounded window from the record's start, since <c>.dat</c> past it can
+    /// hold a batch appended but not yet committed; only a record longer than the window reads the
+    /// rest.</summary>
     private bool LastRecordIsReal()
     {
+        const int Window = 64 * 1024;
         if (_offsets.Length == 0)
             return true;
         var start = _offsets[^1];
-        var len = (int)Math.Min(_datLength - start, int.MaxValue);
-        if (len <= 0)
+        var tail = _datLength - start;
+        if (tail <= 0)
             return false;
+        CommitMetadata last;
+        try
+        {
+            last = DecodeTail(start, (int)Math.Min(tail, Window));
+        }
+        catch (InvalidDataException) when (tail > Window)
+        {
+            last = DecodeTail(start, (int)Math.Min(tail, int.MaxValue));
+        }
+        return !(last.Id.IsZero && last.CommitWhen.UtcTicks == 0);
+    }
+
+    private CommitMetadata DecodeTail(long start, int len)
+    {
         var buf = new byte[len];
         if (RandomAccess.Read(_dat, buf, start) < len)
-            return false;
-        var last = DecodeFrom(buf, _hashSize).Meta;
-        return !(last.Id.IsZero && last.CommitWhen.UtcTicks == 0);
+            throw new InvalidDataException("graph meta store is torn: .dat ends before its last record");
+        return DecodeFrom(buf, _hashSize).Meta;
     }
 
     private static int[] ReadOrder(string orderPath, int rowCount)
