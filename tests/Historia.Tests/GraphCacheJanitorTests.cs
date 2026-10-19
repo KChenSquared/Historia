@@ -78,6 +78,19 @@ public sealed class GraphCacheJanitorTests : IDisposable
     }
 
     [Fact]
+    public void The_most_recently_used_store_is_kept_when_open_stores_fill_the_caps()
+    {
+        MakeStore(0, daysAgo: 5, bytes: 500); // open
+        MakeStore(1, daysAgo: 1, bytes: 10);
+        MakeStore(2, daysAgo: 2, bytes: 10);
+
+        GraphCacheJanitor.Sweep([RepoPath(0)], metaFromDisk: true, Now, maxStores: 1, maxTotalBytes: 100);
+
+        Assert.True(StoreExists(0) && StoreExists(1));
+        Assert.False(StoreExists(2));
+    }
+
+    [Fact]
     public void Old_temp_files_and_retired_files_are_swept_and_fresh_temp_files_are_kept()
     {
         MakeStore(0, daysAgo: 0);

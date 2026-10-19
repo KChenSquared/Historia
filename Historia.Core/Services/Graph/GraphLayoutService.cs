@@ -215,13 +215,21 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
     {
         if (Interlocked.Exchange(ref _diskCacheSwept, 1) != 0)
             return;
-        string[] keep = [.. openRepositoryPaths];
+        string[] open = [.. openRepositoryPaths];
         var metaFromDisk = _metaFromDisk;
         _ = Task.Run(async () =>
         {
             await WaitForGateAsync(CancellationToken.None).ConfigureAwait(false);
             try
             {
+                // A tab opened while this waited for the gate has a cache by the time the gate
+                // opens, so its store is kept too.
+                var keep = new HashSet<string>(open, StringComparer.Ordinal);
+                lock (_sync)
+                {
+                    foreach (var (context, _) in _caches)
+                        keep.Add(context.RepositoryPath);
+                }
                 var swept = GraphCacheJanitor.Sweep(keep, metaFromDisk, DateTime.UtcNow);
                 Diagnostics.PerfLog.Mark(
                     $"graph cache sweep: {swept.StoresEvicted} stores evicted, {swept.FilesDeleted} files, {swept.BytesFreed / 1_000_000.0:0.0}MB freed");

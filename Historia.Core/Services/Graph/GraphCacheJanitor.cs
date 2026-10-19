@@ -83,13 +83,16 @@ internal static class GraphCacheJanitor
             .ThenByDescending(s => s.LastUsed);
         var keptStores = 0;
         var keptBytes = 0L;
+        var keptMostRecent = false;
         foreach (var s in ranked)
         {
-            var fits = keptStores == 0 || (keptStores < maxStores && keptBytes + s.Bytes <= maxTotalBytes);
+            // Open stores rank first; the first store after them is the most recently used one.
+            var fits = !keptMostRecent || (keptStores < maxStores && keptBytes + s.Bytes <= maxTotalBytes);
             if (s.Kept || (metaFromDisk && fits))
             {
                 keptStores++;
                 keptBytes += s.Bytes;
+                keptMostRecent |= !s.Kept;
                 continue;
             }
             var freed = Evict(dir, s.Stem);
