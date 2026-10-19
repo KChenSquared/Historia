@@ -11,6 +11,11 @@ internal static class GraphCachePaths
 
     public static string Stem(string repoPath) => Stems.GetOrAdd(repoPath, static p => HashStem(StoreRoot(p)));
 
+    /// <summary>Drops <paramref name="repoPath"/>'s cached stem so the next <see cref="Stem"/>
+    /// resolves its store root again. Called when a tab opens: the path may have become, or
+    /// stopped being, a linked worktree since the stem was cached.</summary>
+    public static void Forget(string repoPath) => Stems.TryRemove(repoPath, out _);
+
     public static string File(string repoPath, string ext)
         => Path.Combine(AppPaths.CacheDirectory, Stem(repoPath) + ext);
 

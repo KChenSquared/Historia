@@ -118,6 +118,39 @@ public sealed class GraphWorktreeStoreTests : IAsyncDisposable
         Assert.False(ran);
     }
 
+    [Fact]
+    public async Task A_sibling_folded_into_a_closed_tabs_job_is_queued_in_its_place()
+    {
+        var gate = new FocusGate(); // closed: the first job stays queued
+        var writer = new GraphBackgroundWriter(new RecordingGitCliService(), gate);
+        var main = _host.Open(_main.Path);
+        await using var wt = _host.Open(_worktree);
+
+        var mainRan = false;
+        var wtRan = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        writer.EnqueueInactiveTab(main, _ => { mainRan = true; return Task.CompletedTask; });
+        writer.EnqueueInactiveTab(wt, _ => { wtRan.TrySetResult(); return Task.CompletedTask; });
+
+        await main.DisposeAsync();
+        gate.Open();
+
+        await wtRan.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(mainRan);
+    }
+
+    [Fact]
+    public void A_path_that_stops_being_a_linked_worktree_gets_its_own_store_once_forgotten()
+    {
+        Assert.Equal(GraphCachePaths.Stem(_main.Path), GraphCachePaths.Stem(_worktree));
+
+        // The worktree directory is reused for a standalone repository.
+        File.Delete(Path.Combine(_worktree, ".git"));
+        Directory.CreateDirectory(Path.Combine(_worktree, ".git"));
+        GraphCachePaths.Forget(_worktree);
+
+        Assert.NotEqual(GraphCachePaths.Stem(_main.Path), GraphCachePaths.Stem(_worktree));
+    }
+
     private sealed class FocusGate : IBackgroundWorkGate
     {
         private readonly TaskCompletionSource _tcs = new();
