@@ -134,6 +134,7 @@ public sealed class RepositoryContext : IAsyncDisposable
         GitDirectory = discovered.GitDirectory;
         RepositoryPath = discovered.RepositoryPath;
         DisplayName = DeriveDisplayName(RepositoryPath, GitDirectory);
+        GraphCachePaths.Forget(RepositoryPath);
 
         CommitGraph = new CommitGraphIndex(Path.Combine(RefStateToken.ResolveCommonDir(GitDirectory), "objects"));
 

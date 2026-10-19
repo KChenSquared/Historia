@@ -152,7 +152,10 @@ public sealed class RefSnapshotProvider
                 ? await ResolveHeadWithCliAsync().ConfigureAwait(false)
                 : ResolveHeadFromFile(state, refs);
 
-            var snapshot = new RefSnapshot(refs, state.Token, headSymref, headTarget);
+            var snapshot = new RefSnapshot(refs, state.Token, headSymref, headTarget)
+            {
+                HistoryShape = RefStateToken.HistoryShape(_gitDir),
+            };
 
             lock (_sync)
             {

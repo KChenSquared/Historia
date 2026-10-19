@@ -42,8 +42,9 @@ namespace Historia.Services.Graph;
 /// write that hasn't begun, but never kills one already running.
 /// </para>
 /// <para>
-/// The inactive-tab queue (<see cref="EnqueueInactiveTab"/>) de-dupes by context: a
-/// context already queued and not yet running is not queued a second time. It also runs behind
+/// The inactive-tab queue (<see cref="EnqueueInactiveTab"/>) de-dupes by on-disk store: a
+/// store already queued and not yet running is not queued a second time, and linked worktrees
+/// that share a store share its job. It also runs behind
 /// its own serializer, <see cref="_headlessSerial"/>, separate from <see cref="_serial"/> — a long
 /// headless walk (pure C#, no git process) never makes a below-normal commit-graph write wait
 /// behind it. <see cref="_serial"/> is reserved for the commit-graph check and its
@@ -91,19 +92,34 @@ internal sealed class GraphBackgroundWriter(IGitCliService cli, IBackgroundWorkG
 
     private readonly Queue<(RepositoryContext Context, Func<CancellationToken, Task> Work, CancellationTokenSource Cts, TaskCompletionSource Done)> _inactiveQueue = new();
 
-    // Contexts currently queued (enqueued but not yet dequeued for running) — backs the
-    // de-duplication in EnqueueInactiveTab. A context is removed from this set the
-    // moment its job is dequeued, so a fresh EnqueueInactiveTab call for the same context while
-    // its previous job is actually running queues a new run rather than being dropped.
-    private readonly HashSet<string> _queuedContextIds = new(StringComparer.Ordinal);
+    // Inactive jobs are tracked by the on-disk store they write, not by tab: linked worktrees of
+    // one repository share a store (GraphCachePaths.StoreRoot), so one job serves them all, and
+    // any of those tabs is a second writer to a sibling's job.
+    private static string StoreKey(RepositoryContext context) => GraphCachePaths.Stem(context.RepositoryPath);
+
+    private static bool SameStore(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+
+    // Stores currently queued (enqueued but not yet dequeued for running), each with the tab and
+    // cancellation source of its queued job — backs the de-duplication in EnqueueInactiveTab. A
+    // store is removed from this map the moment its job is dequeued, so a fresh
+    // EnqueueInactiveTab call for the same store while its previous job is actually running
+    // queues a new run rather than being dropped.
+    private readonly Dictionary<string, (RepositoryContext Context, CancellationTokenSource Cts)> _queuedStores =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    // Sibling worktrees whose call was de-duplicated into another tab's queued job, keyed by that
+    // job's cancellation source. The job is cancelled with its own tab's Lifetime, so when it ends
+    // that way the first sibling still open is queued in its place. Dropped when the job ends any
+    // other way, and by CancelInactiveTabAsync (the focused tab then writes the store).
+    private readonly Dictionary<CancellationTokenSource, List<(RepositoryContext Context, Func<CancellationToken, Task> Work)>> _standbys = new();
 
     // Every queued or currently-running inactive job's own
-    // cancellation source and completion signal, keyed by context id. A context can briefly have
+    // cancellation source and completion signal, keyed by store. A store can briefly have
     // two entries at once — one finishing its run while a fresh call (the "queued" dedupe doesn't
-    // apply to a running job) queues another — so each context id maps to a list; a job removes
+    // apply to a running job) queues another — so each store maps to a list; a job removes
     // its own entry when it exits (cancelled, failed, or finished), never anyone else's.
     private readonly Dictionary<string, List<(CancellationTokenSource Cts, TaskCompletionSource Done)>> _inactiveJobs =
-        new(StringComparer.Ordinal);
+        new(StringComparer.OrdinalIgnoreCase);
     private bool _pumping;
 
     /// <summary>
@@ -113,28 +129,45 @@ internal sealed class GraphBackgroundWriter(IGitCliService cli, IBackgroundWorkG
     /// to "focus arrived") stops it at its own next checkpoint; one job failing or being
     /// cancelled never stalls the rest of the queue.
     /// <para>
-    /// De-duplicated: a context that is already queued and not yet running is not
+    /// De-duplicated by store: a store that is already queued and not yet running is not
     /// queued again — a repeated focus-change churn that re-enqueues every inactive tab on every
-    /// switch does not pile up redundant jobs for the same context. A context whose job is
-    /// currently <i>running</i> is not "queued", so a fresh call for it queues a new run.
+    /// switch does not pile up redundant jobs, and sibling worktrees share one. A store whose job
+    /// is currently <i>running</i> is not "queued", so a fresh call for it queues a new run. A tab
+    /// whose store the focused tab writes is not queued at all: the focused tab's own spill is
+    /// that store's writer. A sibling folded into another tab's job stands by: if that tab closes
+    /// before its job finishes, the sibling is queued in its place.
     /// </para>
     /// </summary>
     public void EnqueueInactiveTab(RepositoryContext context, Func<CancellationToken, Task> headlessWork)
     {
+        var store = StoreKey(context);
+        if (gate?.Focused is { } focused && SameStore(StoreKey(focused), store))
+            return;
         lock (_sync)
         {
-            if (!_queuedContextIds.Add(context.Id))
-                return; // already queued and not yet running — de-dupe.
+            if (_queuedStores.TryGetValue(store, out var queued))
+            {
+                // Already queued and not yet running — de-dupe, keeping a sibling on standby.
+                if (!ReferenceEquals(queued.Context, context))
+                {
+                    if (!_standbys.TryGetValue(queued.Cts, out var standbys))
+                        _standbys[queued.Cts] = standbys = [];
+                    if (!standbys.Exists(s => ReferenceEquals(s.Context, context)))
+                        standbys.Add((context, headlessWork));
+                }
+                return;
+            }
 
             // This job's own cancellation is linked to the context's Lifetime (a tab
             // close still stops it) AND to CancelInactiveTabAsync below (focus arriving stops it
             // too) — neither owns the other; either can fire independently.
             var cts = CancellationTokenSource.CreateLinkedTokenSource(context.Lifetime);
             var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!_inactiveJobs.TryGetValue(context.Id, out var jobs))
-                _inactiveJobs[context.Id] = jobs = [];
+            if (!_inactiveJobs.TryGetValue(store, out var jobs))
+                _inactiveJobs[store] = jobs = [];
             jobs.Add((cts, done));
 
+            _queuedStores[store] = (context, cts);
             _inactiveQueue.Enqueue((context, headlessWork, cts, done));
             if (!_pumping)
             {
@@ -144,18 +177,19 @@ internal sealed class GraphBackgroundWriter(IGitCliService cli, IBackgroundWorkG
         }
     }
 
-    /// <summary>True while an inactive-tab job for <paramref name="context"/> is queued or
-    /// running.</summary>
+    /// <summary>True while an inactive-tab job for <paramref name="context"/>'s store is queued or
+    /// running — its own, or a sibling worktree's.</summary>
     internal bool HasInactiveJob(RepositoryContext context)
     {
+        var store = StoreKey(context);
         lock (_sync)
-            return _inactiveJobs.TryGetValue(context.Id, out var jobs) && jobs.Count > 0;
+            return _inactiveJobs.TryGetValue(store, out var jobs) && jobs.Count > 0;
     }
 
-    /// <summary>Cancels <paramref name="context"/>'s queued or running inactive job(s)
-    /// and returns a task that completes once every one of them has actually exited. A job that
-    /// has not started yet is dropped from the queue at once. A no-op (a completed task) if there
-    /// is none.</summary>
+    /// <summary>Cancels the queued or running inactive job(s) for <paramref name="context"/>'s
+    /// store, a sibling worktree's included, and returns a task that completes once every one of
+    /// them has actually exited. A job that has not started yet is dropped from the queue at once.
+    /// A no-op (a completed task) if there is none.</summary>
     public Task CancelInactiveTabAsync(RepositoryContext context)
     {
         // Trap: a cancelled job left in the queue stays there until the drain loop reaches it,
@@ -165,18 +199,21 @@ internal sealed class GraphBackgroundWriter(IGitCliService cli, IBackgroundWorkG
         // Dropping it here is safe: it never started, so it holds nothing.
         List<(RepositoryContext Context, Func<CancellationToken, Task> Work, CancellationTokenSource Cts, TaskCompletionSource Done)> dropped = [];
         (CancellationTokenSource Cts, TaskCompletionSource Done)[] running;
+        var store = StoreKey(context);
         lock (_sync)
         {
-            if (!_inactiveJobs.TryGetValue(context.Id, out var jobs) || jobs.Count == 0)
+            if (!_inactiveJobs.TryGetValue(store, out var jobs) || jobs.Count == 0)
                 return Task.CompletedTask;
+            foreach (var job in jobs)
+                _standbys.Remove(job.Cts);
 
-            if (_queuedContextIds.Remove(context.Id))
+            if (_queuedStores.Remove(store))
             {
                 var queued = _inactiveQueue.ToArray();
                 _inactiveQueue.Clear();
                 foreach (var item in queued)
                 {
-                    if (item.Context.Id == context.Id)
+                    if (SameStore(StoreKey(item.Context), store))
                         dropped.Add(item);
                     else
                         _inactiveQueue.Enqueue(item);
@@ -189,7 +226,7 @@ internal sealed class GraphBackgroundWriter(IGitCliService cli, IBackgroundWorkG
             // from the live list under _sync as soon as it exits.
             running = [.. jobs];
             if (jobs.Count == 0)
-                _inactiveJobs.Remove(context.Id);
+                _inactiveJobs.Remove(store);
         }
 
         foreach (var item in dropped)
@@ -211,9 +248,10 @@ internal sealed class GraphBackgroundWriter(IGitCliService cli, IBackgroundWorkG
             {
                 if (_inactiveQueue.Count == 0) { _pumping = false; return; }
                 item = _inactiveQueue.Dequeue();
-                _queuedContextIds.Remove(item.Value.Context.Id);
+                _queuedStores.Remove(StoreKey(item.Value.Context));
             }
             var (context, work, cts, done) = item.Value;
+            var store = StoreKey(context);
             try
             {
                 if (gate is not null)
@@ -225,9 +263,10 @@ internal sealed class GraphBackgroundWriter(IGitCliService cli, IBackgroundWorkG
                 try
                 {
                     // Focus only requests this job's cancellation, and a job can be queued after
-                    // that request ran, so the tab may have gained focus while the job waited. The
-                    // focused tab's own foreground spill is the one writer for its store.
-                    if (ReferenceEquals(gate?.Focused, context))
+                    // that request ran, so the tab (or a sibling worktree sharing its store) may
+                    // have gained focus while the job waited. The focused tab's own foreground
+                    // spill is the one writer for its store.
+                    if (gate?.Focused is { } focused && SameStore(StoreKey(focused), store))
                         Diagnostics.PerfLog.Mark($"headless cache skipped: tab is focused ({context.DisplayName})");
                     else
                         await work(cts.Token).ConfigureAwait(false);
@@ -244,17 +283,27 @@ internal sealed class GraphBackgroundWriter(IGitCliService cli, IBackgroundWorkG
             }
             finally
             {
+                List<(RepositoryContext Context, Func<CancellationToken, Task> Work)>? standbys = null;
                 lock (_sync)
                 {
-                    if (_inactiveJobs.TryGetValue(context.Id, out var jobs))
+                    if (_inactiveJobs.TryGetValue(store, out var jobs))
                     {
                         jobs.RemoveAll(j => ReferenceEquals(j.Cts, cts));
                         if (jobs.Count == 0)
-                            _inactiveJobs.Remove(context.Id);
+                            _inactiveJobs.Remove(store);
                     }
+                    if (_standbys.Remove(cts, out var waiting) && context.Lifetime.IsCancellationRequested)
+                        standbys = waiting;
                 }
                 done.TrySetResult();
                 try { cts.Dispose(); } catch { /* best effort */ }
+
+                // This job's tab closed before it finished: hand the store to a sibling still open.
+                foreach (var (sibling, siblingWork) in standbys ?? [])
+                {
+                    if (!sibling.Lifetime.IsCancellationRequested)
+                        EnqueueInactiveTab(sibling, siblingWork);
+                }
             }
         }
     }

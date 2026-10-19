@@ -384,16 +384,19 @@ public sealed partial class GraphLayoutService
 
     /// <summary>The disk-cache / live-walk-resume identity key — a hash of the
     /// SORTED tip SHAs the walk actually reads (stash tips included when the query includes
-    /// stashes), the remote-branch flag and, only when set, the path filter. Unlike <see
-    /// cref="ComputeFingerprint"/> it does not depend on HEAD or on any ref outside the walk's
-    /// tips, so a checkout, a stash outside the walk, a branch rename, or `pack-refs`/`gc` leaves
-    /// it unchanged as long as the tip set is the same. The path is fed only when non-empty, so a
-    /// filtered walk can never be resumed as the unfiltered one (or another path's) while every
-    /// unfiltered key — and so every existing on-disk store — stays as it is.
+    /// stashes), the remote-branch flag and, only when set, the path filter and the repository's
+    /// history shape (<see cref="RefSnapshot.HistoryShape"/>: its shallow boundary and grafts).
+    /// Unlike <see cref="ComputeFingerprint"/> it does not depend on HEAD or on any ref outside
+    /// the walk's tips, so a checkout, a stash outside the walk, a branch rename, or
+    /// `pack-refs`/`gc` leaves it unchanged as long as the tip set is the same. The same tips walk
+    /// a different history once a shallow clone is deepened, so the shape is part of the key. The
+    /// path and the shape are fed only when non-empty, so a filtered walk can never be resumed as
+    /// the unfiltered one (or another path's) while every unfiltered key of a full clone — and so
+    /// every existing on-disk store — stays as it is.
     /// <paramref name="sortedTips"/> must already be ordinally sorted (<see cref="ResolveTipShas"/>
     /// guarantees this) — the hash itself doesn't re-sort, so a caller feeding an unsorted list
     /// would silently defeat the point.</summary>
-    private static long ComputeWalkKey(IReadOnlyList<string> sortedTips, GraphQuery query)
+    private static long ComputeWalkKey(IReadOnlyList<string> sortedTips, GraphQuery query, string historyShape)
     {
         var h = StableHash.Fnv64OffsetBasis;
         void Feed(string s) => h = StableHash.Fnv1a64Step(h, s);
@@ -402,6 +405,8 @@ public sealed partial class GraphLayoutService
         Feed(query.IncludeRemoteBranches ? "R1" : "R0");
         if (!string.IsNullOrEmpty(query.PathFilter))
             Feed("P:" + query.PathFilter);
+        if (historyShape.Length > 0)
+            Feed("H:" + historyShape);
         return unchecked((long)h);
     }
 
@@ -900,7 +905,7 @@ public sealed partial class GraphLayoutService
         CountRefScan(repositoryPath);
         var fp = ComputeFingerprint(snapshot, query);
         var tips = ResolveTipShas(snapshot, query);
-        return (fp, tips, ComputeWalkKey(tips, query));
+        return (fp, tips, ComputeWalkKey(tips, query, snapshot.HistoryShape));
     }
 
     /// <summary>The current ref state for <paramref name="query"/> (the
@@ -924,7 +929,7 @@ public sealed partial class GraphLayoutService
     /// <summary>
     /// Stable (cross-process) fingerprint of everything that changes the walk output or its
     /// badges: every ref's name + target (a symbolic ref's target ref name), where HEAD points
-    /// and what it resolves to, and the query knobs (scope, remote-branch inclusion,
+    /// and what it resolves to, the history shape when there is one, and the query knobs (scope, remote-branch inclusion,
     /// path filter, and selected refs).
     /// FNV-1a over ordinally sorted input, so it does not depend on ref enumeration order or
     /// per-process <see cref="string.GetHashCode()"/> randomisation. In-memory only — the disk
@@ -944,6 +949,8 @@ public sealed partial class GraphLayoutService
         Feed("HEAD");
         Feed(snapshot.HeadSymref ?? "");
         Feed(snapshot.HeadTarget?.ToString() ?? "");
+        if (snapshot.HistoryShape.Length > 0)
+            Feed("history:" + snapshot.HistoryShape);
 
         Feed("query");
         Feed(query.RefScope.ToString());

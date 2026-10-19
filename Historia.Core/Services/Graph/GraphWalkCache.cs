@@ -342,11 +342,6 @@ internal sealed class GraphWalkCache
                          .OrderByDescending(f => f.LastWriteTimeUtc)
                          .Skip(MaxFiles))
                 f.Delete();
-
-            // Orphaned temp files from an interrupted write.
-            foreach (var f in dir.GetFiles("*.tmp"))
-                if (DateTime.UtcNow - f.LastWriteTimeUtc > TimeSpan.FromHours(1))
-                    f.Delete();
         }
         catch { }
     }

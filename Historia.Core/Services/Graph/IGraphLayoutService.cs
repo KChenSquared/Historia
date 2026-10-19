@@ -108,6 +108,15 @@ public interface IGraphLayoutService
     void RefreshCommitGraphAfterFetch(RepositoryContext context);
 
     /// <summary>
+    /// Bounds the graph files in the cache directory, once per launch: deletes orphaned temp and
+    /// retired files and the files of the metadata mode that is off, and evicts the least recently
+    /// used <c>.meta</c> stores past the store-count and total-size caps. Never evicts the stores
+    /// of <paramref name="openRepositoryPaths"/>. Runs off the caller's thread behind the
+    /// background-work gate; later calls are no-ops.
+    /// </summary>
+    void SweepDiskCache(IReadOnlyCollection<string> openRepositoryPaths);
+
+    /// <summary>
     /// Pre-caches a newly cloned repository's commit-graph and layout cache before its tab is
     /// opened. Runs ahead of the background-work gate. Writes the commit-graph first,
     /// then spools the full history walk to disk. Progress reports the commit-graph phase and then

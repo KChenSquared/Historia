@@ -103,7 +103,7 @@ public sealed class GraphRefSnapshotTests : IAsyncDisposable
 
         Assert.NotEmpty(expected);
         Assert.Equal(expected, tips);
-        Assert.Equal((long)computeWalkKey.Invoke(null, [expected, query])!, walkKey);
+        Assert.Equal((long)computeWalkKey.Invoke(null, [expected, query, ""])!, walkKey);
     }
 
     private static async Task<TaskCompletionSource> HoldRepoGateAsync(RepositoryContext ctx)

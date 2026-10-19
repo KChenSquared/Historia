@@ -135,8 +135,15 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
                 var orderPath = GraphMetaStore.OrderFile(repoPath, orderVersion);
                 order = ReadOrder(orderPath, rowCount);
             }
+            ValidateCoverage(offsets, len, order, rowCount, recordCount);
             var count = order is not null ? Math.Min(rowCount, order.Length) : Math.Min(rowCount, offsets.Length);
-            return new DiskCommitStore(dat, idx, search, offsets, len, count, order, orderVersion, generation ?? "", hashSize);
+            var store = new DiskCommitStore(dat, idx, search, offsets, len, count, order, orderVersion, generation ?? "", hashSize);
+            if (!store.LastRecordIsReal())
+            {
+                store.Dispose();
+                throw new InvalidDataException("graph meta store is torn: its last record is blank");
+            }
+            return store;
         }
         catch
         {
@@ -145,6 +152,70 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
             search?.Dispose();
             throw;
         }
+    }
+
+    /// <summary>Throws <see cref="InvalidDataException"/> when the files do not hold what the
+    /// header names: fewer offsets than records, offsets that do not climb through <c>.dat</c>,
+    /// or an order file shorter than the rows or naming a record that is not there. A header
+    /// renamed into place survives a crash that its unflushed data did not, and reading such a
+    /// store would serve blank rows as a complete history. The checks run over arrays already in
+    /// memory, about a millisecond per million records.</summary>
+    private static void ValidateCoverage(long[] offsets, long datLength, int[]? order, int rowCount, int recordCount)
+    {
+        if (offsets.Length < recordCount || (order is null && offsets.Length < rowCount))
+            throw new InvalidDataException("graph meta store is torn: .idx holds fewer records than its header names");
+        var previous = -1L;
+        foreach (var offset in offsets)
+        {
+            if (offset <= previous)
+                throw new InvalidDataException("graph meta store is torn: .idx offsets do not climb");
+            previous = offset;
+        }
+        if (offsets.Length > 0 && offsets[^1] >= datLength)
+            throw new InvalidDataException("graph meta store is torn: .dat ends before its last record");
+        if (order is null)
+            return;
+        if (order.Length < rowCount)
+            throw new InvalidDataException("graph meta store is torn: the order file is shorter than its rows");
+        foreach (var record in order)
+        {
+            if ((uint)record >= (uint)offsets.Length)
+                throw new InvalidDataException("graph meta store is torn: the order names a missing record");
+        }
+    }
+
+    /// <summary>Whether the last record holds real bytes. A crash can leave the tail of
+    /// <c>.dat</c> zero-filled, which decodes without error as a commit with a zero id and a
+    /// zero timestamp. Reads a bounded window from the record's start, since <c>.dat</c> past it can
+    /// hold a batch appended but not yet committed; only a record longer than the window reads the
+    /// rest.</summary>
+    private bool LastRecordIsReal()
+    {
+        const int Window = 64 * 1024;
+        if (_offsets.Length == 0)
+            return true;
+        var start = _offsets[^1];
+        var tail = _datLength - start;
+        if (tail <= 0)
+            return false;
+        CommitMetadata last;
+        try
+        {
+            last = DecodeTail(start, (int)Math.Min(tail, Window));
+        }
+        catch (InvalidDataException) when (tail > Window)
+        {
+            last = DecodeTail(start, (int)Math.Min(tail, int.MaxValue));
+        }
+        return !(last.Id.IsZero && last.CommitWhen.UtcTicks == 0);
+    }
+
+    private CommitMetadata DecodeTail(long start, int len)
+    {
+        var buf = new byte[len];
+        if (RandomAccess.Read(_dat, buf, start) < len)
+            throw new InvalidDataException("graph meta store is torn: .dat ends before its last record");
+        return DecodeFrom(buf, _hashSize).Meta;
     }
 
     private static int[] ReadOrder(string orderPath, int rowCount)

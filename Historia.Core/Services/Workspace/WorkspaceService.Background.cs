@@ -430,15 +430,20 @@ public sealed partial class WorkspaceService
                 return;
 
             List<RepositoryContext> targets;
+            string[] openPaths;
             lock (_sync)
             {
                 if (!ReferenceEquals(_focused, activeContext))
                     return; // focus moved again while this waited
                 targets = [.. _open.Where(c => !ReferenceEquals(c, activeContext))];
+                openPaths = [.. _open.Select(c => c.RepositoryPath)];
             }
 
             foreach (var context in targets)
                 graphSvc.EnqueueInactiveTabCaching(context, TabGraphQuery);
+
+            // Once per launch, after the first settled tab: the open tabs' stores are never evicted.
+            graphSvc.SweepDiskCache(openPaths);
         }
         catch (OperationCanceledException)
         {

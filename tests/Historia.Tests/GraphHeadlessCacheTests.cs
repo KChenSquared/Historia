@@ -404,6 +404,48 @@ public sealed class GraphHeadlessCacheTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Splice_rejects_a_tips_file_that_does_not_hash_to_the_store_key_and_the_reorder_stays_correct()
+    {
+        var locator = _host.Provider.GetRequiredService<IGitExecutableLocator>();
+        var cli = _host.Provider.GetRequiredService<IGitCliService>();
+        var svc = new GraphLayoutService(_host.Settings, locator, cli);
+        await _host.Settings.UpdateAsync(s => s with { GraphMetadataFromDisk = true, EnableGraphSplice = true });
+
+        GraphLayoutService.TestSpliceMinRowsOverride = CommitCount;
+        GraphLayoutService.TestSpliceFullWalkElapsedOverride = TimeSpan.FromMinutes(1);
+        var spliceCalls = 0;
+        GraphLayoutService.TestSpliceCommitted = (_, _) => spliceCalls++;
+        try
+        {
+            await using (var ctx = _host.Open(_repo.Path))
+                await svc.RunHeadlessCacheAsync(ctx, Q, CancellationToken.None);
+
+            // A tips file left behind by a failed write: it names main's parent, not the tip the
+            // order was built from. Diffing from it would add main's tip a second time.
+            var stale = GitObjectId.Parse(_repo.Git("rev-parse", "main~1").Trim());
+            File.WriteAllBytes(GraphCachePaths.File(_repo.Path, GraphMetaStore.TipsExt), stale.AsSpan().ToArray());
+
+            _repo.Checkout("feature", create: true);
+            _repo.WriteFile("f.txt", "feature 1\n").Stage().Commit("feature commit 1");
+            _repo.WriteFile("f.txt", "feature 2\n").Stage().Commit("feature commit 2");
+
+            await using (var ctx2 = _host.Open(_repo.Path))
+                await svc.RunHeadlessCacheAsync(ctx2, Q, CancellationToken.None);
+
+            Assert.Equal(0, spliceCalls);
+            var probe = GraphMetaStore.ProbeExisting(_repo.Path, includeRemoteBranches: true);
+            Assert.True(probe is { Ok: true, Exhausted: true });
+            Assert.Equal(CommitCount + 2, probe.RowCount);
+        }
+        finally
+        {
+            GraphLayoutService.TestSpliceMinRowsOverride = null;
+            GraphLayoutService.TestSpliceFullWalkElapsedOverride = null;
+            GraphLayoutService.TestSpliceCommitted = null;
+        }
+    }
+
+    [Fact]
     public async Task Splice_rejects_a_fetched_branch_older_than_the_trunk_and_the_reorder_matches_a_fresh_walk()
     {
         var locator = _host.Provider.GetRequiredService<IGitExecutableLocator>();

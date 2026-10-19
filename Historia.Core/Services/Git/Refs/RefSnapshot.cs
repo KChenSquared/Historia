@@ -64,6 +64,11 @@ public sealed class RefSnapshot
     /// <summary>The object HEAD resolves to; null when HEAD is unborn.</summary>
     public GitObjectId? HeadTarget { get; }
 
+    /// <summary><see cref="RefStateToken.HistoryShape"/> as read with this snapshot: <c>""</c>
+    /// unless the repository is shallow or has grafts. The same tips can reach a different history
+    /// when it changes, so the graph's walk key and fingerprint include it.</summary>
+    public string HistoryShape { get; init; } = "";
+
     public bool IsHeadDetached => HeadSymref is null && HeadTarget is not null;
 
     public bool IsHeadUnborn => HeadTarget is null;

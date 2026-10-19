@@ -527,10 +527,10 @@ internal sealed class GraphMetaWriter(string repoPath, long fingerprint, bool in
     }
 
     /// <summary>Writes the sorted tip SHAs the CURRENT order was built from — read back
-    /// by a future reorder/splice to decide whether it can trust the existing order as a
-    /// starting point. Not versioned; always describes whatever order the header currently
-    /// points at.</summary>
-    public void WriteTips(IReadOnlyList<GitObjectId> sortedTips)
+    /// by a future splice, which trusts them only when they hash to the header's walk key. Not
+    /// versioned; always describes whatever order the header currently points at. False when the
+    /// write failed.</summary>
+    public bool WriteTips(IReadOnlyList<GitObjectId> sortedTips)
     {
         try
         {
@@ -554,12 +554,16 @@ internal sealed class GraphMetaWriter(string repoPath, long fingerprint, bool in
             var tmp = $"{_tips}.{Guid.NewGuid():N}.tmp";
             File.WriteAllBytes(tmp, bytes);
             File.Move(tmp, _tips, overwrite: true);
+            return true;
         }
         catch (StoreInvalidException)
         {
             throw;
         }
-        catch { }
+        catch
+        {
+            return false;
+        }
     }
 
     private static void WriteSha(BinaryWriter bw, GitObjectId id) => bw.Write(id.AsSpan());
@@ -718,7 +722,8 @@ internal sealed class GraphMetaWriter(string repoPath, long fingerprint, bool in
                 return false;
             try
             {
-                WriteTips(sortedTips);
+                if (!WriteTips(sortedTips))
+                    return false;
             }
             catch (StoreInvalidException)
             {

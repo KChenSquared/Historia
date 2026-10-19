@@ -528,6 +528,7 @@ public class WorkspaceFocusPriorityTests : WorkspaceServiceTestBase
         public int ClearPersistentCache() => 0;
         public Task RunHeadlessCacheAsync(RepositoryContext context, GraphQuery query, CancellationToken ct) => Task.CompletedTask;
         public void RefreshCommitGraphAfterFetch(RepositoryContext context) { }
+        public void SweepDiskCache(IReadOnlyCollection<string> openRepositoryPaths) { }
 
         public Func<RepositoryContext, GraphQuery, IProgress<GitProgress>?, CancellationToken, Task>? PrecacheAsync { get; set; }
         public List<RepositoryContext> Precached { get; } = [];
