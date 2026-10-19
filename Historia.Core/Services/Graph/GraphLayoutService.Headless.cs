@@ -178,7 +178,8 @@ public sealed partial class GraphLayoutService
 
         // Guard 2 (simplified, same scope cut as GraphMetaSplice's own doc comment): only the
         // CURRENT shallow state is checked, not "unchanged since the old order was built".
-        var repoIsShallow = File.Exists(Path.Combine(context.GitDirectory, "shallow"));
+        // `shallow` lives in the common directory, which a linked worktree's git dir is not.
+        var repoIsShallow = File.Exists(Path.Combine(RefStateToken.ResolveCommonDir(context.GitDirectory), "shallow"));
 
         try
         {
