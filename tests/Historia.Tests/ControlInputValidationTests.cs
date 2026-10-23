@@ -176,6 +176,40 @@ public sealed class ControlInputValidationTests
         Assert.False(ControlInputValidation.NormalizeCommitMessage(new string('é', 9 * 1024), out _, out _));
     }
 
+    [Theory]
+    [InlineData("Review the parser", "Review the parser")]
+    [InlineData("  padded  ", "padded")]
+    [InlineData("two\nlines\r\nhere", "two lines here")]
+    [InlineData("runs \t of   space", "runs of space")]
+    public void A_note_is_trimmed_and_its_whitespace_collapsed(string text, string expected)
+    {
+        Assert.True(ControlInputValidation.NormalizeNote(text, out var normalized, out var error));
+        Assert.Equal(expected, normalized);
+        Assert.Null(error);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData(" \n\t ")]
+    [InlineData("bell\u0007")]
+    [InlineData("esc\u001b[31m")]
+    public void An_empty_or_control_note_is_rejected(string? text)
+    {
+        Assert.False(ControlInputValidation.NormalizeNote(text, out var normalized, out var error));
+        Assert.Null(normalized);
+        Assert.NotNull(error);
+    }
+
+    [Fact]
+    public void A_note_is_at_most_two_hundred_characters_after_collapsing()
+    {
+        Assert.True(ControlInputValidation.NormalizeNote(new string('a', 200), out _, out _));
+        Assert.False(ControlInputValidation.NormalizeNote(new string('a', 201), out _, out _));
+        Assert.True(ControlInputValidation.NormalizeNote("  " + new string('a', 200) + "\n\n", out var trimmed, out _));
+        Assert.Equal(200, trimmed!.Length);
+    }
+
     [Fact]
     public void Existing_segments_take_their_on_disk_case_and_missing_ones_are_kept()
     {

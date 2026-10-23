@@ -1,7 +1,8 @@
 namespace Historia.Services.ExternalControl;
 
-/// <summary>Resolves an externally supplied revision to a commit id. The only external-control code
-/// that starts a git process, and it only reads.</summary>
+/// <summary>The git reads external control needs to check a request: a revision's commit id, a
+/// folder's work tree, a commit's subject and the staged paths. The only external-control code that
+/// starts a git process, and it only reads.</summary>
 public static class RevisionResolver
 {
     /// <summary>The commit <paramref name="rev"/> names, or null when it is invalid, unknown, or
@@ -22,5 +23,64 @@ public static class RevisionResolver
             return null;
 
         return GitObjectId.TryParse(result.StandardOutput.Trim(), out var id) ? id : null;
+    }
+
+    /// <summary>The full native path of the work tree containing <paramref name="dir"/>, or null when
+    /// it is not inside one (or does not exist).</summary>
+    public static async Task<string?> ReadTopLevelAsync(IGitCliService cli, string dir, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
+            return null;
+
+        var result = await cli.RunAsync(new GitCliRequest
+        {
+            WorkingDirectory = dir,
+            Arguments = ["rev-parse", "--show-toplevel"],
+        }, ct).ConfigureAwait(false);
+
+        var top = result.StandardOutput.TrimEnd('\r', '\n');
+        if (!result.IsSuccess || top.Length == 0)
+            return null;
+
+        try
+        {
+            return Path.GetFullPath(top);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The subject line of <paramref name="commit"/>, or null when git cannot read it.</summary>
+    public static async Task<string?> ReadSubjectAsync(
+        IGitCliService cli, string repoRoot, GitObjectId commit, CancellationToken ct = default)
+    {
+        var result = await cli.RunAsync(new GitCliRequest
+        {
+            WorkingDirectory = repoRoot,
+            Arguments = ["log", "-1", "--format=%s", "--end-of-options", commit.ToString()],
+        }, ct).ConfigureAwait(false);
+
+        return result.IsSuccess ? result.StandardOutput.TrimEnd('\r', '\n') : null;
+    }
+
+    /// <summary>Every staged path, repo-relative with forward slashes, in git's order: empty when
+    /// nothing is staged, null when git fails. Works on a branch with no commits yet.</summary>
+    public static async Task<IReadOnlyList<string>?> ReadStagedPathsAsync(
+        IGitCliService cli, string repoRoot, CancellationToken ct = default)
+    {
+        // -z writes each path verbatim and NUL-terminated, so spaces and non-ASCII names are never quoted.
+        var result = await cli.RunAsync(new GitCliRequest
+        {
+            WorkingDirectory = repoRoot,
+            Arguments = ["diff", "--cached", "--name-only", "-z"],
+            RawStandardOutput = true,
+        }, ct).ConfigureAwait(false);
+
+        if (!result.IsSuccess)
+            return null;
+
+        return result.StandardOutput.Split('\0', StringSplitOptions.RemoveEmptyEntries);
     }
 }
