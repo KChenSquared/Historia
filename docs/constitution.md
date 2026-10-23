@@ -385,15 +385,18 @@ crashes, the app just quietly reaches out. Everything below it is subordinate to
 
 40. **Agent-facing surfaces navigate and propose; only the user acts.** Anything an external tool
     can send Historia — today, `historia-cmdr` over the per-user control pipe — may open, focus and
-    navigate, and may offer text to an editable draft the user must still act on (today, the commit
-    message). It never changes the repository, index, refs, working tree or settings, never stages
-    or commits, and never replaces something the user typed without `ConfirmDestructiveAsync`. It
-    stays local and per-user, and one visible setting turns it off. Opening a repository through it
-    is recorded in the session and the Recent list exactly like a manual open. A new verb that is
-    neither plain navigation nor a proposal the user must act on does not ship as an agent verb.
-    This is the external-control instance of **Rule 00**, as rule 14 is the Git instance.
-    `ExternalControlReadOnlyTests` scans the control host and every control file for any write path
-    (the git gateway, the write lock, settings writes, dialogs, staging patches, file writes,
-    starting processes) and for use of anything outside an allowlist of navigation members, so a
-    mutating call fails the build; `StagingPanelProposalTests` checks that a proposal never replaces
-    a typed draft silently and never commits.
+    navigate, may queue a navigation for the user to open later, and may offer text to an editable
+    draft the user must still act on (today, the commit message). The queue is Historia's own list
+    of pending items, not a setting, and the control host may only add to it; marking, reordering
+    and removing items are the user's. It never changes the repository, index, refs, working tree
+    or settings, never stages or commits, and never replaces something the user typed without
+    `ConfirmDestructiveAsync`. It stays local and per-user, and one visible setting turns it off.
+    Opening a repository through it is recorded in the session and the Recent list exactly like a
+    manual open. A new verb that is neither plain navigation, a queued navigation, nor a proposal
+    the user must act on does not ship as an agent verb. This is the external-control instance of
+    **Rule 00**, as rule 14 is the Git instance. `ExternalControlReadOnlyTests` scans the control
+    host, the shared control navigator and every control file for any write path (the git gateway,
+    the write lock, settings writes, dialogs, staging patches, file writes, starting processes) and
+    for use of anything outside an allowlist of navigation members plus the queue's one add-only
+    `Enqueue` call, so a mutating call fails the build; `StagingPanelProposalTests` checks that a
+    proposal never replaces a typed draft silently and never commits.
