@@ -158,6 +158,9 @@ public sealed class App : Application
         if (Program.IsPrimaryInstance)
         {
             _singleInstanceCts = new CancellationTokenSource();
+            // Loading the agent queue removes its expired items, once per launch, before any
+            // control request can add to it.
+            _provider!.GetRequiredService<ICmdrQueueService>();
             var control = _provider!.GetRequiredService<ExternalControlHost>();
             _ = SingleInstance.RunServerAsync(OnForwardedArguments, control.HandleAsync, _singleInstanceCts.Token);
         }
@@ -267,6 +270,10 @@ public sealed class App : Application
         services.AddSingleton<Historia.Services.Profiles.IRepoIdentityService, Historia.Services.Profiles.RepoIdentityService>();
         services.AddSingleton<IRecentRepositoryService, RecentRepositoryService>();
         services.AddSingleton<IWorkspaceService, WorkspaceService>();
+        services.AddSingleton<ICmdrQueueService>(sp => new CmdrQueueService(
+            sp.GetRequiredService<ISettingsService>(),
+            sp.GetRequiredService<IUiDispatcher>(),
+            sp.GetRequiredService<IAppLog>()));
         services.AddSingleton(sp => new ExternalControlHost(
             sp.GetRequiredService<IWorkspaceService>(),
             sp.GetRequiredService<ISettingsService>(),

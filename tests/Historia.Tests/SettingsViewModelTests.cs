@@ -481,6 +481,22 @@ public class SettingsViewModelTests
         Assert.Equal(AppSettings.MinSilentCrawlRowCap, rig.Settings.Current.SilentCrawlRowCap);
     }
 
+    [Theory]
+    [InlineData(0, AppSettings.MinCmdrQueueExpiryHours)]
+    [InlineData(1_000, AppSettings.MaxCmdrQueueExpiryHours)]
+    [InlineData(24, 24)]
+    public async Task Agent_queue_expiry_clamps_and_saves(int typed, int saved)
+    {
+        using var rig = new Rig();
+        Assert.Equal(5, rig.Vm.CmdrQueueExpiryHours.Value);
+
+        rig.Vm.CmdrQueueExpiryHours.Value = typed;
+        await rig.Vm.CmdrQueueExpiryHours.CommitAsync();
+
+        Assert.Equal(saved, rig.Settings.Current.CmdrQueueExpiryHours);
+        Assert.Equal(saved, rig.Vm.CmdrQueueExpiryHours.Value);
+    }
+
     [Fact]
     public async Task Context_lines_and_font_size_commit_what_was_typed()
     {
