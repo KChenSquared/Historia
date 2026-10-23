@@ -51,7 +51,8 @@ public sealed class GraphUnifiedMenuTests
     }
 
     /// <summary>Three commits on <c>main</c>; the tip also carries <c>feat</c>, tag <c>v1</c> and
-    /// <c>origin/main</c>, the middle commit nothing.</summary>
+    /// <c>origin/main</c>, the middle commit nothing, and the root two tags whose second name is
+    /// too long for its badge to fit, so the row draws a <c>+N</c> overflow chip.</summary>
     private sealed class RepoFixture : IDisposable
     {
         public string Path { get; }
@@ -72,7 +73,11 @@ public sealed class GraphUnifiedMenuTests
             RunGit("tag", "v1");
             RunGit("remote", "add", "origin", "git@example.com:o/origin.git");
             RunGit("update-ref", "refs/remotes/origin/main", "HEAD");
+            RunGit("tag", "t1", "HEAD~2");
+            RunGit("tag", LongTag, "HEAD~2");
         }
+
+        public static string LongTag { get; } = "z-" + new string('x', 120);
 
         public string Git(params string[] args) => TestGit.RunChecked(Path, args, testIdentity: false);
 
@@ -227,6 +232,83 @@ public sealed class GraphUnifiedMenuTests
 
         Assert.Equal("Checkout this commit (detached)", Headers(items)[0]);
         Assert.Contains(Headers(items), h => h.StartsWith("Merge ", StringComparison.Ordinal) && h.EndsWith("into current branch", StringComparison.Ordinal));
+    }
+
+    private static void RenderFrame(CommitGraphControl graph)
+    {
+        var size = new PixelSize((int)graph.Bounds.Width, (int)graph.Bounds.Height);
+        using var bitmap = new Avalonia.Media.Imaging.RenderTargetBitmap(size);
+        using var dc = bitmap.CreateDrawingContext();
+        graph.Render(dc);
+    }
+
+    private static Point Center(Rect r) => new(r.X + r.Width / 2, r.Y + r.Height / 2);
+
+    private static List<string> OpenMenuHeaders(Setup s)
+    {
+        var menu = s.Graph.OpenMenuForTesting;
+        Assert.NotNull(menu);
+        return Headers(Assert.IsAssignableFrom<IEnumerable<Control>>(menu.ItemsSource));
+    }
+
+    private static void RightClick(Setup s, Point at)
+    {
+        s.Window.MouseDown(at, MouseButton.Right);
+        s.Window.MouseUp(at, MouseButton.Right);
+        Dispatcher.UIThread.RunJobs();
+    }
+
+    private static GitObjectId RowId(Setup s, int row) => s.Graph.LayoutForTesting!.Layout.Commits[row].Id;
+
+    [AvaloniaFact]
+    public void Right_clicking_a_label_opens_the_menu_with_its_refs_first_and_selects_its_row()
+    {
+        using var s = CreateGraph();
+        RenderFrame(s.Graph);
+        s.Context.State.SetSelectedCommit(RowId(s, 1));
+
+        var pill = s.Graph.PillRectsForTesting.Single(p => p.Deco.Label == "main");
+        RightClick(s, Center(pill.Rect));
+
+        Assert.Equal(["main", "origin/main", "feat", "v1 (tag)"], OpenMenuHeaders(s).Take(4));
+        Assert.Equal(RowId(s, 0), s.Context.State.SelectedCommitId);
+    }
+
+    [AvaloniaFact]
+    public void Right_clicking_a_row_opens_the_menu_in_row_order()
+    {
+        using var s = CreateGraph();
+        RenderFrame(s.Graph);
+        s.Context.State.SetSelectedCommit(RowId(s, 1));
+
+        var pill = s.Graph.PillRectsForTesting.Single(p => p.Deco.Label == "main");
+        RightClick(s, new Point(s.Graph.Bounds.Width - 40, Center(pill.Rect).Y));
+
+        Assert.Equal(["main", "feat", "origin/main", "v1 (tag)"], OpenMenuHeaders(s).Take(4));
+        Assert.Equal(RowId(s, 0), s.Context.State.SelectedCommitId);
+    }
+
+    [AvaloniaFact]
+    public void Overflow_chip_opens_the_row_menu_on_right_and_left_click()
+    {
+        using var s = CreateGraph();
+        RenderFrame(s.Graph);
+        var chip = Assert.Single(s.Graph.OverflowChipsForTesting);
+        Assert.Equal(2, chip.Row);
+        var longHeader = BranchMenu.TruncateBranchLabelForMenu(RepoFixture.LongTag) + " (tag)";
+
+        RightClick(s, Center(chip.Rect));
+        var fromRight = s.Graph.OpenMenuForTesting;
+        Assert.Equal(["t1 (tag)", longHeader], OpenMenuHeaders(s).Take(2));
+        Assert.Equal(RowId(s, 2), s.Context.State.SelectedCommitId);
+
+        RenderFrame(s.Graph);
+        s.Window.MouseDown(Center(chip.Rect), MouseButton.Left);
+        s.Window.MouseUp(Center(chip.Rect), MouseButton.Left);
+        Dispatcher.UIThread.RunJobs();
+
+        Assert.NotSame(fromRight, s.Graph.OpenMenuForTesting);
+        Assert.Equal(["t1 (tag)", longHeader], OpenMenuHeaders(s).Take(2));
     }
 
     [AvaloniaFact]
