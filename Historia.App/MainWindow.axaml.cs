@@ -17,6 +17,7 @@ public partial class MainWindow : Window
     private readonly ShortcutsBarView? _rightShortcuts;
     private readonly CommitGraphControl? _graph;
     private readonly TerminalDockView? _terminalDock;
+    private readonly SidebarView? _sidebar;
     private readonly CenterPaneController? _centerPaneController;
 
     // Parameterless ctor for the XAML previewer only.
@@ -64,7 +65,8 @@ public partial class MainWindow : Window
             _graph.Initialize(services);
             _centerPaneController = new CenterPaneController(CenterHost, _graph, services);
 
-            SidebarHost.Content = new RefNavigatorView(services);
+            _sidebar = new SidebarView(services);
+            SidebarHost.Content = _sidebar;
             DetailHost.Content = new DetailRouter(services);
 
             _terminalDock = new TerminalDockView();
@@ -98,6 +100,7 @@ public partial class MainWindow : Window
         _appBand?.Dispose();
         _leftShortcuts?.Dispose();
         _rightShortcuts?.Dispose();
+        _sidebar?.Dispose();
         _terminalDock?.Dispose();
         _centerPaneController?.Dispose();
         _ = _placementWriter?.DisposeAsync();

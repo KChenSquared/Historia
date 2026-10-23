@@ -457,3 +457,77 @@ public sealed class FakeCommitDraftStore : ICommitDraftStore
             Drafts[repoKey] = draft;
     }
 }
+
+/// <summary>An in-memory <see cref="ICmdrQueueService"/> that raises <see cref="Changed"/> inline
+/// and records every call in order, so a test can check what was marked or removed and when.</summary>
+public sealed class FakeCmdrQueueService : ICmdrQueueService
+{
+    private readonly List<CmdrQueueItem> _items = [];
+
+    /// <summary>Every call, in order: <c>Enqueue:id</c>, <c>MarkSeen:id</c>, <c>Remove:id</c>.</summary>
+    public List<string> Calls { get; } = [];
+
+    public IReadOnlyList<CmdrQueueItem> Items => [.. _items];
+
+    public int UnseenCount => _items.Count(i => !i.Seen);
+
+    public event EventHandler? Changed;
+
+    public void Enqueue(CmdrQueueItem item)
+    {
+        Calls.Add($"Enqueue:{item.Id}");
+        _items.Add(item);
+        Changed?.Invoke(this, EventArgs.Empty);
+    }
+
+    public void MarkSeen(string id)
+    {
+        Calls.Add($"MarkSeen:{id}");
+        var at = _items.FindIndex(i => i.Id == id);
+        if (at < 0 || _items[at].Seen)
+            return;
+        _items[at] = _items[at] with { Seen = true };
+        Changed?.Invoke(this, EventArgs.Empty);
+    }
+
+    public void Remove(string id)
+    {
+        Calls.Add($"Remove:{id}");
+        if (_items.RemoveAll(i => i.Id == id) > 0)
+            Changed?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>The number of handlers attached to <see cref="Changed"/>.</summary>
+    public int ChangedSubscriberCount => Changed?.GetInvocationList().Length ?? 0;
+}
+
+/// <summary>An <see cref="IControlNavigator"/> that records each target and answers from a script:
+/// by default it succeeds at once; <see cref="Next"/> lets a test hold a navigation open or fail it.</summary>
+public sealed class FakeControlNavigator : IControlNavigator
+{
+    /// <summary>One navigation: the target and the token it was given.</summary>
+    public sealed record Call(ControlTarget Target, CancellationToken Token);
+
+    private readonly Queue<Func<ControlTarget, CancellationToken, Task<(ControlResponse, string?)>>> _script = new();
+
+    public List<Call> Calls { get; } = [];
+
+    /// <summary>Runs before each navigation is answered; a test can inspect state at that moment.</summary>
+    public Action<ControlTarget>? OnNavigate { get; set; }
+
+    /// <summary>Queues the answer for the next navigation.</summary>
+    public FakeControlNavigator Next(Func<ControlTarget, CancellationToken, Task<(ControlResponse, string?)>> answer)
+    {
+        _script.Enqueue(answer);
+        return this;
+    }
+
+    public Task<(ControlResponse Response, string? RepoName)> NavigateAsync(ControlTarget target, CancellationToken ct)
+    {
+        Calls.Add(new Call(target, ct));
+        OnNavigate?.Invoke(target);
+        if (_script.Count > 0)
+            return _script.Dequeue()(target, ct);
+        return Task.FromResult<(ControlResponse, string?)>((new ControlResponse { Ok = true, Repo = target.RepoPath }, "repo"));
+    }
+}
