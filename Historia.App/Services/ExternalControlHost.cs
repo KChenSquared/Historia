@@ -5,21 +5,15 @@ public sealed record ExternalControlHostOptions
 {
     /// <summary>Overall time one request may take, including waiting for an earlier request.</summary>
     public TimeSpan RequestBudget { get; init; } = TimeSpan.FromSeconds(25);
-
-    /// <summary>How long to wait for a freshly opened repository's graph to paint before navigating
-    /// anyway; the graph can only reveal a commit once it is listening.</summary>
-    public TimeSpan GraphPaintWait { get; init; } = TimeSpan.FromSeconds(15);
-
-    /// <summary>How long to wait, after proposing a commit message, for the commit box to take it
-    /// before reporting that it is only being offered.</summary>
-    public TimeSpan DraftSettleTime { get; init; } = TimeSpan.FromMilliseconds(400);
 }
 
 /// <summary>
-/// Executes control requests from <c>historia-cmdr</c>. Everything here navigates: it opens or
-/// focuses a repository tab, selects a commit, opens a diff, and — for a commit proposal — offers
-/// text to the commit box. It never writes to a repository, its index or refs, or to settings, and
-/// it never commits. Requests run one at a time.
+/// Executes control requests from <c>historia-cmdr</c>. A live request navigates through
+/// <see cref="IControlNavigator"/> — it opens or focuses a repository tab, selects a commit, opens a
+/// diff, and for a commit proposal offers text to the commit box — then brings the window forward
+/// when asked. A queued request is checked with read-only git and added to the agent queue for the
+/// user to open later, without touching any tab or the window. Nothing here writes to a repository,
+/// its index or refs, or to settings, and nothing commits. Requests run one at a time.
 /// </summary>
 public sealed class ExternalControlHost
 {
@@ -28,6 +22,8 @@ public sealed class ExternalControlHost
     private readonly IGitCliService _cli;
     private readonly IUiDispatcher _ui;
     private readonly IAppLog _log;
+    private readonly IControlNavigator _navigator;
+    private readonly ICmdrQueueService _queue;
     private readonly Action _activateWindow;
     private readonly ExternalControlHostOptions _options;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -38,6 +34,8 @@ public sealed class ExternalControlHost
         IGitCliService cli,
         IUiDispatcher ui,
         IAppLog log,
+        IControlNavigator navigator,
+        ICmdrQueueService queue,
         Action activateWindow,
         ExternalControlHostOptions? options = null)
     {
@@ -46,13 +44,17 @@ public sealed class ExternalControlHost
         _cli = cli;
         _ui = ui;
         _log = log;
+        _navigator = navigator;
+        _queue = queue;
         _activateWindow = activateWindow;
         _options = options ?? new ExternalControlHostOptions();
     }
 
     public async Task<ControlResponse> HandleAsync(ControlRequest request, CancellationToken ct)
     {
-        var verb = ControlVerbs.ToWire(request.Verb);
+        var verb = request.Verb == ControlVerb.Queue && request.Target is { } target
+            ? $"queue {ControlVerbs.ToWire(target)}"
+            : ControlVerbs.ToWire(request.Verb);
         ControlResponse response;
         string? repoName = null;
         try
@@ -97,7 +99,9 @@ public sealed class ExternalControlHost
             case ControlVerb.Ping:
                 return (ControlResponse.Success(), null);
             case ControlVerb.Selection:
-                return (await OnUiAsync(() => Task.FromResult(ReadSelection())).ConfigureAwait(false), null);
+                return (await OnUiAsync(ReadSelection).ConfigureAwait(false), null);
+            case ControlVerb.Queue:
+                return await EnqueueAsync(request, ct).ConfigureAwait(false);
         }
 
         string? message = null;
@@ -107,35 +111,66 @@ public sealed class ExternalControlHost
             return (ControlResponse.Fail(ControlError.Usage, messageError), null);
         }
 
-        var repoPath = !string.IsNullOrWhiteSpace(request.Repo) ? request.Repo : request.Cwd;
-        if (string.IsNullOrWhiteSpace(repoPath) || !Directory.Exists(repoPath))
+        var navigated = await _navigator.NavigateAsync(ControlTarget.FromRequest(request, message), ct).ConfigureAwait(false);
+
+        if (navigated.Response.Ok && request.WantsFocus)
+            _ui.Post(_activateWindow);
+
+        return navigated;
+    }
+
+    /// <summary>
+    /// Checks a queued request with read-only git and adds it to the queue for the user to open
+    /// later. It runs off the UI thread and touches no tab: nothing is opened, focused or fetched,
+    /// and the window stays where it is.
+    /// </summary>
+    private async Task<(ControlResponse Response, string? RepoName)> EnqueueAsync(ControlRequest request, CancellationToken ct)
+    {
+        if (request.Target is not { } target || !ControlVerbs.IsQueueable(target))
+            return (ControlResponse.Fail(ControlError.Usage, "A queued request needs a navigation to queue."), null);
+
+        string? note = null;
+        if (request.Note is not null && !ControlInputValidation.NormalizeNote(request.Note, out note, out var noteError))
+            return (ControlResponse.Fail(ControlError.Usage, noteError), null);
+
+        string? message = null;
+        if (target == ControlVerb.ProposeCommit
+            && !ControlInputValidation.NormalizeCommitMessage(request.CommitMessage, out message, out var messageError))
+        {
+            return (ControlResponse.Fail(ControlError.Usage, messageError), null);
+        }
+
+        var requested = request.Paths ?? (request.Path is null ? [] : [request.Path]);
+        if (requested.Count > ControlArgs.MaxQueuedFiles || (requested.Count > 1 && target != ControlVerb.Changes))
+            return (ControlResponse.Fail(ControlError.Usage, $"Only a change list takes several files, at most {ControlArgs.MaxQueuedFiles}."), null);
+
+        var folder = !string.IsNullOrWhiteSpace(request.Repo) ? request.Repo : request.Cwd;
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
             return (ControlResponse.Fail(ControlError.RepoNotFound, "That folder does not exist."), null);
 
-        RepositoryContext ctx;
-        try
-        {
-            ctx = await OnUiAsync(() => _workspace.OpenAsync(repoPath, ct)).ConfigureAwait(false);
-        }
-        catch (HistoriaGitException ex)
-        {
-            return (ControlResponse.Fail(ControlError.RepoNotFound, ex.Message), null);
-        }
+        var root = await RevisionResolver.ReadTopLevelAsync(_cli, folder, ct).ConfigureAwait(false);
+        if (root is null)
+            return (ControlResponse.Fail(ControlError.RepoNotFound, "That folder is not inside a Git repository."), null);
 
-        var name = ctx.DisplayName;
-        var root = ctx.RepositoryPath;
+        var name = System.IO.Path.GetFileName(System.IO.Path.TrimEndingDirectorySeparator(root));
+        if (string.IsNullOrEmpty(name))
+            name = root;
         var cwd = string.IsNullOrWhiteSpace(request.Cwd) ? root : request.Cwd;
 
         GitObjectId? rev = null, otherRev = null;
-        if (request.Verb is ControlVerb.Show or ControlVerb.Diff or ControlVerb.Compare)
+        string? subject = null;
+        if (target is ControlVerb.Show or ControlVerb.Diff or ControlVerb.Compare)
         {
             if (!ControlInputValidation.TryValidateRevision(request.Rev, out var revError))
                 return (ControlResponse.Fail(ControlError.RevNotFound, revError), name);
             rev = await RevisionResolver.ResolveCommitAsync(_cli, root, request.Rev!, ct).ConfigureAwait(false);
             if (rev is null)
                 return (ControlResponse.Fail(ControlError.RevNotFound, $"'{request.Rev}' is not a commit in this repository."), name);
+            if (target is ControlVerb.Show or ControlVerb.Diff)
+                subject = await RevisionResolver.ReadSubjectAsync(_cli, root, rev.Value, ct).ConfigureAwait(false);
         }
 
-        if (request.Verb == ControlVerb.Compare)
+        if (target == ControlVerb.Compare)
         {
             if (!ControlInputValidation.TryValidateRevision(request.OtherRev, out var headError))
                 return (ControlResponse.Fail(ControlError.RevNotFound, headError), name);
@@ -144,134 +179,59 @@ public sealed class ExternalControlHost
                 return (ControlResponse.Fail(ControlError.RevNotFound, $"'{request.OtherRev}' is not a commit in this repository."), name);
         }
 
-        string? relativePath = null;
-        if (request.Verb is ControlVerb.Diff or ControlVerb.Compare or ControlVerb.Changes
-            && !ControlInputValidation.TryResolveRepoRelativePath(root, cwd, request.Path, out relativePath))
+        var paths = new List<string>();
+        if (target is ControlVerb.Diff or ControlVerb.Compare or ControlVerb.Changes)
         {
-            return (ControlResponse.Fail(ControlError.PathInvalid, "That path is not inside the repository."), name);
+            if (requested.Count == 0)
+                return (ControlResponse.Fail(ControlError.PathInvalid, "That path is not inside the repository."), name);
+            foreach (var path in requested)
+            {
+                if (!ControlInputValidation.TryResolveRepoRelativePath(root, cwd, path, out var relative))
+                    return (ControlResponse.Fail(ControlError.PathInvalid, $"'{path}' is not inside the repository."), name);
+                paths.Add(ControlInputValidation.MatchOnDiskCase(root, relative));
+            }
         }
-        if (relativePath is not null)
-            relativePath = ControlInputValidation.MatchOnDiskCase(root, relativePath);
 
-        await OnUiAsync(() => _workspace.EnsureInitialized(ctx)).ConfigureAwait(false);
-        if (request.Verb != ControlVerb.Open)
-            await WaitForGraphAsync(ctx, ct).ConfigureAwait(false);
+        IReadOnlyList<string> stagedPaths = [];
+        if (target == ControlVerb.ProposeCommit)
+        {
+            var staged = await RevisionResolver.ReadStagedPathsAsync(_cli, root, ct).ConfigureAwait(false);
+            if (staged is null)
+                return (ControlResponse.Fail(ControlError.Internal, "Historia could not read the staged files."), name);
+            if (staged.Count == 0)
+                return (ControlResponse.Fail(ControlError.NothingStaged, "Nothing is staged."), name);
+            stagedPaths = staged;
+        }
 
-        var contextLines = _settings.Current.DiffContextLines;
-        var state = ctx.State;
-        var result = new ControlResponse
+        var item = new CmdrQueueItem
+        {
+            RepoRoot = root,
+            RepoName = name,
+            Target = target,
+            Rev = rev?.ToString(),
+            OtherRev = otherRev?.ToString(),
+            Paths = paths,
+            Line = request.Line,
+            Staged = request.Staged,
+            CommitMessage = message,
+            CommitSubject = subject,
+            StagedPaths = stagedPaths,
+            Note = note,
+        };
+        _queue.Enqueue(item);
+
+        return (new ControlResponse
         {
             Ok = true,
+            Queued = true,
+            QueueId = item.Id,
             Repo = root,
-            Commit = rev?.ToString(),
-            OtherCommit = otherRev?.ToString(),
-            Path = relativePath,
+            Commit = item.Rev,
+            OtherCommit = item.OtherRev,
+            Path = paths.Count > 0 ? paths[0] : null,
             Line = request.Line,
-        };
-
-        switch (request.Verb)
-        {
-            case ControlVerb.Open:
-                break;
-
-            case ControlVerb.Show:
-                state.SetOpenDiff(null);
-                state.SetSelectedCommit(rev);
-                state.RequestRevealCommit(rev!.Value);
-                break;
-
-            case ControlVerb.Diff:
-                state.SetSelectedCommit(rev);
-                state.RequestRevealCommit(rev!.Value);
-                state.SetOpenDiff(new DiffRequest
-                {
-                    Source = DiffSource.Commit,
-                    CommitId = rev,
-                    Path = relativePath,
-                    ParentIndex = 1,
-                    ContextLines = contextLines,
-                    FocusLine = request.Line,
-                });
-                break;
-
-            case ControlVerb.Compare:
-                state.SetSelectedCommit(otherRev);
-                state.RequestRevealCommit(otherRev!.Value);
-                state.SetOpenDiff(new DiffRequest
-                {
-                    Source = DiffSource.Comparison,
-                    CommitId = rev,
-                    OtherCommitId = otherRev,
-                    Path = relativePath,
-                    ContextLines = contextLines,
-                    FocusLine = request.Line,
-                });
-                break;
-
-            case ControlVerb.Changes:
-                state.SetSelectedCommit(null);
-                state.SetOpenDiff(new DiffRequest
-                {
-                    Source = request.Staged ? DiffSource.StagedChanges : DiffSource.UnstagedChanges,
-                    Path = relativePath,
-                    ContextLines = contextLines,
-                    FocusLine = request.Line,
-                });
-                break;
-
-            case ControlVerb.ProposeCommit:
-                var proposed = await ProposeAsync(ctx, message!, contextLines, ct).ConfigureAwait(false);
-                if (proposed is null)
-                    return (ControlResponse.Fail(ControlError.NothingStaged, "Nothing is staged."), name);
-                result = result with { StagedPaths = proposed.Value.StagedPaths, Draft = proposed.Value.Draft };
-                break;
-        }
-
-        if (request.WantsFocus)
-            _ui.Post(_activateWindow);
-
-        return (result, name);
-    }
-
-    private async Task<(IReadOnlyList<string> StagedPaths, ControlDraftOutcome Draft)?> ProposeAsync(
-        RepositoryContext ctx, string message, int contextLines, CancellationToken ct)
-    {
-        var state = ctx.State;
-
-        // The watcher's debounce could miss an agent's very recent `git add`, so ask for a fresh read.
-        await state.RefreshStatusAsync(ct).ConfigureAwait(false);
-        var staged = state.Status.Staged.Select(f => f.Path).ToList();
-        if (staged.Count == 0)
-            return null;
-
-        state.SetSelectedCommit(null);
-        state.SetOpenDiff(new DiffRequest
-        {
-            Source = DiffSource.StagedChanges,
-            Path = staged[0],
-            ContextLines = contextLines,
-        });
-        state.ProposeCommitMessage(message);
-
-        // The commit box takes the text when it is idle and empty; otherwise it keeps the proposal
-        // pending and offers it. Give it a moment to build and decide.
-        var deadline = DateTime.UtcNow + _options.DraftSettleTime;
-        while (state.PendingCommitMessage is not null && DateTime.UtcNow < deadline)
-            await Task.Delay(25, ct).ConfigureAwait(false);
-
-        return (staged, state.PendingCommitMessage is null ? ControlDraftOutcome.Filled : ControlDraftOutcome.Pending);
-    }
-
-    private async Task WaitForGraphAsync(RepositoryContext ctx, CancellationToken ct)
-    {
-        try
-        {
-            await ctx.FirstGraphPaint.WaitAsync(_options.GraphPaintWait, ct).ConfigureAwait(false);
-        }
-        catch (TimeoutException)
-        {
-            // The graph is slow or not shown (a background tab); navigate anyway.
-        }
+            StagedPaths = target == ControlVerb.ProposeCommit ? stagedPaths : null,
+        }, name);
     }
 
     private ControlResponse ReadSelection()
@@ -308,18 +268,16 @@ public sealed class ExternalControlHost
         };
     }
 
-    private Task OnUiAsync(Action work) => OnUiAsync(() => { work(); return Task.FromResult(true); });
-
-    /// <summary>Runs <paramref name="work"/> on the UI thread — workspace changes raise events its
-    /// controls listen to — and completes with its result without ever blocking that thread.</summary>
-    private Task<T> OnUiAsync<T>(Func<Task<T>> work)
+    /// <summary>Runs <paramref name="work"/> on the UI thread, where the workspace's state lives,
+    /// and completes with its result without ever blocking that thread.</summary>
+    private Task<T> OnUiAsync<T>(Func<T> work)
     {
         var done = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _ui.Post(async () =>
+        _ui.Post(() =>
         {
             try
             {
-                done.TrySetResult(await work().ConfigureAwait(true));
+                done.TrySetResult(work());
             }
             catch (Exception ex)
             {

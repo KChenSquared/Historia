@@ -274,12 +274,19 @@ public sealed class App : Application
             sp.GetRequiredService<ISettingsService>(),
             sp.GetRequiredService<IUiDispatcher>(),
             sp.GetRequiredService<IAppLog>()));
+        services.AddSingleton<IControlNavigator>(sp => new ControlNavigator(
+            sp.GetRequiredService<IWorkspaceService>(),
+            sp.GetRequiredService<ISettingsService>(),
+            sp.GetRequiredService<IGitCliService>(),
+            sp.GetRequiredService<IUiDispatcher>()));
         services.AddSingleton(sp => new ExternalControlHost(
             sp.GetRequiredService<IWorkspaceService>(),
             sp.GetRequiredService<ISettingsService>(),
             sp.GetRequiredService<IGitCliService>(),
             sp.GetRequiredService<IUiDispatcher>(),
             sp.GetRequiredService<IAppLog>(),
+            sp.GetRequiredService<IControlNavigator>(),
+            sp.GetRequiredService<ICmdrQueueService>(),
             ActivateMainWindow));
         services.AddSingleton<ICloneService, CloneService>();
         services.AddSingleton<IKeyboardCommandRouter, KeyboardCommandRouter>();

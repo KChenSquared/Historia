@@ -9,6 +9,8 @@ public sealed class ExternalControlHostTests : IAsyncLifetime
     private ServiceProvider _sp = null!;
     private WorkspaceService _workspace = null!;
     private TrackingCli _cli = null!;
+    private ControlNavigator _navigator = null!;
+    private CmdrQueueService _queue = null!;
     private ExternalControlHost _host = null!;
 
     public Task InitializeAsync()
@@ -27,6 +29,15 @@ public sealed class ExternalControlHostTests : IAsyncLifetime
         _workspace = new WorkspaceService(
             _sp, cli, new RecentRepositoryService(_settings),
             new ProfileService(_settings, new FakeVault(), cli), new RepoIdentityService(cli));
+        _navigator = new ControlNavigator(_workspace, _settings, cli, _ui, new ControlNavigatorOptions
+        {
+            GraphPaintWait = TimeSpan.FromMilliseconds(30),
+            DraftSettleTime = TimeSpan.FromMilliseconds(60),
+        });
+        var queueDir = TestScratch.NewDirectory("historia-ctl-queue-");
+        _dirs.Add(queueDir);
+        _queue = new CmdrQueueService(_settings, _ui, Historia.Diagnostics.AppLog.Current,
+            filePath: System.IO.Path.Combine(queueDir, "cmdr-queue.json"));
         _host = NewHost();
         return Task.CompletedTask;
     }
@@ -39,6 +50,7 @@ public sealed class ExternalControlHostTests : IAsyncLifetime
         }
         try { await _workspace.DisposeAsync(); } catch { }
         try { await _sp.DisposeAsync(); } catch { }
+        try { await _queue.DisposeAsync(); } catch { }
         try { await _settings.DisposeAsync(); } catch { }
         foreach (var d in _dirs)
             TestScratch.Delete(d);
@@ -46,12 +58,7 @@ public sealed class ExternalControlHostTests : IAsyncLifetime
 
     private ExternalControlHost NewHost(Action? activate = null) => new(
         _workspace, _settings, _sp.GetRequiredService<IGitCliService>(), _ui, Historia.Diagnostics.AppLog.Current,
-        activate ?? (() => { }),
-        new ExternalControlHostOptions
-        {
-            GraphPaintWait = TimeSpan.FromMilliseconds(30),
-            DraftSettleTime = TimeSpan.FromMilliseconds(60),
-        });
+        _navigator, _queue, activate ?? (() => { }));
 
     // ── Fixtures ────────────────────────────────────────────────────────────────────────
 
@@ -103,7 +110,9 @@ public sealed class ExternalControlHostTests : IAsyncLifetime
     private sealed class ControlRequestBuilder
     {
         public ControlVerb Verb;
-        public string? Repo, Cwd, Rev, OtherRev, Path, Message;
+        public ControlVerb? Target;
+        public string? Repo, Cwd, Rev, OtherRev, Path, Message, Note;
+        public IReadOnlyList<string>? Paths;
         public int? Line;
         public bool Staged;
         public bool Focus = true;
@@ -111,6 +120,9 @@ public sealed class ExternalControlHostTests : IAsyncLifetime
         public ControlRequest Build() => new()
         {
             Verb = Verb,
+            Target = Target,
+            Note = Note,
+            Paths = Paths,
             Repo = Repo,
             Cwd = Cwd,
             Rev = Rev,
@@ -347,6 +359,206 @@ public sealed class ExternalControlHostTests : IAsyncLifetime
         Assert.Equal(1, _cli.MaxConcurrentRevParse);
     }
 
+    // ── Queue ───────────────────────────────────────────────────────────────────────────
+
+    private static ControlRequest Queued(ControlVerb target, Fixture f, Action<ControlRequestBuilder>? configure = null) =>
+        Req(ControlVerb.Queue, f, b =>
+        {
+            b.Target = target;
+            b.Focus = false;
+            configure?.Invoke(b);
+        });
+
+    private static string Leaf(string path) => System.IO.Path.GetFileName(System.IO.Path.TrimEndingDirectorySeparator(path));
+
+    [Fact]
+    public async Task A_queued_show_enqueues_the_commit_and_its_subject_and_leaves_the_view_alone()
+    {
+        var f = NewRepo();
+        var other = NewRepo();
+        var activations = 0;
+        var host = NewHost(() => activations++);
+        await host.HandleAsync(Req(ControlVerb.Show, other, b => { b.Rev = "HEAD"; b.Focus = false; }), default);
+        var focused = _workspace.Focused;
+        var selected = focused!.State.SelectedCommitId;
+        var changes = 0;
+        _queue.Changed += (_, _) => changes++;
+
+        var response = await host.HandleAsync(Queued(ControlVerb.Show, f, b => { b.Rev = "HEAD~1"; b.Note = "  look at\nthis  "; }), default);
+
+        Assert.True(response.Ok, response.Message);
+        Assert.True(response.Queued);
+        Assert.Equal(f.First, response.Commit);
+        Assert.Null(response.Draft);
+        var item = Assert.Single(_queue.Items);
+        Assert.Equal(response.QueueId, item.Id);
+        Assert.Equal(ControlVerb.Show, item.Target);
+        Assert.Equal(f.First, item.Rev);
+        Assert.Equal("first", item.CommitSubject);
+        Assert.Equal("look at this", item.Note);
+        Assert.Equal(Leaf(f.Path), item.RepoName, ignoreCase: true);
+        Assert.Equal(System.IO.Path.GetFullPath(f.Path), item.RepoRoot, ignoreCase: true);
+        Assert.Equal(1, changes);
+
+        Assert.Single(_workspace.OpenRepositories);
+        Assert.Same(focused, _workspace.Focused);
+        Assert.Equal(selected, focused.State.SelectedCommitId);
+        Assert.Equal(0, activations);
+    }
+
+    [Fact]
+    public async Task A_queued_change_list_stores_every_file_and_opens_no_tab()
+    {
+        var f = NewRepo();
+
+        var response = await _host.HandleAsync(
+            Queued(ControlVerb.Changes, f, b => { b.Path = "A.TXT"; b.Paths = ["A.TXT", "b.txt"]; b.Staged = true; b.Line = 2; }), default);
+
+        Assert.True(response.Ok, response.Message);
+        var item = Assert.Single(_queue.Items);
+        string[] expected = OperatingSystem.IsWindows() ? ["a.txt", "b.txt"] : ["A.TXT", "b.txt"];
+        Assert.Equal(expected, item.Paths);
+        Assert.True(item.Staged);
+        Assert.Equal(2, item.Line);
+        Assert.Equal(item.Paths[0], response.Path);
+        Assert.Empty(_workspace.OpenRepositories);
+    }
+
+    [Fact]
+    public async Task A_queued_commit_proposal_records_the_message_and_the_staged_files()
+    {
+        var f = NewRepo();
+        File.WriteAllText(System.IO.Path.Combine(f.Path, "a.txt"), "changed a\n");
+        StageFiles(f.Path, "a.txt");
+        var before = Fingerprint(f.Path);
+
+        var response = await _host.HandleAsync(Queued(ControlVerb.ProposeCommit, f, b => b.Message = "feat: x  \r\n\r\nbody\r\n"), default);
+
+        Assert.True(response.Ok, response.Message);
+        Assert.Equal(["a.txt"], response.StagedPaths);
+        Assert.Null(response.Draft);
+        var item = Assert.Single(_queue.Items);
+        Assert.Equal("feat: x\n\nbody", item.CommitMessage);
+        Assert.Equal(["a.txt"], item.StagedPaths);
+        Assert.Empty(_workspace.OpenRepositories);
+        Assert.Equal(before, Fingerprint(f.Path));
+    }
+
+    [Fact]
+    public async Task A_queued_commit_proposal_with_nothing_staged_enqueues_nothing()
+    {
+        var f = NewRepo();
+
+        var response = await _host.HandleAsync(Queued(ControlVerb.ProposeCommit, f, b => b.Message = "feat: x"), default);
+
+        Assert.Equal(ControlError.NothingStaged, response.Error);
+        Assert.Empty(_queue.Items);
+    }
+
+    [Fact]
+    public async Task Queueing_with_control_off_answers_disabled()
+    {
+        var f = NewRepo();
+        await _settings.UpdateAsync(s => s with { ExternalControlEnabled = false });
+        try
+        {
+            var response = await _host.HandleAsync(Queued(ControlVerb.Show, f, b => b.Rev = "HEAD"), default);
+
+            Assert.Equal(ControlError.Disabled, response.Error);
+            Assert.Empty(_queue.Items);
+        }
+        finally
+        {
+            await _settings.UpdateAsync(s => s with { ExternalControlEnabled = true });
+        }
+    }
+
+    [Fact]
+    public async Task Queueing_from_a_folder_outside_a_repository_is_repo_not_found()
+    {
+        var plain = TestScratch.NewDirectory("historia-ctl-plain-");
+        _dirs.Add(plain);
+
+        var response = await _host.HandleAsync(
+            new ControlRequest { Verb = ControlVerb.Queue, Target = ControlVerb.Open, Repo = plain, Cwd = plain, Focus = false }, default);
+
+        Assert.Equal(ControlError.RepoNotFound, response.Error);
+        Assert.Empty(_queue.Items);
+    }
+
+    [Fact]
+    public async Task Queueing_an_unknown_revision_is_rev_not_found_and_enqueues_nothing()
+    {
+        var f = NewRepo();
+
+        var response = await _host.HandleAsync(Queued(ControlVerb.Diff, f, b => { b.Rev = "nope"; b.Path = "a.txt"; }), default);
+
+        Assert.Equal(ControlError.RevNotFound, response.Error);
+        Assert.Empty(_queue.Items);
+    }
+
+    [Fact]
+    public async Task Queueing_a_path_outside_the_repository_is_path_invalid()
+    {
+        var f = NewRepo();
+
+        var response = await _host.HandleAsync(
+            Queued(ControlVerb.Changes, f, b => { b.Path = "a.txt"; b.Paths = ["a.txt", "../outside.txt"]; }), default);
+
+        Assert.Equal(ControlError.PathInvalid, response.Error);
+        Assert.Empty(_queue.Items);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(ControlVerb.Ping)]
+    [InlineData(ControlVerb.Selection)]
+    [InlineData(ControlVerb.Queue)]
+    public async Task A_queue_request_without_a_navigation_is_usage(ControlVerb? target)
+    {
+        var f = NewRepo();
+
+        var response = await _host.HandleAsync(
+            new ControlRequest { Verb = ControlVerb.Queue, Target = target, Repo = f.Path, Cwd = f.Path, Focus = false }, default);
+
+        Assert.Equal(ControlError.Usage, response.Error);
+        Assert.Empty(_queue.Items);
+    }
+
+    [Fact]
+    public async Task An_item_queued_under_a_differently_cased_path_opens_the_tab_already_open()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var f = NewRepo();
+        await _workspace.OpenAsync(f.Path);
+        var queued = await _host.HandleAsync(Queued(ControlVerb.Show, f, b => { b.Repo = f.Path.ToUpperInvariant(); b.Cwd = b.Repo; b.Rev = "HEAD~1"; }), default);
+        Assert.True(queued.Ok, queued.Message);
+
+        var (response, _) = await _navigator.NavigateAsync(ControlTarget.FromItem(Assert.Single(_queue.Items)), default);
+
+        Assert.True(response.Ok, response.Message);
+        Assert.Single(_workspace.OpenRepositories);
+        Assert.Equal(new GitObjectId(f.First), Ctx(f).State.SelectedCommitId);
+    }
+
+    [Fact]
+    public async Task A_queued_change_list_navigates_to_its_first_file()
+    {
+        var f = NewRepo();
+        await _host.HandleAsync(Queued(ControlVerb.Changes, f, b => { b.Path = "b.txt"; b.Paths = ["b.txt", "a.txt"]; b.Line = 1; }), default);
+
+        var (response, name) = await _navigator.NavigateAsync(ControlTarget.FromItem(Assert.Single(_queue.Items)), default);
+
+        Assert.True(response.Ok, response.Message);
+        Assert.Equal(Ctx(f).DisplayName, name);
+        var open = Ctx(f).State.OpenDiff!;
+        Assert.Equal(DiffSource.UnstagedChanges, open.Source);
+        Assert.Equal("b.txt", open.Path);
+        Assert.Equal(1, open.FocusLine);
+    }
+
     // ── Commit proposal ─────────────────────────────────────────────────────────────────
 
     [Fact]
@@ -433,6 +645,9 @@ public sealed class ExternalControlHostTests : IAsyncLifetime
             Req(ControlVerb.Compare, f, b => { b.Rev = "HEAD~1"; b.OtherRev = "HEAD"; b.Path = "a.txt"; }),
             Req(ControlVerb.Changes, f, b => { b.Path = "b.txt"; b.Staged = true; }),
             Req(ControlVerb.ProposeCommit, f, b => b.Message = "feat: z"),
+            Queued(ControlVerb.Show, f, b => b.Rev = "HEAD"),
+            Queued(ControlVerb.Changes, f, b => { b.Path = "a.txt"; b.Paths = ["a.txt", "b.txt"]; }),
+            Queued(ControlVerb.ProposeCommit, f, b => b.Message = "feat: z"),
             new ControlRequest { Verb = ControlVerb.Selection },
             new ControlRequest { Verb = ControlVerb.Ping },
         };
