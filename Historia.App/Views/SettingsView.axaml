@@ -337,6 +337,19 @@
                                            LostFocus="OnNumericLostFocus" />
                         </StackPanel>
                     </DockPanel>
+                    <DockPanel Classes="hinted">
+                        <ctl:HelpHint Text="When Historia starts, it removes items in the sidebar's CMDR list that are older than this. 1 to 168 hours." />
+                        <StackPanel Classes="row">
+                            <TextBlock Classes="text" Text="Clear agent queue items older than (hours)" />
+                            <NumericUpDown x:DataType="vm:NumericSettingViewModel"
+                                           DataContext="{Binding CmdrQueueExpiryHours}"
+                                           Minimum="{Binding Minimum}"
+                                           Maximum="{Binding Maximum}"
+                                           Increment="{Binding Increment}"
+                                           Value="{Binding Value}"
+                                           LostFocus="OnNumericLostFocus" />
+                        </StackPanel>
+                    </DockPanel>
                     <DockPanel Classes="hinted" Margin="0,8,0,0">
                         <ctl:HelpHint Text="Turns issue keys in commit messages into links. In the URL, $1, $2… insert the pattern's capture groups.&#10;&#10;Example: pattern #(\d+) with URL https://GitHistoria.com/autolink?issue=$1 turns #42 into a link." />
                         <TextBlock Classes="section" Text="Issue autolinks" />

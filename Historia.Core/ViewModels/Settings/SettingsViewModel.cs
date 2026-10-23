@@ -100,6 +100,8 @@ public sealed partial class SettingsViewModel : ViewModelBase
             AppSettings.ClampSilentCrawlRowCap, next => SaveAsync(s => s with { SilentCrawlRowCap = next }));
         ResidentRowCap = new NumericSettingViewModel(AppSettings.MinResidentRowCap, AppSettings.MaxResidentRowCap, 100_000,
             AppSettings.ClampResidentRowCap, next => SaveAsync(s => s with { ResidentRowCap = next }), ConfirmResidentRowCapAsync);
+        CmdrQueueExpiryHours = new NumericSettingViewModel(AppSettings.MinCmdrQueueExpiryHours, AppSettings.MaxCmdrQueueExpiryHours, 1,
+            AppSettings.ClampCmdrQueueExpiryHours, next => SaveAsync(s => s with { CmdrQueueExpiryHours = next }));
 
         IssueAutolinks = [];
         TerminalShellPath = "";
@@ -145,6 +147,9 @@ public sealed partial class SettingsViewModel : ViewModelBase
     public NumericSettingViewModel SilentCrawlRowCap { get; }
 
     public NumericSettingViewModel ResidentRowCap { get; }
+
+    /// <summary>Hours an agent-queued item stays in the CMDR list before a launch removes it.</summary>
+    public NumericSettingViewModel CmdrQueueExpiryHours { get; }
 
     /// <summary>The terminal font box's placeholder: the fonts the platform default tries.</summary>
     public string TerminalFontFamilyWatermark => OperatingSystem.IsWindows() ? "Cascadia Mono, Consolas" : "platform monospace";
@@ -684,6 +689,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
             LightweightMode = c.LightweightMode;
             SilentCrawlRowCap.Sync(c.SilentCrawlRowCap);
             ResidentRowCap.Sync(c.ResidentRowCap);
+            CmdrQueueExpiryHours.Sync(c.CmdrQueueExpiryHours);
             SyncAutolinks(c.IssueAutolinks);
             DeveloperPanelEnabled = c.DeveloperPanelEnabled;
         }

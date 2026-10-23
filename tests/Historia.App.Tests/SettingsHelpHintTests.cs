@@ -50,6 +50,7 @@ public sealed class SettingsHelpHintTests
         ["Lightweight mode"] = "Lightweight mode restricts max rows in memory to 30,000 commits. Takes effect after restart.",
         ["Background preload (rows)"] = "Rows loaded in the background after the graph opens, and again each time you scroll past them. 0 = no limit. Takes effect after restart.",
         ["Max rows in memory"] = "Most rows the graph keeps loaded per repository. Only used when commit details are on disk; otherwise 500,000. Takes effect after restart.",
+        ["Clear agent queue items older than (hours)"] = "When Historia starts, it removes items in the sidebar's CMDR list that are older than this. 1 to 168 hours.",
         ["Enable developer panel"] = "Adds a Developer entry to the app menu with testing and cleanup tools. Takes effect after restart.",
     };
 
@@ -63,7 +64,8 @@ public sealed class SettingsHelpHintTests
         "Pull with rebase", "Reopen tabs on launch", "Ask for a stash message", "Terminal", "Shell",
         "Shell arguments", "Separated by spaces", "Font family", "Font size", "Scrollback (lines)",
         "Cursor style", "Blinking cursor", "Advanced", "Enable logging", "Auto hide notices", "Show splash screen", "Keep commit details on disk",
-        "Fast graph updates (experimental)", "Lightweight mode", "Background preload (rows)", "Max rows in memory", "Enable developer panel",
+        "Fast graph updates (experimental)", "Lightweight mode", "Background preload (rows)", "Max rows in memory",
+        "Clear agent queue items older than (hours)", "Enable developer panel",
     ];
 
     private static readonly string[] RetiredLabels =
