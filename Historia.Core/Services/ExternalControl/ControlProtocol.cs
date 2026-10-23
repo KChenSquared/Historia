@@ -9,7 +9,9 @@ public sealed class ControlKebabEnumConverter<T> : JsonStringEnumConverter<T> wh
 
 /// <summary>What an external tool can ask Historia to do. Every verb navigates; only
 /// <see cref="ProposeCommit"/> offers text, and that text only reaches an editable draft the
-/// user must still act on.</summary>
+/// user must still act on. <see cref="Queue"/> carries one of the navigation verbs as its
+/// <see cref="ControlRequest.Target"/>: Historia records it as an item the user opens later
+/// instead of switching the view now, and never opens a tab or brings its window forward for it.</summary>
 [JsonConverter(typeof(ControlKebabEnumConverter<ControlVerb>))]
 public enum ControlVerb
 {
@@ -21,6 +23,7 @@ public enum ControlVerb
     Changes,
     Selection,
     ProposeCommit,
+    Queue,
 }
 
 [JsonConverter(typeof(ControlKebabEnumConverter<ControlError>))]
@@ -51,6 +54,13 @@ public sealed record ControlRequest
 {
     public required ControlVerb Verb { get; init; }
 
+    /// <summary>For <see cref="ControlVerb.Queue"/>: the navigation verb to run when the user opens
+    /// the item. Every other field describes that verb's request.</summary>
+    public ControlVerb? Target { get; init; }
+
+    /// <summary>For <see cref="ControlVerb.Queue"/>: a short message from the caller, shown on the item.</summary>
+    public string? Note { get; init; }
+
     /// <summary>The caller's working directory, absolute. File paths are resolved against it.</summary>
     public string? Cwd { get; init; }
 
@@ -63,6 +73,10 @@ public sealed record ControlRequest
     public string? OtherRev { get; init; }
 
     public string? Path { get; init; }
+
+    /// <summary>For a queued <see cref="ControlVerb.Changes"/> naming more than one file: every file,
+    /// the first (<see cref="Path"/>) included. Null when there is one file.</summary>
+    public IReadOnlyList<string>? Paths { get; init; }
 
     /// <summary>1-based line in the new (right-hand) file to scroll to.</summary>
     public int? Line { get; init; }
@@ -113,6 +127,12 @@ public sealed record ControlResponse
     /// <summary>For <c>propose-commit</c>: whether the message was filled in or is being offered.</summary>
     public ControlDraftOutcome? Draft { get; init; }
 
+    /// <summary>For <c>queue</c>: true when the item was added for the user to open later.</summary>
+    public bool? Queued { get; init; }
+
+    /// <summary>For <c>queue</c>: the id of the added item.</summary>
+    public string? QueueId { get; init; }
+
     /// <summary>For <c>selection</c>: what the focused repository is showing.</summary>
     public ControlSelection? Selection { get; init; }
 
@@ -162,6 +182,21 @@ public static class ControlVerbs
 
     /// <summary>Whether the client may start Historia when none is running. Queries never do.</summary>
     public static bool MayLaunch(ControlVerb verb) => verb is not (ControlVerb.Ping or ControlVerb.Selection);
+
+    /// <summary>Whether <paramref name="verb"/> navigates and can therefore be queued.</summary>
+    public static bool IsQueueable(ControlVerb verb) => verb is ControlVerb.Open or ControlVerb.Show
+        or ControlVerb.Diff or ControlVerb.Compare or ControlVerb.Changes or ControlVerb.ProposeCommit;
+
+    /// <summary>The message a Historia that predates <see cref="ControlVerb.Queue"/> answers for it:
+    /// it cannot deserialize the verb, so the whole request reads as malformed. Fixed by those
+    /// builds, so it must not follow later wording changes.</summary>
+    public const string PreQueueHostReply = "The request is not valid JSON.";
+
+    /// <summary>Whether <paramref name="response"/> is a running Historia refusing a queued request
+    /// because it is too old to know the verb.</summary>
+    public static bool IsQueueUnsupported(ControlRequest request, ControlResponse response) =>
+        request.Verb == ControlVerb.Queue
+        && response is { Ok: false, Error: ControlError.Usage, Message: PreQueueHostReply };
 }
 
 [JsonSourceGenerationOptions(

@@ -7,6 +7,7 @@ public static class ControlInputValidation
 {
     public const int MaxRevisionLength = 256;
     public const int MaxCommitMessageBytes = 16 * 1024;
+    public const int MaxNoteLength = 200;
 
     /// <summary>A revision is passed to git as a single argument after <c>--end-of-options</c>;
     /// it must still never look like an option, span lines, or be unreasonably long.</summary>
@@ -176,6 +177,55 @@ public static class ControlInputValidation
         }
 
         normalized = result;
+        error = null;
+        return true;
+    }
+
+    /// <summary>
+    /// Normalizes the short message a caller attaches to a queued item: trims it and collapses every
+    /// run of whitespace, line breaks included, to one space. Fails when the result is empty, longer
+    /// than <see cref="MaxNoteLength"/> characters, or holds a control character.
+    /// </summary>
+    public static bool NormalizeNote(string? text, out string? normalized, out string? error)
+    {
+        normalized = null;
+        var sb = new StringBuilder(text?.Length ?? 0);
+        var pendingSpace = false;
+        foreach (var c in text ?? string.Empty)
+        {
+            if (char.IsWhiteSpace(c))
+            {
+                pendingSpace = sb.Length > 0;
+                continue;
+            }
+
+            if (char.IsControl(c))
+            {
+                error = "The note contains a control character.";
+                return false;
+            }
+
+            if (pendingSpace)
+            {
+                sb.Append(' ');
+                pendingSpace = false;
+            }
+            sb.Append(c);
+        }
+
+        if (sb.Length == 0)
+        {
+            error = "The note is empty.";
+            return false;
+        }
+
+        if (sb.Length > MaxNoteLength)
+        {
+            error = $"The note is at most {MaxNoteLength} characters.";
+            return false;
+        }
+
+        normalized = sb.ToString();
         error = null;
         return true;
     }

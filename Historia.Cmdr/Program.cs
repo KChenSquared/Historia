@@ -3,7 +3,8 @@ namespace Historia.Cmdr;
 /// <summary>
 /// <c>historia-cmdr</c>: the command-line client for Historia's local control pipe. It waits for the
 /// answer, prints it as one line of JSON and exits with a code an agent can branch on. It can start
-/// Historia when none is running. Everything it sends is navigation or a commit-message proposal.
+/// Historia when none is running. Everything it sends is navigation, a commit-message proposal, or
+/// either of those queued for the user to open later.
 /// </summary>
 internal static class Program
 {
@@ -31,7 +32,7 @@ internal static class Program
             return UsageError(parsed.UsageError!);
 
         var request = parsed.Request!;
-        if (request.Verb == ControlVerb.ProposeCommit && parsed.MessageFile is not null)
+        if ((request.Target ?? request.Verb) == ControlVerb.ProposeCommit && parsed.MessageFile is not null)
         {
             string text;
             try
@@ -82,6 +83,10 @@ internal static class Program
         using var reader = ControlPipe.CreateReader(client);
         await ControlPipe.WriteRequestAsync(writer, request, ct).ConfigureAwait(false);
         var response = await ControlPipe.ReadResponseAsync(reader, ct).ConfigureAwait(false);
+
+        if (response is not null && ControlVerbs.IsQueueUnsupported(request, response))
+            return Print(ControlResponse.Fail(ControlError.Unreachable,
+                "The running Historia is too old to queue items; restart it."));
 
         return Print(response ?? ControlResponse.Fail(ControlError.Internal, "Historia closed the connection without answering."));
     }
