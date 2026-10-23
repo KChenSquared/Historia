@@ -129,10 +129,9 @@ internal static class GraphContextMenu
             && t.Refs.Any(r => r.Type == DecorationType.LocalBranch && string.Equals(r.Name, cur, StringComparison.Ordinal));
         if (!onCurrent)
         {
-            var targetIndex = t.Refs.ToList().FindIndex(r => r.IsBranch);
-            if (targetIndex >= 0)
+            if (t.Refs.Where(r => r.IsBranch).Select(r => (GraphMenuRef?)r).FirstOrDefault() is { } target)
             {
-                var name = t.Refs[targetIndex].DisplayName;
+                var name = target.DisplayName;
                 var shown = BranchMenu.TruncateBranchLabelForMenu(name);
                 history.Add(MenuLeaf($"Merge {shown} into current", () => a.Merge(name, name)));
                 history.Add(MenuLeaf($"Rebase current branch onto {shown}", () => a.Rebase(name)));
@@ -205,6 +204,8 @@ internal static class GraphContextMenu
             case DecorationType.Tag:
                 foreach (var rem in t.ConfiguredRemotes)
                     items.Add(MenuLeaf($"Push {shown} to {rem}", () => a.PushTag(r.Name, rem)));
+                if (items.Count > 0)
+                    items.Add(new Separator());
                 items.Add(MenuLeaf($"Delete tag {shown}", () => a.DeleteTag(r.Name)));
                 break;
         }
@@ -228,18 +229,20 @@ internal static class GraphContextMenu
     }
 
     /// <summary>Resolves a branch submenu's divergence items the first time it opens and inserts
-    /// them after its checkout item, if the submenu is still open when they arrive.</summary>
+    /// them after its checkout item once the submenu is open: if it closed before they arrived,
+    /// the next open inserts them without asking git again.</summary>
     internal static async Task LoadDivergenceAsync(MenuItem submenu, GraphMenuRef r, IGraphMenuActions a)
     {
-        if (submenu.ItemsSource is not RefItems items || items.DivergenceRequested)
+        if (submenu.ItemsSource is not RefItems items || items.DivergenceInserted)
             return;
-        items.DivergenceRequested = true;
+        items.Divergence ??= a.DivergenceItemsAsync(r);
 
         IReadOnlyList<Control> extra;
-        try { extra = await a.DivergenceItemsAsync(r); }
+        try { extra = await items.Divergence; }
         catch { return; }
-        if (extra.Count == 0 || !submenu.IsSubMenuOpen)
+        if (extra.Count == 0 || items.DivergenceInserted || !submenu.IsSubMenuOpen)
             return;
+        items.DivergenceInserted = true;
 
         var at = r.Type == DecorationType.LocalBranch || r.Remote is not null ? 1 : 0;
         foreach (var item in extra)
@@ -249,7 +252,8 @@ internal static class GraphContextMenu
     /// <summary>A ref submenu's items; live, so divergence items can arrive after it opens.</summary>
     private sealed class RefItems : ObservableCollection<Control>
     {
-        public bool DivergenceRequested { get; set; }
+        public Task<IReadOnlyList<Control>>? Divergence { get; set; }
+        public bool DivergenceInserted { get; set; }
     }
 
     private static List<Control> Join(params List<Control>[] sections)

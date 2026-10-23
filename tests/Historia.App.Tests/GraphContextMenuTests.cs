@@ -17,6 +17,7 @@ public sealed class GraphContextMenuTests
         public List<string> Calls { get; } = [];
         public int DivergenceCalls { get; private set; }
         public IReadOnlyList<Control> Divergence { get; set; } = [];
+        public Task<IReadOnlyList<Control>>? PendingDivergence { get; set; }
 
         private Task Record(string call)
         {
@@ -45,7 +46,7 @@ public sealed class GraphContextMenuTests
         public Task<IReadOnlyList<Control>> DivergenceItemsAsync(GraphMenuRef branch)
         {
             DivergenceCalls++;
-            return Task.FromResult(Divergence);
+            return PendingDivergence ?? Task.FromResult(Divergence);
         }
     }
 
@@ -237,6 +238,7 @@ public sealed class GraphContextMenuTests
 
         var sub = Children(Item(items, "v1 (tag)"));
         Assert.Equal(["Push v1 to origin", "Push v1 to upstream", "Delete tag v1"], Headers(sub));
+        Assert.IsType<Separator>(sub[2]);
         foreach (var m in sub.OfType<MenuItem>())
             Click(m);
         Assert.Equal(["push-tag v1 origin", "push-tag v1 upstream", "delete-tag v1"], a.Calls);
@@ -322,15 +324,25 @@ public sealed class GraphContextMenuTests
     }
 
     [AvaloniaFact]
-    public async Task Divergence_items_are_dropped_when_submenu_closed_first()
+    public async Task Divergence_items_wait_for_the_next_open_when_submenu_closed_first()
     {
-        var a = new RecordingActions { Divergence = [new MenuItem { Header = "Push 2 commit(s) to origin" }] };
+        var pending = new TaskCompletionSource<IReadOnlyList<Control>>();
+        var a = new RecordingActions { PendingDivergence = pending.Task };
         var refs = Refs(Deco(DecorationType.LocalBranch, "main", true));
         var sub = GraphContextMenu.Build(Target(refs), a).OfType<MenuItem>().First();
 
+        sub.IsSubMenuOpen = true;
+        var first = GraphContextMenu.LoadDivergenceAsync(sub, refs[0], a);
+        sub.IsSubMenuOpen = false;
+        pending.SetResult([new MenuItem { Header = "Push 2 commit(s) to origin" }]);
+        await first;
+        Assert.DoesNotContain("Push 2 commit(s) to origin", Headers(Children(sub)));
+
+        sub.IsSubMenuOpen = true;
         await GraphContextMenu.LoadDivergenceAsync(sub, refs[0], a);
 
-        Assert.DoesNotContain("Push 2 commit(s) to origin", Headers(Children(sub)));
+        Assert.Equal(1, a.DivergenceCalls);
+        Assert.Equal(["Checkout main", "Push 2 commit(s) to origin", "Rename…"], Headers(Children(sub)).Take(3));
     }
 
     [AvaloniaFact]
