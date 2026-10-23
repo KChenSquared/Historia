@@ -1,9 +1,10 @@
 namespace Historia.Views;
 
 /// <summary>
-/// The branch context-menu items common to GitKraken · Fork · GitComet · GitHub Desktop,
-/// shared by the graph branch-label pill menu and the sidebar branch rows. Each item does its
-/// own guard + <c>RefreshAllAsync</c> + toast so callers only supply the collaborators.
+/// The branch context-menu items common to GitKraken · Fork · GitComet · GitHub Desktop, for
+/// the sidebar branch rows, plus the divergence items and name trimming the graph's context menu
+/// shares. Each item does its own guard + <c>RefreshAllAsync</c> + toast so callers only supply
+/// the collaborators.
 /// </summary>
 internal static class BranchMenu
 {
@@ -32,43 +33,6 @@ internal static class BranchMenu
     /// a menu item — e.g. "Checkout origin/feature/very-long-name as a new branch" — without
     /// affecting the untrimmed name callers still use for the actual git operation.</summary>
     internal static string TruncateBranchLabelForMenu(string name) => RefMenuItemViewModel.TrimName(name);
-
-    /// <summary>Builds the per-remote submenus for a branch label pill. This is the single
-    /// place to add per-remote items to the pill menu.</summary>
-    internal static IReadOnlyList<MenuItem> BuildRemoteBranchSubmenus(
-        string branch,
-        IReadOnlyList<string> remotes,
-        string? currentBranch,
-        Func<string, Task> merge,
-        Func<string, Task> delete)
-    {
-        if (remotes.Count == 0)
-            return [];
-
-        var submenus = new List<MenuItem>(remotes.Count);
-        foreach (var remote in remotes)
-        {
-            var header = TruncateBranchLabelForMenu($"{remote}/{branch}");
-            var remoteRef = $"{remote}/{branch}";
-
-            Control mergeItem = currentBranch is not null
-                ? MenuLeaf($"Merge into '{TruncateBranchLabelForMenu(currentBranch)}'…", () => merge(remoteRef))
-                : new MenuItem { Header = "Merge into current branch", IsEnabled = false };
-
-            var deleteItem = MenuLeaf("Delete…", () => delete(remote));
-
-            var item = new MenuItem { Header = header };
-            item.ItemsSource = new Control[]
-            {
-                mergeItem,
-                new Separator(),
-                deleteItem,
-            };
-            submenus.Add(item);
-        }
-
-        return submenus;
-    }
 
     /// <summary>Resolves (ahead, behind) for <paramref name="t"/> against its counterpart
     /// and returns the matching push/pull/fast-forward menu item(s), or empty when there is no

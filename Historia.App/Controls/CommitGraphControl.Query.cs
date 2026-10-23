@@ -185,11 +185,12 @@ public sealed partial class CommitGraphControl
         _dragging = false;
         CloseRefList();
 
-        foreach (var (rect, _, hidden) in _overflowChips)
+        // The +N chip opens the row's context menu, where every ref it hides has a submenu.
+        foreach (var (rect, chipRow, _) in _overflowChips)
         {
             if (rect.Contains(pos))
             {
-                ShowOverflowMenu(hidden);
+                ShowGraphContextMenu(chipRow, null);
                 e.Handled = true;
                 return;
             }
@@ -352,19 +353,6 @@ public sealed partial class CommitGraphControl
         InvalidateVisual();
     }
 
-    private void ShowOverflowMenu(IReadOnlyList<GraphDecoration> hidden)
-    {
-        var menu = new ContextMenu();
-        var items = new List<Control>();
-        foreach (var d in hidden)
-        {
-            var deco = d;
-            items.Add(MenuLeaf(d.Type == DecorationType.Head ? "HEAD" : d.Label, () => ShowPillContextMenu(deco)));
-        }
-        menu.ItemsSource = items;
-        OpenMenu(menu);
-    }
-
     private void OnRightButtonPressed(PointerPressedEventArgs e)
     {
         // The message-column hover tooltip is a separate popup layer from the context menu and
@@ -383,11 +371,13 @@ public sealed partial class CommitGraphControl
             return;
         }
 
-        foreach (var (rect, _, hidden) in _overflowChips)
+        // A label, the row's +N overflow chip and the row itself all open the same menu for the
+        // commit; a label only moves its own refs to the top.
+        foreach (var (rect, chipRow, _) in _overflowChips)
         {
             if (rect.Contains(pos))
             {
-                ShowOverflowMenu(hidden);
+                ShowGraphContextMenu(chipRow, null);
                 e.Handled = true;
                 return;
             }
@@ -396,16 +386,15 @@ public sealed partial class CommitGraphControl
         var pill = PillAt(pos);
         if (pill is { } p)
         {
-            ShowPillContextMenu(p.Deco);
+            ShowGraphContextMenu(p.Row, p.Deco);
             e.Handled = true;
             return;
         }
 
         var row = RowAt(pos.Y);
-        if (row >= 0 && _layout is { } l)
+        if (row >= 0)
         {
-            _state?.SetSelectedCommit(l.Layout.Commits[row].Id);
-            ShowCommitContextMenu(l.Layout.Commits[row].Id);
+            ShowGraphContextMenu(row, null);
             e.Handled = true;
         }
     }

@@ -311,6 +311,7 @@ public sealed partial class CommitGraphControl : Control
     internal int TextCacheCountForTesting => _textCache.Count;
     internal IReadOnlyList<(Rect Rect, string Tip)> IconRectsForTesting => _iconRects;
     internal IReadOnlyList<(Rect Rect, int Row, GraphDecoration Deco)> PillRectsForTesting => _pillRects;
+    internal IReadOnlyList<(Rect Rect, int Row, List<GraphDecoration> Hidden)> OverflowChipsForTesting => _overflowChips;
     internal IReadOnlyDictionary<int, double> BadgeRightEdgesForTesting => _badgeRightEdge;
     internal RemoteNumbering RemoteNumberingForTesting => _remoteNumbering;
     internal void ResetMissCountersForTesting()

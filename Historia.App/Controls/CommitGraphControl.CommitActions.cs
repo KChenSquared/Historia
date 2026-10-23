@@ -1,10 +1,11 @@
 namespace Historia.Controls;
 
-// The commit-row / branch-pill / drop-intent context
-// menus and the git operations they invoke (checkout, create branch/tag, reset, cherry-pick,
-// revert, merge, delete), as part of the CommitGraphControl partial class. The Avalonia
-// Pen/Brush render pass, hit-testing and layout live in CommitGraphControl.cs.
-public sealed partial class CommitGraphControl
+// The graph's commit context menu (built by GraphContextMenu, with this control as its
+// IGraphMenuActions), the drop-intent menu, and the git operations they invoke (checkout, create
+// branch/tag, reset, cherry-pick, revert, merge, delete), as part of the CommitGraphControl
+// partial class. The Avalonia Pen/Brush render pass, hit-testing and layout live in
+// CommitGraphControl.cs.
+public sealed partial class CommitGraphControl : IGraphMenuActions
 {
     private void CheckoutRefEntry(DecorationType type, string label, bool isLocal, string[]? remotes)
     {
@@ -35,51 +36,156 @@ public sealed partial class CommitGraphControl
 
     // ── Context menus ──
 
-    private void ShowCommitContextMenu(GitObjectId id)
+    /// <summary>Opens the one context menu for the commit on <paramref name="row"/>, selecting
+    /// it first; <paramref name="clicked"/> is the label that was right-clicked, whose refs lead
+    /// the menu.</summary>
+    private void ShowGraphContextMenu(int row, GraphDecoration? clicked)
+    {
+        if (_layout is not { } l || row < 0 || row >= l.Layout.RowCount)
+            return;
+        _state?.SetSelectedCommit(l.Layout.Commits[row].Id);
+        if (BuildGraphContextMenuItems(row, clicked) is { Count: > 0 } items)
+            OpenMenu(new ContextMenu { ItemsSource = items });
+    }
+
+    internal IReadOnlyList<Control> BuildGraphContextMenuItems(int row, GraphDecoration? clicked)
+    {
+        if (_context is not { } ctx || _layout is not { } l || row < 0 || row >= l.Layout.RowCount)
+            return [];
+        var current = _state?.CurrentBranch?.Name;
+        IReadOnlyList<GraphDecoration> rowDecorations = DecorationsByRow(l.Layout).TryGetValue(row, out var decos) ? decos : [];
+        IReadOnlyList<GitObjectId> multi = _multiSelect.Count > 1
+            ? _multiSelect.OrderByDescending(r => r).Select(r => l.Layout.Commits[r].Id).ToList()
+            : [];
+        var target = new GraphMenuTarget(
+            l.Layout.Commits[row].Id,
+            GraphContextMenu.RefsForRow(rowDecorations, clicked, current),
+            current,
+            ctx.State.Remotes.Select(r => r.Name).ToList(),
+            multi);
+        return GraphContextMenu.Build(target, this);
+    }
+
+    // ── Context-menu operations ──
+
+    Task IGraphMenuActions.CheckoutBranch(string name)
+        => _context is { } ctx ? BranchActions.CheckoutAsync(ctx, _notifications, _stashes, name) : Task.CompletedTask;
+
+    Task IGraphMenuActions.CheckoutTracking(string name, string trackingRef)
+        => _context is { } ctx ? BranchActions.CheckoutTrackingAsync(ctx, _notifications, _stashes, name, trackingRef) : Task.CompletedTask;
+
+    Task IGraphMenuActions.CheckoutDetached(string sha, string shortSha)
+        => _context is { } ctx ? RunConfirmedDetachedCheckout(ctx, sha, $"Check out {shortSha} in a detached HEAD?") : Task.CompletedTask;
+
+    Task IGraphMenuActions.CreateBranch(string sha, string shortSha)
+        => _context is { } ctx ? PromptCreateBranch(ctx, sha, shortSha) : Task.CompletedTask;
+
+    Task IGraphMenuActions.CreateTag(string sha, string shortSha)
+        => _context is { } ctx ? PromptCreateTag(ctx, sha, shortSha) : Task.CompletedTask;
+
+    Task IGraphMenuActions.Merge(string refish, string display)
+        => _context is { } ctx ? MergeAsync(ctx, refish, display) : Task.CompletedTask;
+
+    Task IGraphMenuActions.Rebase(string onto)
+    {
+        _nav.RequestNavigate($"rebase?onto={Uri.EscapeDataString(onto)}");
+        return Task.CompletedTask;
+    }
+
+    Task IGraphMenuActions.CherryPick(IReadOnlyList<GitObjectId> ids) => CherryPickAsync(ids);
+
+    Task IGraphMenuActions.Revert(IReadOnlyList<GitObjectId> ids) => RevertAsync(ids);
+
+    Task IGraphMenuActions.Reset(string sha, GitResetMode mode, string shortSha)
+        => _context is { } ctx ? ResetAsync(ctx, sha, mode, shortSha) : Task.CompletedTask;
+
+    async Task IGraphMenuActions.Rename(string name)
     {
         if (_context is not { } ctx)
             return;
-        var sha = id.ToString();
-        var shortSha = sha[..7];
-        var items = new List<Control>
-        {
-            MenuLeaf("Copy SHA", () => CopyText(sha)),
-            MenuLeaf("Copy short SHA", () => CopyText(shortSha)),
-            MenuLeaf("Copy commit message", () => CopyCommitMessage(id)),
-            new Separator(),
-            MenuLeaf("Create branch here…", () => PromptCreateBranch(ctx, sha, shortSha)),
-            MenuLeaf("Create tag here…", () => PromptCreateTag(ctx, sha, shortSha)),
-            MenuLeaf("Checkout this commit (detached)", () =>
-                RunConfirmedDetachedCheckout(ctx, sha, $"Check out {shortSha} in a detached HEAD?")),
-            new Separator(),
-        };
+        var newName = await _dialogs.PromptAsync("Rename branch", $"New name for '{name}':", name);
+        if (string.IsNullOrWhiteSpace(newName) || newName == name)
+            return;
+        await Guard(() => ctx.Gateway.RenameBranchAsync(name, newName.Trim(), ctx.Lifetime), ctx, "Rename");
+    }
 
-        var resetItem = new MenuItem { Header = "Reset current branch to here" };
-        resetItem.ItemsSource = new Control[]
-        {
-            MenuLeaf("Soft (keep index and working tree)", () => ResetAsync(ctx, sha, GitResetMode.Soft, shortSha)),
-            MenuLeaf("Mixed (keep working tree)", () => ResetAsync(ctx, sha, GitResetMode.Mixed, shortSha)),
-            MenuLeaf("Hard (discard changes)", () => ResetAsync(ctx, sha, GitResetMode.Hard, shortSha)),
-        };
-        items.Add(resetItem);
+    Task IGraphMenuActions.DeleteLocal(string name)
+        => _context is { } ctx ? BranchActions.DeleteAsync(ctx, _dialogs, _notifications, name) : Task.CompletedTask;
 
-        items.Add(MenuLeaf("Merge into current branch", () => MergeAsync(ctx, sha, shortSha)));
-        items.Add(new Separator());
-        items.Add(MenuLeaf("Cherry-pick onto current branch", () => CherryPickAsync([id])));
-        items.Add(MenuLeaf("Revert this commit", () => RevertAsync([id])));
-        if (_multiSelect.Count > 1)
+    Task IGraphMenuActions.DeleteRemote(string remote, string name)
+    {
+        if (_context is { } ctx)
+            _actionBus.RequestNetworkAction(new RepoNetworkRequest(RepoNetworkAction.DeleteRemoteBranch, remote, null, name, ctx));
+        return Task.CompletedTask;
+    }
+
+    // The only way a tag reaches a remote: one unforced push per remote, offered whether or not
+    // the remote already has it; a refusal comes back as an error card.
+    Task IGraphMenuActions.PushTag(string tag, string remote)
+    {
+        if (_context is { } ctx)
+            _actionBus.RequestNetworkAction(new RepoNetworkRequest(RepoNetworkAction.PushTag, remote, null, Repo: ctx, Tag: tag));
+        return Task.CompletedTask;
+    }
+
+    Task IGraphMenuActions.DeleteTag(string tag)
+        => _context is { } ctx ? ConfirmAndDeleteTagAsync(ctx, tag) : Task.CompletedTask;
+
+    Task IGraphMenuActions.Copy(string text)
+    {
+        CopyText(text);
+        return Task.CompletedTask;
+    }
+
+    Task IGraphMenuActions.CopyMessage(GitObjectId id)
+    {
+        CopyCommitMessage(id);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>The push/pull/fast-forward items for a branch against its counterpart: a local
+    /// branch against its upstream, a remote branch against the local branch of the same name.</summary>
+    async Task<IReadOnlyList<Control>> IGraphMenuActions.DivergenceItemsAsync(GraphMenuRef branch)
+    {
+        if (_context is not { } ctx)
+            return [];
+        var name = branch.Name;
+        string? counterpartRef = null, remoteAlias = null;
+        if (branch.Type == DecorationType.LocalBranch)
         {
-            var ordered = _multiSelect.OrderByDescending(r => r)
-                .Select(r => _layout!.Layout.Commits[r].Id).ToList();
-            items.Add(MenuLeaf($"Cherry-pick {ordered.Count} selected (oldest first)", () => CherryPickAsync(ordered)));
-            items.Add(MenuLeaf($"Revert {ordered.Count} selected", () => RevertAsync(ordered)));
+            var local = _state?.Branches.FirstOrDefault(b => !b.IsRemote && b.Name == name);
+            if (local?.UpstreamName is { } upstream)
+            {
+                counterpartRef = upstream;
+                remoteAlias = _state?.Branches.FirstOrDefault(b => b.IsRemote && b.Name == upstream)?.RemoteName;
+            }
         }
+        else if (branch.Remote is { } remote)
+        {
+            if (_state?.Branches.Any(b => !b.IsRemote && b.Name == name) ?? false)
+                counterpartRef = name;
+            remoteAlias = remote;
+        }
+        if (counterpartRef is null || remoteAlias is null)
+            return [];
 
-        OpenMenu(new ContextMenu { ItemsSource = items });
+        var isLocal = branch.Type == DecorationType.LocalBranch;
+        var target = new BranchMenu.Target(
+            Name: name, CopyName: name, TrackingRef: isLocal ? name : $"{remoteAlias}/{name}",
+            IsLocal: isLocal, TipSha: null, CurrentBranch: _state?.CurrentBranch?.Name,
+            CounterpartRef: counterpartRef, RemoteAlias: remoteAlias);
+        return await BranchMenu.BuildDivergenceItemsAsync(target, ctx.Gateway, _actionBus, ctx.Lifetime);
+    }
+
+    private async Task ConfirmAndDeleteTagAsync(RepositoryContext ctx, string name)
+    {
+        if (!await _dialogs.ConfirmDestructiveAsync("Delete tag", $"Delete local tag '{name}'? This cannot be undone.", "Delete"))
+            return;
+        await Guard(() => ctx.Gateway.DeleteTagAsync(name, ctx.Lifetime), ctx, "Delete tag");
     }
 
     /// <summary>Prompt for a new branch at <paramref name="sha"/> and create it.
-    /// Shared by the commit-row menu and the branch/tag pill menu.</summary>
+    /// Used by the graph context menu.</summary>
     private Task PromptCreateBranch(RepositoryContext ctx, string sha, string shortSha)
         => BranchMenu.PromptCreateBranch(ctx, _dialogs, _notifications, _stashes, sha, shortSha);
 
@@ -148,191 +254,6 @@ public sealed partial class CommitGraphControl
         await BranchActions.RunWithStashRecovery(ctx, _notifications, _stashes,
             () => NetworkRunner.RunExclusiveAsync(ctx, "Pull",
                 (p, ct) => ctx.Gateway.PullAsync(remote, name, GitPullOptions.From(_settings.Current), p, ct)), "Pull");
-    }
-
-    private void ShowPillContextMenu(GraphDecoration deco)
-    {
-        if (_context is not { } ctx)
-            return;
-        var name = deco.Label;
-        var remotes = deco.RemotesOrNull ?? [];
-        var items = new List<Control>();
-
-        // The pill's own commit — for "Create branch/tag here" on a branch or tag label.
-        GitObjectId? pillId = _layout is { } lay && deco.RowIndex >= 0 && deco.RowIndex < lay.Layout.Commits.Count
-            ? lay.Layout.Commits[deco.RowIndex].Id
-            : null;
-
-        if (deco.Type is DecorationType.LocalBranch or DecorationType.RemoteBranch)
-        {
-            if (deco.IsLocal)
-                items.Add(MenuLeaf($"Checkout {BranchMenu.TruncateBranchLabelForMenu(name)}",
-                    () => BranchActions.CheckoutAsync(ctx, _notifications, _stashes, name)));
-
-            if (remotes.Length > 0)
-            {
-                if (deco.IsLocal)
-                    items.Add(new Separator());
-                foreach (var rem in remotes)
-                {
-                    var tracking = $"{rem}/{name}";
-                    items.Add(MenuLeaf($"Checkout {BranchMenu.TruncateBranchLabelForMenu(tracking)} as a new branch",
-                        () => BranchActions.CheckoutTrackingAsync(ctx, _notifications, _stashes, name, tracking)));
-                }
-            }
-
-            var primaryRef = deco.IsLocal ? name : (remotes.Length > 0 ? $"{remotes[0]}/{name}" : name);
-            items.Add(new Separator());
-            if (deco.IsLocal)
-                items.Add(MenuLeaf($"Merge {BranchMenu.TruncateBranchLabelForMenu(name)} into current", () => MergeAsync(ctx, name, name)));
-            items.Add(MenuLeaf($"Rebase current branch onto {BranchMenu.TruncateBranchLabelForMenu(primaryRef)}", () => _nav.RequestNavigate($"rebase?onto={Uri.EscapeDataString(primaryRef)}")));
-
-            if (deco.IsLocal)
-            {
-                items.Add(new Separator());
-                items.Add(MenuLeaf("Rename…", async () =>
-                {
-                    var newName = await _dialogs.PromptAsync("Rename branch", $"New name for '{name}':", name);
-                    if (string.IsNullOrWhiteSpace(newName) || newName == name) return;
-                    await Guard(() => ctx.Gateway.RenameBranchAsync(name, newName.Trim(), ctx.Lifetime), ctx, "Rename");
-                }));
-                items.Add(MenuLeaf("Delete local…", () => BranchActions.DeleteAsync(ctx, _dialogs, _notifications, name)));
-            }
-        }
-        else if (deco.Type == DecorationType.Tag)
-        {
-            // The only way a tag reaches a remote: one unforced push per remote, offered whether
-            // or not the remote already has it; a refusal comes back as an error card.
-            foreach (var rem in ctx.State.Remotes.Select(r => r.Name))
-            {
-                items.Add(MenuLeaf($"Push {BranchMenu.TruncateBranchLabelForMenu(name)} to {rem}", () =>
-                {
-                    _actionBus.RequestNetworkAction(new RepoNetworkRequest(
-                        RepoNetworkAction.PushTag, rem, null, Repo: ctx, Tag: name));
-                    return Task.CompletedTask;
-                }));
-            }
-            if (items.Count > 0) items.Add(new Separator());
-            items.Add(MenuLeaf($"Delete tag {BranchMenu.TruncateBranchLabelForMenu(name)}", async () =>
-            {
-                if (!await _dialogs.ConfirmDestructiveAsync("Delete tag", $"Delete local tag '{name}'? This cannot be undone.", "Delete")) return;
-                await Guard(() => ctx.Gateway.DeleteTagAsync(name, ctx.Lifetime), ctx, "Delete tag");
-            }));
-        }
-
-        // "Create branch/tag here" act on the pill's own commit — present on the branch
-        // label and tag menus, same as on the graph row menu.
-        if (pillId is { } bid &&
-            deco.Type is DecorationType.LocalBranch or DecorationType.RemoteBranch or DecorationType.Tag)
-        {
-            var shortSha = bid.ToShortString(7);
-            if (items.Count > 0) items.Add(new Separator());
-            items.Add(MenuLeaf("Create branch here…", () => PromptCreateBranch(ctx, bid.ToString(), shortSha)));
-            items.Add(MenuLeaf("Create tag here…", () => PromptCreateTag(ctx, bid.ToString(), shortSha)));
-        }
-
-        // "Copy branch name", as on the sidebar branch menu.
-        if (deco.Type is DecorationType.LocalBranch or DecorationType.RemoteBranch)
-        {
-            var copyName = deco.IsLocal ? name : (remotes.Length > 0 ? $"{remotes[0]}/{name}" : name);
-            items.Add(new Separator());
-            items.Add(MenuLeaf("Copy branch name", () => CopyText(copyName)));
-        }
-
-        var remoteSection = deco.Type is DecorationType.LocalBranch or DecorationType.RemoteBranch
-            ? BranchMenu.BuildRemoteBranchSubmenus(
-                name,
-                remotes,
-                _state?.CurrentBranch?.Name,
-                r => MergeAsync(ctx, r, r),
-                rem =>
-                {
-                    _actionBus.RequestNetworkAction(new RepoNetworkRequest(
-                        RepoNetworkAction.DeleteRemoteBranch, rem, null, name, ctx));
-                    return Task.CompletedTask;
-                })
-            : (IReadOnlyList<MenuItem>)[];
-
-        var remoteControls = remoteSection.Count > 0
-            ? (items.Count > 0 ? remoteSection.Cast<Control>().Concat([new Separator()]).ToList() : remoteSection.Cast<Control>().ToList())
-            : [];
-
-        var allItems = remoteControls.Concat(items).ToList();
-
-        if (allItems.Count > 0)
-        {
-            var menu = new ContextMenu { ItemsSource = allItems };
-
-            // Mirror the sidebar's divergence-aware push/pull/fast-forward items, resolved
-            // lazily on Opening (git process) rather than at menu-build time.
-            if (deco.Type is DecorationType.LocalBranch or DecorationType.RemoteBranch)
-            {
-                string? counterpartRef = null, remoteAlias = null;
-                if (deco.IsLocal)
-                {
-                    var local = _state?.Branches.FirstOrDefault(b => !b.IsRemote && b.Name == name);
-                    if (local?.UpstreamName is { } upstream)
-                    {
-                        counterpartRef = upstream;
-                        remoteAlias = _state?.Branches.FirstOrDefault(b => b.IsRemote && b.Name == upstream)?.RemoteName;
-                    }
-                }
-                else if (remotes.Length > 0)
-                {
-                    var hasLocalCounterpart = _state?.Branches.Any(b => !b.IsRemote && b.Name == name) ?? false;
-                    if (hasLocalCounterpart)
-                        counterpartRef = name;
-                    remoteAlias = remotes[0];
-                }
-
-                if (counterpartRef is not null && remoteAlias is not null)
-                {
-                    var divergenceTarget = new BranchMenu.Target(
-                        Name: name, CopyName: name, TrackingRef: deco.IsLocal ? name : $"{remoteAlias}/{name}",
-                        IsLocal: deco.IsLocal, TipSha: null, CurrentBranch: _state?.CurrentBranch?.Name,
-                        CounterpartRef: counterpartRef, RemoteAlias: remoteAlias);
-                    var baseItems = items;
-                    menu.Opening += async (_, _) =>
-                    {
-                        var opened = menu;
-                        IReadOnlyList<Control> divergenceItems;
-                        try { divergenceItems = await BranchMenu.BuildDivergenceItemsAsync(divergenceTarget, ctx.Gateway, _actionBus, ctx.Lifetime); }
-                        catch { return; }
-                        if (divergenceItems.Count == 0 || !ReferenceEquals(menu, opened) || !menu.IsOpen)
-                            return;
-                        menu.ItemsSource = remoteControls
-                            .Concat(divergenceItems)
-                            .Concat([new Separator()])
-                            .Concat(baseItems)
-                            .ToList();
-                    };
-                }
-            }
-
-            // Long branch/tag names get ellipsis-trimmed in the menu items above (so the
-            // popup never overflows the screen) — show the untrimmed name as a tooltip anchored
-            // above the menu itself so it's still readable. Opened/Closed keep the tooltip's
-            // lifetime tied to the menu's.
-            if (deco.Type is DecorationType.LocalBranch or DecorationType.RemoteBranch or DecorationType.Tag)
-            {
-                var fullLabel = deco.Type == DecorationType.Tag ? name
-                    : deco.IsLocal ? name : (remotes.Length > 0 ? $"{remotes[0]}/{name}" : name);
-                if (fullLabel.Length > BranchMenu.MenuNameMaxChars)
-                {
-                    ToolTip.SetTip(menu, fullLabel);
-                    ToolTip.SetPlacement(menu, PlacementMode.TopEdgeAlignedLeft);
-                    ToolTip.SetVerticalOffset(menu, -4);
-                    ToolTip.SetHorizontalOffset(menu, 0);
-                    // Deferred a frame: the menu reports a zero-size Bounds at Opened time (before
-                    // its first layout pass), which placed the tooltip on top of the menu instead
-                    // of above it.
-                    menu.Opened += (_, _) => Dispatcher.UIThread.Post(() => ToolTip.SetIsOpen(menu, true), DispatcherPriority.Loaded);
-                    menu.Closed += (_, _) => ToolTip.SetIsOpen(menu, false);
-                }
-            }
-
-            OpenMenu(menu);
-        }
     }
 
     private void ShowDropIntentMenu(GitObjectId commitId, string shortSha, string branchLabel)
