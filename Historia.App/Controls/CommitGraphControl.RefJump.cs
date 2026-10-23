@@ -259,7 +259,7 @@ public sealed partial class CommitGraphControl
             {
                 // Same context menu as right-clicking this ref's badge directly on the graph.
                 e.Handled = true;
-                ShowPillContextMenu(new GraphDecoration
+                ShowGraphContextMenu(row, new GraphDecoration
                 {
                     RowIndex = row,
                     Type = type,
