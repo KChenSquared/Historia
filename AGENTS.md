@@ -35,8 +35,8 @@ One line each; the constitution has the full text.
   numbers (Rule 39).
 - Views are AXAML bound to a view model in `Historia.Core/ViewModels`; no code-built views, no
   `new Window`, no `Rebuild*` methods (Rule 30.2).
-- Agent-facing surfaces navigate and propose only; they never stage, commit or change anything
-  (Rule 40).
+- Agent-facing surfaces navigate, propose and queue only; they never stage, commit or change
+  anything (Rule 40).
 
 ## Plans
 
@@ -56,8 +56,11 @@ maintainer merges.
 
 ## Reviewing your work
 
-After a change, offer to open it in Historia: `historia-cmdr show HEAD` for a commit, or
-`historia-cmdr changes <file>` for an uncommitted change. When the maintainer wants to commit it
-themselves, stage only the files you changed with explicit paths and run
-`historia-cmdr propose-commit -F -` with the message on standard input instead of committing. See
+After a change, queue it in Historia's CMDR list with a one-line note on what to look at:
+`historia-cmdr show HEAD --note "<what to check>"` for a commit, or
+`historia-cmdr changes <file>... --note "<what to check>"` for uncommitted changes. Queueing does not
+switch the maintainer's view; use `--now` only when asked to show it right away. When the maintainer
+wants to commit it themselves, stage only the files you changed with explicit paths and run
+`historia-cmdr propose-commit -F - --note "<what to check>"` with the message on standard input
+instead of committing. See
 [`docs/Historia-commander-skills/`](docs/Historia-commander-skills/README.md).

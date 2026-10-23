@@ -1,11 +1,12 @@
 ---
 name: historia-propose-commit
-description: Stage only the files this task changed and hand them to the user in Historia with a proposed commit message, so the user reviews the staged files and clicks Commit themselves. Use when the user says "stage it for me", "let me commit it" or "hand it to Historia", or when you finish a task and the user prefers to commit themselves.
+description: Stage only the files this task changed and queue them in Historia's CMDR list with a proposed commit message, so the user reviews the staged files and clicks Commit themselves. Use when the user says "stage it for me", "let me commit it" or "hand it to Historia", or when you finish a task and the user prefers to commit themselves.
 ---
 
 # Hand the change to the user for committing
 
-You stage; the user commits. Historia never stages or commits for you.
+You stage; the user commits. Historia never stages or commits for you, and it does not switch views:
+the proposal waits in the CMDR list at the top of its sidebar until the user clicks it.
 
 ## Procedure
 
@@ -17,13 +18,14 @@ You stage; the user commits. Historia never stages or commits for you.
    - If files were already staged before the task, say so; do not unstage them.
 3. **Write the message in the repository's convention.** Read `git log --oneline -10` first. Subject
    at most 72 characters, body wrapped, no trailers unless the repository uses them.
-4. **Pipe it on standard input** so no shell mangles quotes or newlines. Never put a long message on
-   the command line with `-m`.
+4. **Write the note:** one line, at most 200 characters, saying what the change is or what to check.
+5. **Pipe the message on standard input** so no shell mangles quotes or newlines. Never put a long
+   message on the command line with `-m`.
 
    bash, with a quoted heredoc:
 
    ```bash
-   historia-cmdr propose-commit -F - <<'EOF'
+   historia-cmdr propose-commit -F - --note "<what to check>" <<'EOF'
    feat(scope): subject line
 
    Body paragraph.
@@ -39,22 +41,27 @@ You stage; the user commits. Historia never stages or commits for you.
    feat(scope): subject line
 
    Body paragraph.
-   '@ | historia-cmdr propose-commit -F -
+   '@ | historia-cmdr propose-commit -F - --note "<what to check>"
    ```
 
-5. **Show the command, then run it.** Print the exact command you run, message included, in a fenced
+6. **Show the command, then run it.** Print the exact command you run, message included, in a fenced
    block tagged with its shell (`bash` or `powershell`) so the user can rerun it, then run it.
-6. **Read the JSON reply.**
+7. **Read the JSON reply.**
+   - `"queued": true`: the proposal is in the CMDR list. A queued reply has no `draft` field; the
+     message is offered to the commit box only when the user clicks the item, which opens the staging
+     panel. If the user already has a different draft then, Historia keeps it and offers the message
+     in a bar above the box.
    - Compare `stagedPaths` with what you meant to stage and report any difference.
-   - `"draft": "pending"`: tell the user their existing draft was kept and Historia is offering the
-     message in a bar above the box.
    - `nothing-staged` (exit 1): say so and stop.
-   - Exit 2: Historia is unreachable or external control is switched off; say so, and point the user
-     at the command above to rerun once Historia is up.
-7. **Finish with one line:** the files are staged and the message is in Historia's commit box; review
-   and click Commit.
+   - Exit 2: Historia is unreachable, external control is switched off, or the running Historia is
+     too old to queue items and must be restarted; say which, and point the user at the command above
+     to rerun once Historia is up.
+8. **Finish with one line:** the files are staged and the proposal is waiting in Historia's CMDR list;
+   click it, review the staged files and click Commit.
 
 ## Rules
 
+- Queue only. Add `--now` (which opens the staging panel at once) only when the user asks to see it
+  right away.
 - Never commit on the user's behalf in this flow.
 - Tell the user to read the staged diff, not your summary of it.
