@@ -145,7 +145,7 @@ public class ViewModelBaseTests
     }
 
     [Fact]
-    public void Track_racing_dispose_on_another_thread_disposes_every_item_exactly_once()
+    public async Task Track_racing_dispose_on_another_thread_disposes_every_item_exactly_once()
     {
         // An item tracked just before Dispose takes its snapshot is released by Dispose; one
         // tracked just after is released at once. Neither path may lose or repeat an item.
@@ -166,7 +166,7 @@ public class ViewModelBaseTests
                 start.SignalAndWait();
                 vm.Dispose();
             });
-            Task.WaitAll(tracker, disposer);
+            await Task.WhenAll(tracker, disposer);
 
             Assert.All(items, item => Assert.Equal(1, item.Disposals));
         }
