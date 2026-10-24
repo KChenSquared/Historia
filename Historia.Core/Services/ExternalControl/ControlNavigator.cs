@@ -148,24 +148,10 @@ public sealed class ControlNavigator : IControlNavigator
         var root = ctx.RepositoryPath;
         var cwd = string.IsNullOrWhiteSpace(target.Cwd) ? root : target.Cwd;
 
-        GitObjectId? rev = null, otherRev = null;
-        if (target.Verb is ControlVerb.Show or ControlVerb.Diff or ControlVerb.Compare)
-        {
-            if (!ControlInputValidation.TryValidateRevision(target.Rev, out var revError))
-                return (ControlResponse.Fail(ControlError.RevNotFound, revError), name);
-            rev = await RevisionResolver.ResolveCommitAsync(_cli, root, target.Rev!, ct).ConfigureAwait(false);
-            if (rev is null)
-                return (ControlResponse.Fail(ControlError.RevNotFound, $"'{target.Rev}' is not a commit in this repository."), name);
-        }
-
-        if (target.Verb == ControlVerb.Compare)
-        {
-            if (!ControlInputValidation.TryValidateRevision(target.OtherRev, out var headError))
-                return (ControlResponse.Fail(ControlError.RevNotFound, headError), name);
-            otherRev = await RevisionResolver.ResolveCommitAsync(_cli, root, target.OtherRev!, ct).ConfigureAwait(false);
-            if (otherRev is null)
-                return (ControlResponse.Fail(ControlError.RevNotFound, $"'{target.OtherRev}' is not a commit in this repository."), name);
-        }
+        var (rev, otherRev, revError) = await RevisionResolver.ResolveTargetRevisionsAsync(
+            _cli, root, target.Verb, target.Rev, target.OtherRev, ct).ConfigureAwait(false);
+        if (revError is not null)
+            return (ControlResponse.Fail(ControlError.RevNotFound, revError), name);
 
         string? relativePath = null;
         var firstPath = target.Paths.Count > 0 ? target.Paths[0] : null;

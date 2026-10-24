@@ -33,6 +33,44 @@ public sealed class RevisionResolverTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_navigation_resolves_only_the_revisions_its_verb_names()
+    {
+        using var repo = BuildRepo();
+        var head = new GitObjectId(repo.HeadSha);
+        var first = new GitObjectId(repo.Git("rev-parse", "HEAD~1").Trim());
+        var cli = new InterceptingGitCliService(_host.Cli);
+
+        Assert.Equal((null, null, null),
+            await RevisionResolver.ResolveTargetRevisionsAsync(cli, repo.Path, ControlVerb.Changes, "nope", "nope"));
+        Assert.Empty(cli.Requests);
+
+        Assert.Equal((head, null, null),
+            await RevisionResolver.ResolveTargetRevisionsAsync(cli, repo.Path, ControlVerb.Show, "HEAD", "nope"));
+        Assert.Equal((first, head, null),
+            await RevisionResolver.ResolveTargetRevisionsAsync(cli, repo.Path, ControlVerb.Compare, "HEAD~1", "HEAD"));
+    }
+
+    [Fact]
+    public async Task A_bad_revision_of_a_navigation_names_the_one_that_failed()
+    {
+        using var repo = BuildRepo();
+
+        var (_, _, baseError) = await RevisionResolver.ResolveTargetRevisionsAsync(
+            _host.Cli, repo.Path, ControlVerb.Compare, "nope", "HEAD");
+        Assert.Equal("'nope' is not a commit in this repository.", baseError);
+
+        var (rev, other, headError) = await RevisionResolver.ResolveTargetRevisionsAsync(
+            _host.Cli, repo.Path, ControlVerb.Compare, "HEAD", "missing");
+        Assert.Equal(new GitObjectId(repo.HeadSha), rev);
+        Assert.Null(other);
+        Assert.Equal("'missing' is not a commit in this repository.", headError);
+
+        var (_, _, optionError) = await RevisionResolver.ResolveTargetRevisionsAsync(
+            _host.Cli, repo.Path, ControlVerb.Diff, "--all", null);
+        Assert.NotNull(optionError);
+    }
+
+    [Fact]
     public async Task An_unknown_revision_is_null()
     {
         using var repo = BuildRepo();

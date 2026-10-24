@@ -25,6 +25,33 @@ public static class RevisionResolver
         return GitObjectId.TryParse(result.StandardOutput.Trim(), out var id) ? id : null;
     }
 
+    /// <summary>
+    /// Checks and resolves the revisions a navigation names: <paramref name="rev"/> for show, diff and
+    /// compare, and <paramref name="otherRev"/> as well for compare; other verbs name none. On failure
+    /// <c>Error</c> says which revision is wrong, for a <c>rev-not-found</c> reply.
+    /// </summary>
+    public static async Task<(GitObjectId? Rev, GitObjectId? OtherRev, string? Error)> ResolveTargetRevisionsAsync(
+        IGitCliService cli, string repoRoot, ControlVerb verb, string? rev, string? otherRev, CancellationToken ct = default)
+    {
+        if (verb is not (ControlVerb.Show or ControlVerb.Diff or ControlVerb.Compare))
+            return (null, null, null);
+
+        var first = await ResolveOneAsync(rev).ConfigureAwait(false);
+        if (first.Error is not null || verb != ControlVerb.Compare)
+            return (first.Id, null, first.Error);
+
+        var second = await ResolveOneAsync(otherRev).ConfigureAwait(false);
+        return (first.Id, second.Id, second.Error);
+
+        async Task<(GitObjectId? Id, string? Error)> ResolveOneAsync(string? text)
+        {
+            if (!ControlInputValidation.TryValidateRevision(text, out var error))
+                return (null, error);
+            var id = await ResolveCommitAsync(cli, repoRoot, text!, ct).ConfigureAwait(false);
+            return id is null ? (null, $"'{text}' is not a commit in this repository.") : (id, null);
+        }
+    }
+
     /// <summary>The full native path of the work tree containing <paramref name="dir"/>, or null when
     /// it is not inside one (or does not exist).</summary>
     public static async Task<string?> ReadTopLevelAsync(IGitCliService cli, string dir, CancellationToken ct = default)

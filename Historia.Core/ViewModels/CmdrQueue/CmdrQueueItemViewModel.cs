@@ -66,6 +66,9 @@ public sealed partial class CmdrQueueItemViewModel : ObservableObject
         OnPropertyChanged(nameof(TimeText));
     }
 
+    /// <summary>Re-reads <see cref="TimeText"/>, which changes form when the local date changes.</summary>
+    public void RefreshTime() => OnPropertyChanged(nameof(TimeText));
+
     /// <summary>A short command-like description of what opening <paramref name="item"/> shows.</summary>
     public static string TargetText(CmdrQueueItem item)
     {

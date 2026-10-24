@@ -15,7 +15,8 @@
             <Setter Property="Cursor" Value="Hand" />
         </Style>
 
-        <!-- Rows have no selection chrome; hover shows they can be opened. -->
+        <!-- A click opens a row without selecting it; hover shows rows can be opened. The
+             selection is the keyboard's cursor, shown only while the list has focus. -->
         <Style Selector="ListBox.cmdr-items">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
@@ -24,7 +25,6 @@
         <Style Selector="ListBox.cmdr-items > ListBoxItem">
             <Setter Property="Padding" Value="0" />
             <Setter Property="MinHeight" Value="0" />
-            <Setter Property="Focusable" Value="False" />
             <Setter Property="HorizontalContentAlignment" Value="Stretch" />
             <Setter Property="Background" Value="Transparent" />
         </Style>
@@ -36,6 +36,9 @@
         </Style>
         <Style Selector="ListBox.cmdr-items > ListBoxItem:selected:pointerover /template/ ContentPresenter#PART_ContentPresenter">
             <Setter Property="Background" Value="{DynamicResource ColorListHover}" />
+        </Style>
+        <Style Selector="ListBox.cmdr-items:focus-within > ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource ColorListActive}" />
         </Style>
 
         <!-- An opened item stays listed, dimmed. -->
@@ -81,7 +84,8 @@
             <ListBox x:Name="ItemsList"
                      Classes="cmdr-items"
                      ItemsSource="{Binding Items}"
-                     ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                     ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                     KeyDown="OnListKeyDown">
                 <ListBox.ItemsPanel>
                     <ItemsPanelTemplate>
                         <VirtualizingStackPanel />

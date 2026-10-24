@@ -17,6 +17,7 @@ public sealed partial class CmdrQueueViewModel : ViewModelBase
     private readonly TimeProvider _time;
     private readonly Dictionary<string, CmdrQueueItemViewModel> _rows = new(StringComparer.Ordinal);
     private CancellationTokenSource? _openCts;
+    private ITimer? _dayTimer;
 
     public CmdrQueueViewModel(
         ICmdrQueueService queue,
@@ -39,6 +40,7 @@ public sealed partial class CmdrQueueViewModel : ViewModelBase
         Sync();
         Subscribe(() => _queue.Changed += OnQueueChanged, () => _queue.Changed -= OnQueueChanged);
         Subscribe(() => _settings.Changed += OnSettingsChanged, () => _settings.Changed -= OnSettingsChanged);
+        ScheduleDayChange();
     }
 
     /// <summary>The rows, oldest first or newest first. Rows keep their identity across changes,
@@ -122,6 +124,28 @@ public sealed partial class CmdrQueueViewModel : ViewModelBase
     protected override void OnDisposed()
     {
         Interlocked.Exchange(ref _openCts, null)?.Cancel();
+        _dayTimer?.Dispose();
+        _dayTimer = null;
+    }
+
+    // A row shows the time alone for an item queued today; once local midnight passes, the item
+    // is from yesterday and its row needs the date. Items stay until the next launch, so a session
+    // left running crosses midnight with them.
+    private void ScheduleDayChange()
+    {
+        var now = TimeZoneInfo.ConvertTime(_time.GetUtcNow(), _time.LocalTimeZone);
+        var untilMidnight = now.Date.AddDays(1) - now.DateTime + TimeSpan.FromSeconds(1);
+        _dayTimer = _time.CreateTimer(_ => _ui.Post(OnDayChanged), null, untilMidnight, Timeout.InfiniteTimeSpan);
+    }
+
+    private void OnDayChanged()
+    {
+        if (IsDisposed)
+            return;
+        foreach (var row in Items)
+            row.RefreshTime();
+        _dayTimer?.Dispose();
+        ScheduleDayChange();
     }
 
     // Home and Settings cover the repository's detail pane, so the result would stay hidden behind

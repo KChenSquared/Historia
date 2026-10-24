@@ -22,6 +22,10 @@ public sealed class IconGlyph : ContentControl
     public static readonly StyledProperty<bool> FollowForegroundProperty =
         AvaloniaProperty.Register<IconGlyph, bool>(nameof(FollowForeground));
 
+    // The current path's binding to this control's foreground. A rebuilt path replaces it, and the
+    // old binding must end, or the discarded path stays subscribed to this control.
+    private IDisposable? _fillBinding;
+
     static IconGlyph()
     {
         IconProperty.Changed.AddClassHandler<IconGlyph>((g, _) => g.UpdateGlyph());
@@ -64,6 +68,8 @@ public sealed class IconGlyph : ContentControl
 
     private void UpdateGlyph()
     {
+        _fillBinding?.Dispose();
+        _fillBinding = null;
         if (string.IsNullOrEmpty(Icon))
         {
             Content = null;
@@ -72,7 +78,7 @@ public sealed class IconGlyph : ContentControl
 
         var path = IconGlyphPath(Icon, Size, ForegroundKey);
         if (FollowForeground)
-            path.Bind(Path.FillProperty, this.GetObservable(ForegroundProperty));
+            _fillBinding = path.Bind(Path.FillProperty, this.GetObservable(ForegroundProperty));
         Content = path;
     }
 }

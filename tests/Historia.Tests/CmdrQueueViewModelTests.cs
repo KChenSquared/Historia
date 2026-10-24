@@ -264,6 +264,56 @@ public class CmdrQueueViewModelTests
         Assert.NotEqual(older.ToOffset(plusTwo).ToString("t", culture), olderText);
     }
 
+    private sealed class ManualClock(DateTimeOffset utcNow, TimeZoneInfo zone) : TimeProvider
+    {
+        public DateTimeOffset Now { get; set; } = utcNow;
+        public List<(TimerCallback Callback, TimeSpan Due)> Timers { get; } = [];
+        public override DateTimeOffset GetUtcNow() => Now;
+        public override TimeZoneInfo LocalTimeZone => zone;
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            Timers.Add((callback, dueTime));
+            return new IdleTimer();
+        }
+
+        private sealed class IdleTimer : ITimer
+        {
+            public bool Change(TimeSpan dueTime, TimeSpan period) => true;
+            public void Dispose() { }
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+    }
+
+    [Fact]
+    public void Rows_take_the_date_once_local_midnight_passes()
+    {
+        var plusTwo = TimeSpan.FromHours(2);
+        var zone = TimeZoneInfo.CreateCustomTimeZone("plus-two", plusTwo, "plus-two", "plus-two");
+        // 22:00 local; the item was queued at 23:00 local the same day.
+        var clock = new ManualClock(new DateTimeOffset(2026, 10, 22, 20, 0, 0, TimeSpan.Zero), zone);
+        var created = new DateTimeOffset(2026, 10, 22, 21, 0, 0, TimeSpan.Zero);
+        var queue = new FakeCmdrQueueService();
+        queue.Enqueue(Item("late", created));
+        using var vm = new CmdrQueueViewModel(queue, new FakeSettingsService(), new FakeControlNavigator(),
+            new NavigationBus(), new FakeNotificationService(), new ImmediateUiDispatcher(), clock);
+        var row = Assert.Single(vm.Items);
+        var culture = System.Globalization.CultureInfo.CurrentCulture;
+        Assert.Equal(created.ToOffset(plusTwo).ToString("t", culture), row.TimeText);
+
+        var (callback, due) = Assert.Single(clock.Timers);
+        Assert.Equal(TimeSpan.FromHours(2) + TimeSpan.FromSeconds(1), due);
+
+        var changed = new List<string?>();
+        row.PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+        clock.Now += due;
+        callback(null);
+
+        Assert.Contains(nameof(CmdrQueueItemViewModel.TimeText), changed);
+        Assert.Equal(created.ToOffset(plusTwo).ToString("g", culture), row.TimeText);
+        Assert.Equal(2, clock.Timers.Count);
+    }
+
     [Fact]
     public void The_tooltip_has_the_full_text_and_the_target()
     {

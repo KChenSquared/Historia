@@ -157,27 +157,14 @@ public sealed class ExternalControlHost
             name = root;
         var cwd = string.IsNullOrWhiteSpace(request.Cwd) ? root : request.Cwd;
 
-        GitObjectId? rev = null, otherRev = null;
-        string? subject = null;
-        if (target is ControlVerb.Show or ControlVerb.Diff or ControlVerb.Compare)
-        {
-            if (!ControlInputValidation.TryValidateRevision(request.Rev, out var revError))
-                return (ControlResponse.Fail(ControlError.RevNotFound, revError), name);
-            rev = await RevisionResolver.ResolveCommitAsync(_cli, root, request.Rev!, ct).ConfigureAwait(false);
-            if (rev is null)
-                return (ControlResponse.Fail(ControlError.RevNotFound, $"'{request.Rev}' is not a commit in this repository."), name);
-            if (target is ControlVerb.Show or ControlVerb.Diff)
-                subject = await RevisionResolver.ReadSubjectAsync(_cli, root, rev.Value, ct).ConfigureAwait(false);
-        }
+        var (rev, otherRev, revError) = await RevisionResolver.ResolveTargetRevisionsAsync(
+            _cli, root, target, request.Rev, request.OtherRev, ct).ConfigureAwait(false);
+        if (revError is not null)
+            return (ControlResponse.Fail(ControlError.RevNotFound, revError), name);
 
-        if (target == ControlVerb.Compare)
-        {
-            if (!ControlInputValidation.TryValidateRevision(request.OtherRev, out var headError))
-                return (ControlResponse.Fail(ControlError.RevNotFound, headError), name);
-            otherRev = await RevisionResolver.ResolveCommitAsync(_cli, root, request.OtherRev!, ct).ConfigureAwait(false);
-            if (otherRev is null)
-                return (ControlResponse.Fail(ControlError.RevNotFound, $"'{request.OtherRev}' is not a commit in this repository."), name);
-        }
+        string? subject = null;
+        if (target is ControlVerb.Show or ControlVerb.Diff)
+            subject = await RevisionResolver.ReadSubjectAsync(_cli, root, rev!.Value, ct).ConfigureAwait(false);
 
         var paths = new List<string>();
         if (target is ControlVerb.Diff or ControlVerb.Compare or ControlVerb.Changes)

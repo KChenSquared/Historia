@@ -35,6 +35,17 @@ public sealed partial class CmdrQueueView : UserControl, IDisposable
         e.Handled = true;
         ViewModel.OpenCommand.Execute(row);
     }
+
+    // The arrow keys move the selection; Enter opens the selected item, as a click would.
+    private void OnListKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.Handled || e.Key != Key.Enter || e.KeyModifiers != KeyModifiers.None)
+            return;
+        if (ItemsList.SelectedItem is not CmdrQueueItemViewModel row)
+            return;
+        e.Handled = true;
+        ViewModel.OpenCommand.Execute(row);
+    }
 }
 
 /// <summary>
@@ -65,7 +76,9 @@ public sealed class EllipsisTextBlock : TextBlock
         while (lo < hi)
         {
             var mid = (lo + hi + 1) / 2;
-            var candidateText = text[..mid].TrimEnd() + Ellipsis;
+            // Never cut between the halves of a surrogate pair (an emoji, say).
+            var cut = mid < text.Length && char.IsLowSurrogate(text[mid]) ? mid - 1 : mid;
+            var candidateText = text[..cut].TrimEnd() + Ellipsis;
             var candidate = base.CreateTextLayout(candidateText);
             if (Fits(candidate, candidateText.Length))
             {

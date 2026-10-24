@@ -313,6 +313,28 @@ public sealed class SidebarViewTests
         string.Concat(layout.TextLines.SelectMany(l => l.TextRuns).Select(r => r.Text.ToString()));
 
     [AvaloniaFact]
+    public void Enter_opens_the_item_the_keyboard_selected()
+    {
+        using var h = new Harness(Item(), Item());
+        h.View.ViewModel.ShowCmdrCommand.Execute(null);
+        h.Settle();
+
+        var list = h.View.Cmdr.List;
+        list.SelectedIndex = 1;
+        h.Settle();
+        var container = Assert.IsType<ListBoxItem>(list.ContainerFromIndex(1));
+        Assert.True(container.Focusable);
+        container.Focus(NavigationMethod.Tab);
+        container.RaiseEvent(new KeyEventArgs { RoutedEvent = InputElement.KeyDownEvent, Key = Key.Enter, Source = container });
+        h.Settle();
+
+        var target = Assert.Single(h.Navigator.Targets);
+        Assert.Equal(ControlVerb.Show, target.Verb);
+        Assert.True(h.Queue.Items[1].Seen);
+        Assert.False(h.Queue.Items[0].Seen);
+    }
+
+    [AvaloniaFact]
     public void Clicking_an_item_opens_it_through_the_navigator()
     {
         var item = Item();

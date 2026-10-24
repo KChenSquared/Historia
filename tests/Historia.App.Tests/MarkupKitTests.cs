@@ -144,6 +144,32 @@ public sealed class MarkupKitTests
     }
 
     [AvaloniaFact]
+    public void A_rebuilt_IconGlyph_lets_go_of_its_previous_path()
+    {
+        var first = new SolidColorBrush(Colors.White);
+        var second = new SolidColorBrush(Colors.Orange);
+        var glyph = new IconGlyph { Icon = "graph_8", Size = 16, ForegroundKey = "ColorTextMuted", FollowForeground = true };
+        var parent = new Button { Foreground = first, Content = glyph };
+        var window = Host(parent);
+        try
+        {
+            var old = Assert.IsType<Avalonia.Controls.Shapes.Path>(glyph.Content);
+            glyph.Size = 18;
+            Assert.NotSame(old, glyph.Content);
+
+            parent.Foreground = second;
+            Dispatcher.UIThread.RunJobs();
+
+            Assert.NotSame(second, old.Fill);
+            Assert.Same(second, Assert.IsType<Avalonia.Controls.Shapes.Path>(glyph.Content).Fill);
+        }
+        finally
+        {
+            window.Close();
+        }
+    }
+
+    [AvaloniaFact]
     public void IconGlyph_without_FollowForeground_fills_from_its_key_whatever_the_parent_foreground()
     {
         var glyph = new IconGlyph { Icon = "graph_8", Size = 16, ForegroundKey = "ColorTextMuted" };
