@@ -17,9 +17,9 @@ public sealed class ControlArgsTests
     }
 
     [Fact]
-    public void Open_defaults_to_the_cwd_and_focus()
+    public void Open_defaults_to_the_cwd_and_focus_with_now()
     {
-        var r = Parse("open");
+        var r = Parse("open", "--now");
 
         Assert.Equal(ControlVerb.Open, r.Request!.Verb);
         Assert.Equal(Cwd, r.Request.Repo);
@@ -33,7 +33,8 @@ public sealed class ControlArgsTests
     {
         var r = Parse("show", "HEAD~2");
 
-        Assert.Equal(ControlVerb.Show, r.Request!.Verb);
+        Assert.Equal(ControlVerb.Queue, r.Request!.Verb);
+        Assert.Equal(ControlVerb.Show, r.Request.Target);
         Assert.Equal("HEAD~2", r.Request.Rev);
         Assert.True(Parse("show").IsUsageError);
         Assert.True(Parse("show", "a", "b").IsUsageError);
@@ -44,7 +45,7 @@ public sealed class ControlArgsTests
     {
         var r = Parse("diff", "abc123", "src/a.cs", "--line", "17");
 
-        Assert.Equal(ControlVerb.Diff, r.Request!.Verb);
+        Assert.Equal(ControlVerb.Diff, r.Request!.Target);
         Assert.Equal("abc123", r.Request.Rev);
         Assert.Equal("src/a.cs", r.Request.Path);
         Assert.Equal(17, r.Request.Line);
@@ -56,7 +57,7 @@ public sealed class ControlArgsTests
     {
         var r = Parse("compare", "main", "HEAD", "a.cs");
 
-        Assert.Equal(ControlVerb.Compare, r.Request!.Verb);
+        Assert.Equal(ControlVerb.Compare, r.Request!.Target);
         Assert.Equal("main", r.Request.Rev);
         Assert.Equal("HEAD", r.Request.OtherRev);
         Assert.Equal("a.cs", r.Request.Path);
@@ -68,7 +69,7 @@ public sealed class ControlArgsTests
     {
         var r = Parse("changes", "a.cs", "--staged", "--line", "3");
 
-        Assert.Equal(ControlVerb.Changes, r.Request!.Verb);
+        Assert.Equal(ControlVerb.Changes, r.Request!.Target);
         Assert.Equal("a.cs", r.Request.Path);
         Assert.True(r.Request.Staged);
         Assert.Equal(3, r.Request.Line);
@@ -78,7 +79,7 @@ public sealed class ControlArgsTests
     [Fact]
     public void Flags_apply_after_the_verb_in_any_position()
     {
-        var ok = Parse("show", "--no-focus", "HEAD", "--no-launch");
+        var ok = Parse("show", "--no-focus", "HEAD", "--no-launch", "--now");
 
         Assert.False(ok.Request!.WantsFocus);
         Assert.True(ok.NoLaunch);
@@ -155,7 +156,7 @@ public sealed class ControlArgsTests
     {
         var r = Parse("propose-commit", "-m", "feat: x", "-m", "Body text.");
 
-        Assert.Equal(ControlVerb.ProposeCommit, r.Request!.Verb);
+        Assert.Equal(ControlVerb.ProposeCommit, r.Request!.Target);
         Assert.Equal("feat: x\n\nBody text.", r.Request.CommitMessage);
         Assert.Null(r.MessageFile);
     }
@@ -196,9 +197,162 @@ public sealed class ControlArgsTests
     }
 
     [Fact]
+    public void A_navigation_verb_is_queued_unless_now_is_given()
+    {
+        var queued = Parse("show", "HEAD");
+        var now = Parse("show", "HEAD", "--now");
+
+        Assert.Equal(ControlVerb.Queue, queued.Request!.Verb);
+        Assert.Equal(ControlVerb.Show, queued.Request.Target);
+        Assert.Equal("HEAD", queued.Request.Rev);
+        Assert.Equal(ControlVerb.Show, now.Request!.Verb);
+        Assert.Null(now.Request.Target);
+        Assert.True(now.Request.WantsFocus);
+    }
+
+    [Theory]
+    [InlineData("open")]
+    [InlineData("show", "HEAD")]
+    [InlineData("diff", "HEAD", "a.cs")]
+    [InlineData("compare", "main", "HEAD", "a.cs")]
+    [InlineData("changes", "a.cs")]
+    [InlineData("propose-commit", "-m", "feat: x")]
+    public void Every_navigation_verb_queues_without_focus(params string[] args)
+    {
+        var r = Parse(args);
+        var withNoFocus = Parse([.. args, "--no-focus"]);
+
+        Assert.Equal(ControlVerb.Queue, r.Request!.Verb);
+        Assert.True(ControlVerbs.TryParse(args[0], out var verb));
+        Assert.Equal(verb, r.Request.Target);
+        Assert.False(r.Request.WantsFocus);
+        Assert.Contains("\"focus\":false", ControlJson.Serialize(r.Request));
+        Assert.Equal(ControlVerb.Queue, withNoFocus.Request!.Verb);
+        Assert.False(withNoFocus.Request.WantsFocus);
+    }
+
+    [Fact]
+    public void Queue_is_not_a_command()
+    {
+        Assert.True(Parse("queue").IsUsageError);
+        Assert.True(Parse("queue", "show", "HEAD").IsUsageError);
+    }
+
+    [Fact]
+    public void The_note_is_normalized()
+    {
+        var r = Parse("show", "HEAD", "--note", "  Review\n the   new\tparser  ");
+
+        Assert.Equal("Review the new parser", r.Request!.Note);
+        Assert.Null(Parse("show", "HEAD").Request!.Note);
+    }
+
+    [Fact]
+    public void The_note_is_capped_and_must_be_text()
+    {
+        Assert.Equal(200, Parse("open", "--note", new string('n', 200)).Request!.Note!.Length);
+        Assert.True(Parse("open", "--note", new string('n', 201)).IsUsageError);
+        Assert.True(Parse("open", "--note", "   ").IsUsageError);
+        Assert.True(Parse("open", "--note", "bad\u001b").IsUsageError);
+        Assert.True(Parse("open", "--note").IsUsageError);
+        Assert.True(Parse("open", "--note", "a", "--note", "b").IsUsageError);
+    }
+
+    [Fact]
+    public void The_note_cannot_be_used_with_now()
+    {
+        Assert.True(Parse("show", "HEAD", "--now", "--note", "x").IsUsageError);
+        Assert.True(Parse("show", "HEAD", "--note", "x", "--now").IsUsageError);
+    }
+
+    [Fact]
+    public void Queue_options_belong_to_navigation_verbs_only()
+    {
+        Assert.True(Parse("ping", "--now").IsUsageError);
+        Assert.True(Parse("selection", "--note", "x").IsUsageError);
+    }
+
+    [Fact]
+    public void Queued_changes_keeps_every_file()
+    {
+        var r = Parse("changes", "a.cs", "b.cs", "c.cs", "--staged", "--line", "4");
+
+        Assert.Equal(ControlVerb.Changes, r.Request!.Target);
+        Assert.Equal("a.cs", r.Request.Path);
+        Assert.Equal(["a.cs", "b.cs", "c.cs"], r.Request.Paths);
+        Assert.True(r.Request.Staged);
+        Assert.Equal(4, r.Request.Line);
+    }
+
+    [Fact]
+    public void A_single_file_sends_no_paths_list()
+    {
+        Assert.Null(Parse("changes", "a.cs").Request!.Paths);
+        Assert.Null(Parse("diff", "HEAD", "a.cs").Request!.Paths);
+    }
+
+    [Fact]
+    public void Changes_with_now_takes_exactly_one_file()
+    {
+        Assert.True(Parse("changes", "a.cs", "b.cs", "--now").IsUsageError);
+        Assert.True(Parse("changes", "--now").IsUsageError);
+        Assert.Equal(ControlVerb.Changes, Parse("changes", "a.cs", "--now").Request!.Verb);
+    }
+
+    [Fact]
+    public void Queued_changes_takes_at_most_two_hundred_files()
+    {
+        Assert.True(Parse("changes").IsUsageError);
+        Assert.True(Parse(["changes", .. Enumerable.Range(0, 201).Select(i => $"f{i}.cs")]).IsUsageError);
+        Assert.True(Parse("changes", "a.cs", "").IsUsageError);
+    }
+
+    [Fact]
+    public void Two_hundred_long_file_names_fit_on_one_request_line()
+    {
+        var files = Enumerable.Range(0, ControlArgs.MaxQueuedFiles)
+            .Select(i => $"{i:D3}" + new string('x', 247))
+            .ToArray();
+        Assert.All(files, f => Assert.Equal(250, f.Length));
+
+        var r = Parse(["changes", .. files, "--note", new string('n', 200)]);
+
+        Assert.False(r.IsUsageError, r.UsageError);
+        Assert.Equal(200, r.Request!.Paths!.Count);
+        Assert.True(ControlJson.Serialize(r.Request).Length < ControlPipe.MaxLineChars);
+    }
+
+    [Fact]
+    public void A_request_too_long_for_one_line_is_a_usage_error()
+    {
+        var files = Enumerable.Range(0, ControlArgs.MaxQueuedFiles)
+            .Select(i => $"{i:D3}" + new string('é', 247))
+            .ToArray();
+
+        Assert.True(Parse(["changes", .. files]).IsUsageError);
+    }
+
+    [Fact]
+    public void Ping_and_selection_are_never_queued()
+    {
+        Assert.Equal(ControlVerb.Ping, Parse("ping").Request!.Verb);
+        Assert.Null(Parse("ping").Request!.Target);
+        Assert.Equal(ControlVerb.Selection, Parse("selection").Request!.Verb);
+        Assert.Null(Parse("selection").Request!.Target);
+    }
+
+    [Fact]
+    public void Usage_text_explains_queueing()
+    {
+        Assert.Contains("--now", ControlArgs.UsageText);
+        Assert.Contains("--note", ControlArgs.UsageText);
+        Assert.Contains("queued", ControlArgs.UsageText);
+    }
+
+    [Fact]
     public void Usage_text_names_every_verb()
     {
-        foreach (var verb in Enum.GetValues<ControlVerb>())
+        foreach (var verb in Enum.GetValues<ControlVerb>().Where(v => v != ControlVerb.Queue))
             Assert.Contains("historia-cmdr " + ControlVerbs.ToWire(verb), ControlArgs.UsageText);
     }
 }

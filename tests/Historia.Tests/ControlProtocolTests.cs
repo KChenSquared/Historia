@@ -149,6 +149,91 @@ public sealed class ControlProtocolTests
         Assert.True(ControlVerbs.MayLaunch(ControlVerb.Show));
     }
 
+    [Fact]
+    public void Queue_round_trips_with_target_note_and_paths()
+    {
+        var request = new ControlRequest
+        {
+            Verb = ControlVerb.Queue,
+            Target = ControlVerb.Changes,
+            Note = "Review the parser",
+            Repo = @"C:\work\repo",
+            Path = "a.cs",
+            Paths = ["a.cs", "b c.cs", "ü.cs"],
+            Staged = true,
+            Focus = false,
+        };
+
+        var json = ControlJson.Serialize(request);
+        var back = ControlJson.DeserializeRequest(json)!;
+
+        Assert.Contains("\"verb\":\"queue\"", json);
+        Assert.Contains("\"target\":\"changes\"", json);
+        Assert.Contains("\"note\":\"Review the parser\"", json);
+        Assert.Equal(ControlVerb.Queue, back.Verb);
+        Assert.Equal(ControlVerb.Changes, back.Target);
+        Assert.Equal("Review the parser", back.Note);
+        Assert.Equal("a.cs", back.Path);
+        Assert.Equal(["a.cs", "b c.cs", "ü.cs"], back.Paths);
+        Assert.False(back.WantsFocus);
+    }
+
+    [Fact]
+    public void A_live_request_carries_no_queue_fields()
+    {
+        var json = ControlJson.Serialize(new ControlRequest { Verb = ControlVerb.Show, Rev = "HEAD" });
+
+        Assert.DoesNotContain("target", json);
+        Assert.DoesNotContain("note", json);
+        Assert.DoesNotContain("paths", json);
+    }
+
+    [Fact]
+    public void Queued_reply_serializes_without_a_draft()
+    {
+        var response = new ControlResponse
+        {
+            Ok = true,
+            Queued = true,
+            QueueId = "q1",
+            Repo = @"C:\r",
+            StagedPaths = ["a.txt"],
+        };
+
+        var json = ControlJson.Serialize(response);
+        var back = ControlJson.DeserializeResponse(json)!;
+
+        Assert.Contains("\"queued\":true", json);
+        Assert.Contains("\"queueId\":\"q1\"", json);
+        Assert.DoesNotContain("draft", json);
+        Assert.True(back.Queued);
+        Assert.Equal("q1", back.QueueId);
+    }
+
+    [Fact]
+    public void Only_navigation_verbs_are_queueable_and_queue_may_launch()
+    {
+        Assert.True(ControlVerbs.MayLaunch(ControlVerb.Queue));
+        Assert.Equal(
+            [ControlVerb.Open, ControlVerb.Show, ControlVerb.Diff, ControlVerb.Compare, ControlVerb.Changes, ControlVerb.ProposeCommit],
+            Enum.GetValues<ControlVerb>().Where(ControlVerbs.IsQueueable));
+    }
+
+    [Fact]
+    public void A_host_that_predates_queue_rejects_it_as_malformed()
+    {
+        Assert.ThrowsAny<JsonException>(() => ControlJson.DeserializeRequest("{\"verb\":\"enqueue\",\"target\":\"show\"}"));
+
+        var queued = new ControlRequest { Verb = ControlVerb.Queue, Target = ControlVerb.Show };
+        var live = new ControlRequest { Verb = ControlVerb.Show };
+        var oldReply = ControlResponse.Fail(ControlError.Usage, "The request is not valid JSON.");
+
+        Assert.True(ControlVerbs.IsQueueUnsupported(queued, oldReply));
+        Assert.False(ControlVerbs.IsQueueUnsupported(live, oldReply));
+        Assert.False(ControlVerbs.IsQueueUnsupported(queued, ControlResponse.Fail(ControlError.Usage, "The request is empty.")));
+        Assert.False(ControlVerbs.IsQueueUnsupported(queued, new ControlResponse { Ok = true, Queued = true }));
+    }
+
     [Theory]
     [InlineData("{\"verb\":99}")]
     [InlineData("{\"verb\":0}")]

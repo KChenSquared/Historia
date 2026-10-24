@@ -33,6 +33,44 @@ public sealed class RevisionResolverTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_navigation_resolves_only_the_revisions_its_verb_names()
+    {
+        using var repo = BuildRepo();
+        var head = new GitObjectId(repo.HeadSha);
+        var first = new GitObjectId(repo.Git("rev-parse", "HEAD~1").Trim());
+        var cli = new InterceptingGitCliService(_host.Cli);
+
+        Assert.Equal((null, null, null),
+            await RevisionResolver.ResolveTargetRevisionsAsync(cli, repo.Path, ControlVerb.Changes, "nope", "nope"));
+        Assert.Empty(cli.Requests);
+
+        Assert.Equal((head, null, null),
+            await RevisionResolver.ResolveTargetRevisionsAsync(cli, repo.Path, ControlVerb.Show, "HEAD", "nope"));
+        Assert.Equal((first, head, null),
+            await RevisionResolver.ResolveTargetRevisionsAsync(cli, repo.Path, ControlVerb.Compare, "HEAD~1", "HEAD"));
+    }
+
+    [Fact]
+    public async Task A_bad_revision_of_a_navigation_names_the_one_that_failed()
+    {
+        using var repo = BuildRepo();
+
+        var (_, _, baseError) = await RevisionResolver.ResolveTargetRevisionsAsync(
+            _host.Cli, repo.Path, ControlVerb.Compare, "nope", "HEAD");
+        Assert.Equal("'nope' is not a commit in this repository.", baseError);
+
+        var (rev, other, headError) = await RevisionResolver.ResolveTargetRevisionsAsync(
+            _host.Cli, repo.Path, ControlVerb.Compare, "HEAD", "missing");
+        Assert.Equal(new GitObjectId(repo.HeadSha), rev);
+        Assert.Null(other);
+        Assert.Equal("'missing' is not a commit in this repository.", headError);
+
+        var (_, _, optionError) = await RevisionResolver.ResolveTargetRevisionsAsync(
+            _host.Cli, repo.Path, ControlVerb.Diff, "--all", null);
+        Assert.NotNull(optionError);
+    }
+
+    [Fact]
     public async Task An_unknown_revision_is_null()
     {
         using var repo = BuildRepo();
@@ -70,5 +108,84 @@ public sealed class RevisionResolverTests : IAsyncDisposable
 
         var request = Assert.Single(cli.Requests);
         Assert.Equal(["rev-parse", "--verify", "-q", "--end-of-options", "HEAD^{commit}"], request.Arguments);
+    }
+
+    [Fact]
+    public async Task The_top_level_is_found_from_a_subfolder_as_a_native_path()
+    {
+        using var repo = TestRepositoryBuilder.Create();
+        repo.WriteFile("sub/deeper/x.txt", "x\n");
+
+        var top = await RevisionResolver.ReadTopLevelAsync(_host.Cli, Path.Combine(repo.Path, "sub", "deeper"));
+
+        Assert.NotNull(top);
+        Assert.Equal(Path.GetFullPath(repo.Path), top, ignoreCase: OperatingSystem.IsWindows());
+        if (OperatingSystem.IsWindows())
+            Assert.DoesNotContain('/', top!);
+    }
+
+    [Fact]
+    public async Task Outside_a_work_tree_the_top_level_is_null()
+    {
+        var dir = TestScratch.NewDirectory("ctl-not-a-repo-");
+        try
+        {
+            Assert.Null(await RevisionResolver.ReadTopLevelAsync(_host.Cli, dir));
+            Assert.Null(await RevisionResolver.ReadTopLevelAsync(_host.Cli, Path.Combine(dir, "missing")));
+        }
+        finally
+        {
+            TestScratch.Delete(dir);
+        }
+    }
+
+    [Fact]
+    public async Task The_subject_of_a_commit_is_read()
+    {
+        using var repo = BuildRepo();
+        var first = new GitObjectId(repo.Git("rev-parse", "HEAD~1").Trim());
+        var cli = new InterceptingGitCliService(_host.Cli);
+
+        Assert.Equal("first", await RevisionResolver.ReadSubjectAsync(cli, repo.Path, first));
+        Assert.Equal(["log", "-1", "--format=%s", "--end-of-options", first.ToString()], Assert.Single(cli.Requests).Arguments);
+    }
+
+    [Fact]
+    public async Task Staged_paths_keep_spaces_and_non_ascii_names()
+    {
+        using var repo = BuildRepo();
+        repo.WriteFile("a b.txt", "space\n");
+        repo.WriteFile("dir/ünï.txt", "accent\n");
+        repo.WriteFile("a.txt", "three\n");
+        repo.WriteFile("unstaged.txt", "left alone\n");
+        repo.Stage("a b.txt").Stage("dir/ünï.txt").Stage("a.txt");
+
+        var staged = await RevisionResolver.ReadStagedPathsAsync(_host.Cli, repo.Path);
+
+        Assert.Equal(["a b.txt", "a.txt", "dir/ünï.txt"], staged);
+    }
+
+    [Fact]
+    public async Task An_empty_index_lists_no_staged_paths()
+    {
+        using var repo = BuildRepo();
+
+        var staged = await RevisionResolver.ReadStagedPathsAsync(_host.Cli, repo.Path);
+
+        Assert.NotNull(staged);
+        Assert.Empty(staged);
+    }
+
+    [Fact]
+    public async Task A_branch_with_no_commits_lists_its_staged_paths()
+    {
+        using var repo = TestRepositoryBuilder.Create();
+        repo.WriteFile("new file.txt", "x\n");
+        repo.WriteFile("other.txt", "y\n");
+        repo.Stage("new file.txt");
+
+        var staged = await RevisionResolver.ReadStagedPathsAsync(_host.Cli, repo.Path);
+
+        Assert.Equal(["new file.txt"], staged);
     }
 }

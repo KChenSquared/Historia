@@ -49,6 +49,8 @@ public class ShortcutBarLayoutTests
         sc.AddSingleton<ICredentialVaultService, FakeVault>();
         sc.AddSingleton<IExternalLauncher, ExternalLauncher>();
         sc.AddSingleton<ICmdrPathService, FakeCmdrPathService>();
+        sc.AddSingleton<ICmdrQueueService, SidebarViewTests.FakeQueue>();
+        sc.AddSingleton<IControlNavigator, SidebarViewTests.FakeNavigator>();
         return sc.BuildServiceProvider();
     }
 

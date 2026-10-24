@@ -2,16 +2,28 @@ namespace Historia.Tests;
 
 /// <summary>
 /// The read-only guarantee of external control, checked at the source level: everything an
-/// external tool can ask Historia to do may navigate and may offer a commit message, and must never
-/// reach a repository write, a settings write, a dialog or the user's own pending proposal. A scan
-/// of the host and every control file fails the build the moment a mutating call appears — a
-/// regression here produces no error at runtime, which is why it is a test.
+/// external tool can ask Historia to do may navigate, may queue a navigation for the user to open
+/// later and may offer a commit message, and must never reach a repository write, a settings write,
+/// a dialog or the user's own pending proposal. A scan of the host, the shared navigator and every
+/// control file fails the build the moment a mutating call appears — a regression here produces no
+/// error at runtime, which is why it is a test. The queue is the one list the host adds to, and only
+/// through its add-only call.
 /// </summary>
 [Trait("tier", "unit")]
 public class ExternalControlReadOnlyTests
 {
     private const string HostFile = "Historia.App/Services/ExternalControlHost.cs";
     private const string ControlFolder = "Historia.Core/Services/ExternalControl";
+    private const string NavigatorFile = ControlFolder + "/ControlNavigator.cs";
+
+    /// <summary>Every git command line the resolver may run, all reads.</summary>
+    private static readonly string[] ResolverArguments =
+    [
+        "Arguments = [\"rev-parse\", \"--verify\", \"-q\", \"--end-of-options\", rev + \"^{commit}\"]",
+        "Arguments = [\"rev-parse\", \"--show-toplevel\"]",
+        "Arguments = [\"log\", \"-1\", \"--format=%s\", \"--end-of-options\", commit.ToString()]",
+        "Arguments = [\"diff\", \"--cached\", \"--name-only\", \"-z\"]",
+    ];
 
     /// <summary>Tokens no control code may contain.</summary>
     private static readonly (Regex Pattern, string What)[] Forbidden =
@@ -29,7 +41,7 @@ public class ExternalControlReadOnlyTests
         (new(@"\bProcess\.Start\b|\bnew\s+ProcessStartInfo\b", RegexOptions.Compiled), "starting a process"),
     ];
 
-    /// <summary>The members the host may use on each collaborator.</summary>
+    /// <summary>The members the host and the navigator may use on each collaborator.</summary>
     private static readonly Dictionary<string, HashSet<string>> AllowedMembers = new()
     {
         ["_workspace"] = ["OpenAsync", "Focused", "EnsureInitialized"],
@@ -40,6 +52,8 @@ public class ExternalControlReadOnlyTests
         ],
         ["ctx"] = ["FirstGraphPaint", "RepositoryPath", "State", "DisplayName"],
         ["_settings"] = ["Current"],
+        ["_navigator"] = ["NavigateAsync"],
+        ["_queue"] = ["Enqueue"],
     };
 
     [Fact]
@@ -57,15 +71,18 @@ public class ExternalControlReadOnlyTests
     }
 
     [Fact]
-    public void The_host_uses_only_the_allowed_members_of_its_collaborators()
+    public void The_host_and_the_navigator_use_only_the_allowed_members_of_their_collaborators()
     {
         var root = RepoRoot();
-        var text = StripComments(File.ReadAllText(Path.Combine(root, HostFile)));
-
-        var offenders = FindDisallowedMembers(text);
+        var offenders = new List<string>();
+        foreach (var rel in new[] { HostFile, NavigatorFile })
+        {
+            var text = StripComments(File.ReadAllText(Path.Combine(root, rel)));
+            offenders.AddRange(FindDisallowedMembers(text).Select(m => $"{rel}: {m}"));
+        }
 
         Assert.True(offenders.Count == 0,
-            "ExternalControlHost used a member outside the navigate-and-propose allowlist:\n  "
+            "External control used a member outside the navigate, queue and propose allowlist:\n  "
             + string.Join("\n  ", offenders)
             + "\nA new verb that is neither navigation nor a proposal the user must act on does not ship as an agent verb.");
     }
@@ -81,8 +98,10 @@ public class ExternalControlReadOnlyTests
 
         Assert.Equal([ControlFolder + "/RevisionResolver.cs"], runners);
 
-        var resolver = File.ReadAllText(Path.Combine(root, ControlFolder, "RevisionResolver.cs"));
-        Assert.Contains("Arguments = [\"rev-parse\", \"--verify\", \"-q\", \"--end-of-options\", rev + \"^{commit}\"]", resolver);
+        var resolver = StripComments(File.ReadAllText(Path.Combine(root, ControlFolder, "RevisionResolver.cs")));
+        foreach (var arguments in ResolverArguments)
+            Assert.Contains(arguments, resolver);
+        Assert.Equal(ResolverArguments.Length, Regex.Matches(resolver, @"\bArguments\s*=").Count);
     }
 
     [Fact]
@@ -96,6 +115,9 @@ public class ExternalControlReadOnlyTests
         Assert.NotEmpty(FindDisallowedMembers("ctx.State.SetSelectedPaths(x);"));
         Assert.NotEmpty(FindDisallowedMembers("_workspace.Focused.State.ClearPendingCommitMessage();"));
         Assert.NotEmpty(FindDisallowedMembers("_workspace.Focused.Gateway.Stage(x);"));
+        Assert.NotEmpty(FindDisallowedMembers("_queue.Remove(id);"));
+        Assert.NotEmpty(FindDisallowedMembers("_queue.MarkSeen(id);"));
+        Assert.Empty(FindDisallowedMembers("_queue.Enqueue(item); await _navigator.NavigateAsync(target, ct);"));
         Assert.Empty(FindForbidden("x.cs", "state.SetOpenDiff(null);"));
         Assert.Empty(FindDisallowedMembers("state.SetOpenDiff(null); ctx.State.ProposeCommitMessage(m);"));
         Assert.Empty(FindDisallowedMembers("ctx.State.ProposeCommitMessage(m); ctx.State.OpenDiff"));
@@ -119,7 +141,7 @@ public class ExternalControlReadOnlyTests
     /// context.</summary>
     private static readonly (Regex Pattern, string? Receiver)[] MemberAccess =
     [
-        (new(@"\b(_workspace|state|ctx|_settings)\.(\w+)", RegexOptions.Compiled), null),
+        (new(@"\b(_workspace|state|ctx|_settings|_navigator|_queue)\.(\w+)", RegexOptions.Compiled), null),
         (new(@"\.State\.(\w+)", RegexOptions.Compiled), "state"),
         (new(@"\.Focused\.(\w+)", RegexOptions.Compiled), "ctx"),
     ];
@@ -147,7 +169,7 @@ public class ExternalControlReadOnlyTests
         var files = Directory.GetFiles(Path.Combine(root, ControlFolder), "*.cs", SearchOption.AllDirectories)
             .Append(Path.Combine(root, HostFile))
             .ToList();
-        Assert.True(files.Count >= 6, "Expected the host and the control files to exist.");
+        Assert.True(files.Count >= 7, "Expected the host, the navigator and the control files to exist.");
 
         return files
             .Select(f => (Path.GetRelativePath(root, f).Replace('\\', '/'), File.ReadAllText(f)))

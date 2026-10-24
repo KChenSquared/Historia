@@ -1,12 +1,13 @@
 ---
 name: historia-commit
-description: After you make one or more commits, open the first in Historia and show the historia-cmdr command for each so the user can rerun it. Use right after you commit, whenever the user asked you to commit.
+description: After you make one or more commits, queue each in Historia's CMDR list with a short note and show the historia-cmdr command for each so the user can rerun it. Use right after you commit, whenever the user asked you to commit.
 allowed-tools: Bash(historia-cmdr *) Bash(git log *) Bash(git rev-parse *)
 ---
 
-# Show your commits in Historia
+# Queue your commits in Historia
 
-Run this after you commit. Commit only when the user asked you to.
+Run this after you commit. Commit only when the user asked you to. Historia does not switch views:
+each commit waits in the CMDR list at the top of its sidebar until the user clicks it.
 
 ## Procedure
 
@@ -15,22 +16,25 @@ Run this after you commit. Commit only when the user asked you to.
 2. **List the commits you made**, oldest first: `git log --reverse --format='%h %s' <before>..HEAD`,
    where `<before>` is the commit `HEAD` pointed at before you started. If you did not note it,
    list the SHAs your `git commit` calls printed instead.
-3. **One commit: show the command, then run it.** Print it in a fenced `bash` block so the user can
-   rerun it:
+3. **Queue each commit, oldest first.** For each, write a one-line note (at most 200 characters)
+   saying why the commit exists or what to check, print the command in a fenced `bash` block so the
+   user can rerun it, then run it:
 
    ```bash
-   historia-cmdr show <sha>
+   historia-cmdr show <sha> --note "<why>"
    ```
 
-   Then run it. Historia comes forward with the commit selected and centred in the graph.
-4. **Several commits: open the first, list the rest.** Show and run the command for the first commit
-   as above. For each of the others give the short SHA, the subject and its command in a fenced
-   `bash` block, and do not run them; the user opens them when ready.
+   The reply has `"queued": true`. Clicking the item selects the commit and centres it in the graph.
+4. **Finish with the list:** each commit's short SHA and subject, and say they are waiting in
+   Historia's CMDR list.
 
 ## Rules
 
 - Exit 1: report the error from the JSON reply.
-- Exit 2: Historia is unreachable or external control is switched off; say so, and point the user at
-  the commands above to rerun once Historia is up.
+- Exit 2: Historia is unreachable, external control is switched off, or the running Historia is too
+  old to queue items and must be restarted; say which, and point the user at the commands above to
+  rerun once Historia is up.
+- Queue only. Add `--now` (which switches Historia's view at once) only when the user asks to see a
+  commit right away.
 - Navigate only: `historia-cmdr` never stages, commits or changes anything, and this skill never
   pushes.

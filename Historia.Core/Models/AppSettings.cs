@@ -34,6 +34,21 @@ public sealed record AppSettings
     /// their repository paths. Default on.</summary>
     public bool ExternalControlEnabled { get; init; } = true;
 
+    /// <summary>Hours an item in the sidebar's CMDR list (navigations agents queued) is kept:
+    /// when Historia starts, it removes older items. Clamped <see cref="MinCmdrQueueExpiryHours"/>…
+    /// <see cref="MaxCmdrQueueExpiryHours"/> where it is read and where it is edited. Default 5.</summary>
+    public int CmdrQueueExpiryHours { get; init; } = 5;
+
+    /// <summary>The CMDR list shows the newest item first; off shows the oldest first. Set from
+    /// the list's own sort button. Default off.</summary>
+    public bool CmdrQueueNewestFirst { get; init; }
+
+    public const int MinCmdrQueueExpiryHours = 1;
+    public const int MaxCmdrQueueExpiryHours = 168;
+
+    /// <summary>Math.Clamp to the accepted <see cref="CmdrQueueExpiryHours"/> range.</summary>
+    public static int ClampCmdrQueueExpiryHours(int value) => Math.Clamp(value, MinCmdrQueueExpiryHours, MaxCmdrQueueExpiryHours);
+
     /// <summary>
     /// When on (default), developer session logs and performance timing marks are recorded under
     /// the logs directory. Applies live. Also on while <c>HISTORIA_LOG</c> is set.

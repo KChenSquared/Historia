@@ -21,7 +21,7 @@ When contributing to Historia, keep these core tenets in mind:
 2. **Never Block the UI Thread:** All Git operations, I/O, and heavy computations must execute on background threads and communicate via non-blocking asynchronous patterns.
 3. **Simplicity & Polish:** Strive for clean, intuitive UI interactions. Complex Git concepts should be rendered clearly and visually.
 4. **Progressive Disclosure:** Design interfaces that reveal complexity only as needed. Common workflows (staging, unstaging, committing, switching branches, reading the graph) must remain streamlined, clutter-free, and instantly approachable. Advanced capabilities (interactive rebase, worktree management, submodules, terminal access, deep diagnostic metadata) should be surfaced gracefully through context menus, collapsible drawers, or dedicated drill-downs rather than dominating the primary screen space. Errors must show clean, actionable human descriptions first, preserving raw Git stderr behind a details disclosure.
-5. **Built for Agentic Coding:** Two ways. Historia is where you review what coding agents wrote: `historia-cmdr` lets an agent open Historia on the commit, diff or uncommitted change it just produced, or hand over staged files with a proposed commit message, and only you commit (constitution [Rule 40](constitution.md#automation--agents)). And the codebase is built for agent contributors: the constitution is written to be followed mechanically, tests enforce what can regress silently, and multi-file work follows a phased plan whose parallel milestones own disjoint files (see [Working with coding agents](#6-working-with-coding-agents)).
+5. **Built for Agentic Coding:** Two ways. Historia is where you review what coding agents wrote: `historia-cmdr` lets an agent queue the commit, diff or uncommitted change it just produced for you to review in Historia, or hand over staged files with a proposed commit message, and only you commit (constitution [Rule 40](constitution.md#automation--agents)). And the codebase is built for agent contributors: the constitution is written to be followed mechanically, tests enforce what can regress silently, and multi-file work follows a phased plan whose parallel milestones own disjoint files (see [Working with coding agents](#6-working-with-coding-agents)).
 
 ---
 
@@ -142,7 +142,7 @@ Work that touches several files follows a phased plan:
 - A verification phase follows the implementation, and design documents are updated last.
 
 ### Reviewing agent output
-Review it in Historia. With `historia-cmdr` an agent can open Historia on the exact commit, file diff, comparison or uncommitted change it produced; see [`docs/Historia-commander-skills/README.md`](Historia-commander-skills/README.md) for the sample skills. An agent can also stage its own files and propose the commit message, so you review the staged files and click Commit yourself. Read the diff, not the agent's summary or its message.
+Review it in Historia. With `historia-cmdr` an agent queues the exact commit, file diff, comparison or uncommitted change it produced for review in Historia's CMDR list, where you open it when ready; see [`docs/Historia-commander-skills/README.md`](Historia-commander-skills/README.md) for the sample skills. An agent can also stage its own files and propose the commit message, so you review the staged files and click Commit yourself. Read the diff, not the agent's summary or its message.
 
 ### Policy
 - The contributor is responsible for every line, agent-written or not.

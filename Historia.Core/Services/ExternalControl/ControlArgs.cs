@@ -18,22 +18,35 @@ public sealed record ControlArgsResult
     public bool IsUsageError => UsageError is not null;
 }
 
-/// <summary>Parses the <c>historia-cmdr</c> command line into a <see cref="ControlRequest"/>.</summary>
+/// <summary>Parses the <c>historia-cmdr</c> command line into a <see cref="ControlRequest"/>. A
+/// navigation verb is queued for the user to open later (<see cref="ControlVerb.Queue"/>) unless
+/// <c>--now</c> asks for it to be shown at once.</summary>
 public static class ControlArgs
 {
+    /// <summary>The most files one queued <c>changes</c> may name.</summary>
+    public const int MaxQueuedFiles = 200;
+
     public const string UsageText = """
         usage:
           historia-cmdr ping
           historia-cmdr selection
-          historia-cmdr open                              [-C <repo>] [--no-focus] [--no-launch]
-          historia-cmdr show    <rev>                     [-C <repo>] [--no-focus] [--no-launch]
-          historia-cmdr diff    <rev> <file>     [--line N] [-C <repo>] [--no-focus] [--no-launch]
-          historia-cmdr compare <base> <head> <file> [--line N] [-C <repo>] [--no-focus] [--no-launch]
-          historia-cmdr changes <file> [--staged] [--line N] [-C <repo>] [--no-focus] [--no-launch]
-          historia-cmdr propose-commit (-m <text>... | -F <file|->) [-C <repo>] [--no-focus] [--no-launch]
+          historia-cmdr open                                [-C <repo>] [<queue options>]
+          historia-cmdr show    <rev>                       [-C <repo>] [<queue options>]
+          historia-cmdr diff    <rev> <file>       [--line N] [-C <repo>] [<queue options>]
+          historia-cmdr compare <base> <head> <file> [--line N] [-C <repo>] [<queue options>]
+          historia-cmdr changes <file>... [--staged] [--line N] [-C <repo>] [<queue options>]
+          historia-cmdr propose-commit (-m <text>... | -F <file|->) [-C <repo>] [<queue options>]
           historia-cmdr --help | --version
 
-        Shows the result in Historia. Prints one JSON object. Exit codes: 0 ok, 1 command error,
+        queue options:
+          --note <text>   a short message shown on the queued item (at most 200 characters)
+          --now           show it in Historia at once instead of queueing it (no --note);
+                          changes then takes exactly one file
+          --no-focus      with --now, do not bring Historia's window to the front
+          --no-launch     do not start Historia when it is not running
+
+        By default the command is queued: Historia lists it for the user to open later and does
+        not switch the view. Prints one JSON object. Exit codes: 0 ok, 1 command error,
         2 Historia unreachable or control disabled, 64 usage.
         """;
 
@@ -47,7 +60,7 @@ public static class ControlArgs
         if (args[0] is "--version")
             return new ControlArgsResult { ShowVersion = true };
 
-        if (!ControlVerbs.TryParse(args[0], out var verb))
+        if (!ControlVerbs.TryParse(args[0], out var verb) || verb == ControlVerb.Queue)
             return Usage($"Unknown command '{args[0]}'.");
 
         string absoluteCwd;
@@ -60,18 +73,19 @@ public static class ControlArgs
             return Usage("The working directory is not a valid path.");
         }
 
-        var takesPathOptions = verb is ControlVerb.Open or ControlVerb.Show or ControlVerb.Diff
-            or ControlVerb.Compare or ControlVerb.Changes or ControlVerb.ProposeCommit;
+        var queueable = ControlVerbs.IsQueueable(verb);
         var takesLine = verb is ControlVerb.Diff or ControlVerb.Compare or ControlVerb.Changes;
 
         var positionals = new List<string>();
         var messages = new List<string>();
         string? repoOption = null;
         string? messageFile = null;
+        string? rawNote = null;
         int? line = null;
         var staged = false;
         var noFocus = false;
         var noLaunch = false;
+        var now = false;
         var optionsEnded = false;
 
         for (var i = 1; i < args.Count; i++)
@@ -88,15 +102,24 @@ public static class ControlArgs
                 case "--":
                     optionsEnded = true;
                     break;
-                case "-C" when takesPathOptions:
+                case "-C" when queueable:
                     if (!TryTakeValue(args, ref i, out repoOption))
                         return Usage("-C needs a repository path.");
                     break;
-                case "--no-focus" when takesPathOptions:
+                case "--no-focus" when queueable:
                     noFocus = true;
                     break;
-                case "--no-launch" when takesPathOptions:
+                case "--no-launch" when queueable:
                     noLaunch = true;
+                    break;
+                case "--now" when queueable:
+                    now = true;
+                    break;
+                case "--note" when queueable:
+                    if (rawNote is not null)
+                        return Usage("--note can be given once.");
+                    if (!TryTakeValue(args, ref i, out rawNote))
+                        return Usage("--note needs a message.");
                     break;
                 case "--staged" when verb == ControlVerb.Changes:
                     staged = true;
@@ -122,19 +145,41 @@ public static class ControlArgs
             }
         }
 
-        var expected = verb switch
+        var queued = queueable && !now;
+
+        string? note = null;
+        if (rawNote is not null)
         {
-            ControlVerb.Show => 1,
-            ControlVerb.Diff => 2,
-            ControlVerb.Compare => 3,
-            ControlVerb.Changes => 1,
-            _ => 0,
-        };
-        if (positionals.Count != expected)
-            return Usage($"'{args[0]}' takes {expected} argument{(expected == 1 ? "" : "s")}, got {positionals.Count}.");
+            if (now)
+                return Usage("--note is for queued commands; it cannot be used with --now.");
+            if (!ControlInputValidation.NormalizeNote(rawNote, out note, out var noteError))
+                return Usage(noteError!);
+        }
+
+        if (verb == ControlVerb.Changes && queued)
+        {
+            if (positionals.Count is < 1 or > MaxQueuedFiles)
+                return Usage($"'changes' takes 1 to {MaxQueuedFiles} files, got {positionals.Count}.");
+        }
+        else
+        {
+            var expected = verb switch
+            {
+                ControlVerb.Show => 1,
+                ControlVerb.Diff => 2,
+                ControlVerb.Compare => 3,
+                ControlVerb.Changes => 1,
+                _ => 0,
+            };
+            if (positionals.Count != expected)
+            {
+                var suffix = verb == ControlVerb.Changes ? " with --now" : "";
+                return Usage($"'{args[0]}' takes {expected} argument{(expected == 1 ? "" : "s")}{suffix}, got {positionals.Count}.");
+            }
+        }
 
         string? repo = null;
-        if (takesPathOptions)
+        if (queueable)
         {
             try
             {
@@ -146,20 +191,21 @@ public static class ControlArgs
             }
         }
 
-        string? rev = null, otherRev = null, file = null;
+        string? rev = null, otherRev = null;
+        IReadOnlyList<string> files = [];
         switch (verb)
         {
             case ControlVerb.Show:
                 rev = positionals[0];
                 break;
             case ControlVerb.Diff:
-                (rev, file) = (positionals[0], positionals[1]);
+                (rev, files) = (positionals[0], [positionals[1]]);
                 break;
             case ControlVerb.Compare:
-                (rev, otherRev, file) = (positionals[0], positionals[1], positionals[2]);
+                (rev, otherRev, files) = (positionals[0], positionals[1], [positionals[2]]);
                 break;
             case ControlVerb.Changes:
-                file = positionals[0];
+                files = positionals;
                 break;
         }
 
@@ -169,8 +215,11 @@ public static class ControlArgs
                 return Usage(revError!);
         }
 
-        if (file is not null && (file.Length == 0 || file.Contains('\0')))
-            return Usage("A file path is required.");
+        foreach (var file in files)
+        {
+            if (file.Length == 0 || file.Contains('\0'))
+                return Usage("A file path is required.");
+        }
 
         string? commitMessage = null;
         if (verb == ControlVerb.ProposeCommit)
@@ -188,23 +237,31 @@ public static class ControlArgs
             }
         }
 
+        var request = new ControlRequest
+        {
+            Verb = queued ? ControlVerb.Queue : verb,
+            Target = queued ? verb : null,
+            Note = note,
+            Cwd = absoluteCwd,
+            Repo = repo,
+            Rev = rev,
+            OtherRev = otherRev,
+            Path = files.Count > 0 ? files[0] : null,
+            Paths = files.Count > 1 ? files : null,
+            Line = line,
+            Staged = staged,
+            Focus = !queued && !noFocus,
+            CommitMessage = commitMessage,
+        };
+
+        if (ControlJson.Serialize(request).Length >= ControlPipe.MaxLineChars)
+            return Usage("The file names are too long to send in one request.");
+
         return new ControlArgsResult
         {
             NoLaunch = noLaunch,
             MessageFile = messageFile,
-            Request = new ControlRequest
-            {
-                Verb = verb,
-                Cwd = absoluteCwd,
-                Repo = repo,
-                Rev = rev,
-                OtherRev = otherRev,
-                Path = file,
-                Line = line,
-                Staged = staged,
-                Focus = !noFocus,
-                CommitMessage = commitMessage,
-            },
+            Request = request,
         };
     }
 

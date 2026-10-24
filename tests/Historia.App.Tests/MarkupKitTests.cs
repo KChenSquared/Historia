@@ -119,6 +119,83 @@ public sealed class MarkupKitTests
     }
 
     [AvaloniaFact]
+    public void IconGlyph_with_FollowForeground_takes_its_parents_foreground_and_follows_it()
+    {
+        var first = new SolidColorBrush(Colors.White);
+        var second = new SolidColorBrush(Colors.Orange);
+        var glyph = new IconGlyph { Icon = "graph_8", Size = 16, ForegroundKey = "ColorTextMuted", FollowForeground = true };
+        var parent = new Button { Foreground = first, Content = glyph };
+        var window = Host(parent);
+        try
+        {
+            var path = Assert.IsType<Avalonia.Controls.Shapes.Path>(glyph.Content);
+            Assert.Same(first, path.Fill);
+
+            parent.Foreground = second;
+            Dispatcher.UIThread.RunJobs();
+
+            Assert.Same(path, glyph.Content);
+            Assert.Same(second, path.Fill);
+        }
+        finally
+        {
+            window.Close();
+        }
+    }
+
+    [AvaloniaFact]
+    public void A_rebuilt_IconGlyph_lets_go_of_its_previous_path()
+    {
+        var first = new SolidColorBrush(Colors.White);
+        var second = new SolidColorBrush(Colors.Orange);
+        var glyph = new IconGlyph { Icon = "graph_8", Size = 16, ForegroundKey = "ColorTextMuted", FollowForeground = true };
+        var parent = new Button { Foreground = first, Content = glyph };
+        var window = Host(parent);
+        try
+        {
+            var old = Assert.IsType<Avalonia.Controls.Shapes.Path>(glyph.Content);
+            glyph.Size = 18;
+            Assert.NotSame(old, glyph.Content);
+
+            parent.Foreground = second;
+            Dispatcher.UIThread.RunJobs();
+
+            Assert.NotSame(second, old.Fill);
+            Assert.Same(second, Assert.IsType<Avalonia.Controls.Shapes.Path>(glyph.Content).Fill);
+        }
+        finally
+        {
+            window.Close();
+        }
+    }
+
+    [AvaloniaFact]
+    public void IconGlyph_without_FollowForeground_fills_from_its_key_whatever_the_parent_foreground()
+    {
+        var glyph = new IconGlyph { Icon = "graph_8", Size = 16, ForegroundKey = "ColorTextMuted" };
+        var parent = new Button { Foreground = new SolidColorBrush(Colors.White), Content = glyph };
+        var window = Host(parent);
+        try
+        {
+            var path = Assert.IsType<Avalonia.Controls.Shapes.Path>(glyph.Content);
+            Assert.Equal(PaletteColor(EffectiveTheme.Dark, "text-muted"), SolidColor(path.Fill));
+
+            glyph.FollowForeground = true;
+            Dispatcher.UIThread.RunJobs();
+            Assert.Same(parent.Foreground, Assert.IsType<Avalonia.Controls.Shapes.Path>(glyph.Content).Fill);
+
+            glyph.FollowForeground = false;
+            Dispatcher.UIThread.RunJobs();
+            Assert.Equal(PaletteColor(EffectiveTheme.Dark, "text-muted"),
+                SolidColor(Assert.IsType<Avalonia.Controls.Shapes.Path>(glyph.Content).Fill));
+        }
+        finally
+        {
+            window.Close();
+        }
+    }
+
+    [AvaloniaFact]
     public void HelpHint_shows_its_text_as_a_tooltip_and_automation_help()
     {
         const string text = "First paragraph.\n\nSecond paragraph.";

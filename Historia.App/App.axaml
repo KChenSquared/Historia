@@ -172,6 +172,45 @@
             <Setter Property="Opacity" Value="0.4" />
         </Style>
 
+        <!-- The sidebar toggle's unseen-count circle. At rest it is a surface chip with muted
+             text; with unseen items it takes the primary button's colours on either toggle half;
+             on the active (primary) half it gains a ring in the primary button's foreground so it
+             stays visible against the button, and at 0 unseen its fill clears. The white lives
+             here, beside Button.primary, because the view markup is kept on palette keys. -->
+        <Style Selector="Border.cmdr-count">
+            <Setter Property="Background" Value="{DynamicResource ColorSurface}" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="MinWidth" Value="18" />
+            <Setter Property="Height" Value="18" />
+            <Setter Property="CornerRadius" Value="9" />
+            <Setter Property="Padding" Value="5,0" />
+        </Style>
+        <Style Selector="Border.cmdr-count > TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource ColorTextMuted}" />
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="HorizontalAlignment" Value="Center" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+        <Style Selector="Border.cmdr-count.unseen">
+            <Setter Property="Background" Value="{DynamicResource ColorPrimary}" />
+        </Style>
+        <Style Selector="Border.cmdr-count.unseen > TextBlock">
+            <Setter Property="Foreground" Value="White" />
+        </Style>
+        <Style Selector="Border.cmdr-count.on-active">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="White" />
+            <Setter Property="BorderThickness" Value="1.5" />
+        </Style>
+        <Style Selector="Border.cmdr-count.on-active.unseen">
+            <Setter Property="Background" Value="{DynamicResource ColorPrimary}" />
+        </Style>
+        <Style Selector="Border.cmdr-count.on-active > TextBlock">
+            <Setter Property="Foreground" Value="White" />
+        </Style>
+
         <!-- Icon/arrow chrome buttons: no fill until hover. When disabled the glyph fades but the
              ground stays flush with the enabled sibling (Fluent's disabled ContentPresenter paints
              a grey box otherwise), so a disabled arrow reads as the same black with a fainter mark. -->

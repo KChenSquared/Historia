@@ -1,0 +1,144 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ctl="clr-namespace:Historia.Controls"
+             xmlns:v="clr-namespace:Historia.Views"
+             xmlns:vm="clr-namespace:Historia.ViewModels;assembly=Historia.Core"
+             x:Class="Historia.Views.CmdrQueueView"
+             x:DataType="vm:CmdrQueueViewModel"
+             Background="{DynamicResource ColorChrome}">
+    <UserControl.Styles>
+        <!-- The trash button is a bare icon. -->
+        <Style Selector="Button.ref-icon">
+            <Setter Property="Padding" Value="2,0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+
+        <!-- A click opens a row without selecting it; hover shows rows can be opened. The
+             selection is the keyboard's cursor, shown only while the list has focus. -->
+        <Style Selector="ListBox.cmdr-items">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Padding" Value="0" />
+        </Style>
+        <Style Selector="ListBox.cmdr-items > ListBoxItem">
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="MinHeight" Value="0" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="Background" Value="Transparent" />
+        </Style>
+        <Style Selector="ListBox.cmdr-items > ListBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource ColorListHover}" />
+        </Style>
+        <Style Selector="ListBox.cmdr-items > ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="Transparent" />
+        </Style>
+        <Style Selector="ListBox.cmdr-items > ListBoxItem:selected:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource ColorListHover}" />
+        </Style>
+        <Style Selector="ListBox.cmdr-items:focus-within > ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource ColorListActive}" />
+        </Style>
+
+        <!-- An opened item stays listed, dimmed. -->
+        <Style Selector="Border.cmdr-item.seen TextBlock">
+            <Setter Property="Opacity" Value="0.55" />
+        </Style>
+    </UserControl.Styles>
+
+    <DockPanel LastChildFill="True">
+        <Border DockPanel.Dock="Top"
+                BorderThickness="0,1,0,0"
+                BorderBrush="{DynamicResource ColorBorder}"
+                Padding="8,0,4,0">
+            <Grid ColumnDefinitions="*,Auto" Height="28">
+                <TextBlock Classes="text muted"
+                           FontSize="11"
+                           FontWeight="SemiBold"
+                           LetterSpacing="0.4"
+                           Text="FROM AGENTS" />
+                <Button x:Name="SortButton"
+                        Grid.Column="1"
+                        Classes="flat"
+                        Padding="6,2"
+                        FontSize="11"
+                        VerticalAlignment="Center"
+                        Cursor="Hand"
+                        Command="{Binding ToggleSortCommand}"
+                        Content="{Binding SortText}"
+                        ToolTip.Tip="Change the order of the list" />
+            </Grid>
+        </Border>
+
+        <Panel>
+            <TextBlock x:Name="EmptyText"
+                       Classes="text muted"
+                       FontSize="12"
+                       Margin="8,8"
+                       VerticalAlignment="Top"
+                       TextWrapping="Wrap"
+                       IsVisible="{Binding IsEmpty}"
+                       Text="Nothing queued. Agents add items here with historia-cmdr." />
+
+            <ListBox x:Name="ItemsList"
+                     Classes="cmdr-items"
+                     ItemsSource="{Binding Items}"
+                     ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                     KeyDown="OnListKeyDown">
+                <ListBox.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <VirtualizingStackPanel />
+                    </ItemsPanelTemplate>
+                </ListBox.ItemsPanel>
+                <ListBox.ItemTemplate>
+                    <DataTemplate x:DataType="vm:CmdrQueueItemViewModel">
+                        <!-- Row 1: repository, time and trash; then the text on one or two rows.
+                             Every row is the same fixed height, so an item is exactly two or
+                             three rows tall. -->
+                        <Border Classes="cmdr-item"
+                                Classes.seen="{Binding Seen}"
+                                Background="Transparent"
+                                Cursor="Hand"
+                                Padding="{x:Static v:CmdrQueueView.ItemPadding}"
+                                ToolTip.Tip="{Binding Tooltip}"
+                                PointerPressed="OnItemPressed">
+                            <Grid RowDefinitions="Auto,Auto">
+                                <Grid ColumnDefinitions="*,Auto,Auto" Height="{x:Static v:CmdrQueueView.RowHeight}">
+                                    <TextBlock Classes="text"
+                                               FontSize="12"
+                                               FontWeight="SemiBold"
+                                               LineHeight="{x:Static v:CmdrQueueView.RowHeight}"
+                                               Text="{Binding RepoName}" />
+                                    <TextBlock Grid.Column="1"
+                                               Classes="text muted"
+                                               FontSize="11"
+                                               Margin="6,0,4,0"
+                                               LineHeight="{x:Static v:CmdrQueueView.RowHeight}"
+                                               Text="{Binding TimeText}" />
+                                    <Button Grid.Column="2"
+                                            Classes="ref-icon cmdr-remove"
+                                            Height="{x:Static v:CmdrQueueView.RowHeight}"
+                                            VerticalAlignment="Center"
+                                            Command="{Binding Host.RemoveCommand}"
+                                            CommandParameter="{Binding}"
+                                            ToolTip.Tip="Remove from the list">
+                                        <ctl:IconGlyph Icon="delete" Size="14" ForegroundKey="ColorDanger" />
+                                    </Button>
+                                </Grid>
+                                <v:EllipsisTextBlock Grid.Row="1"
+                                                     Classes="text cmdr-text"
+                                                     FontSize="12"
+                                                     LineHeight="{x:Static v:CmdrQueueView.RowHeight}"
+                                                     TextWrapping="Wrap"
+                                                     MaxLines="2"
+                                                     TextTrimming="CharacterEllipsis"
+                                                     Text="{Binding DisplayText}" />
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </Panel>
+    </DockPanel>
+</UserControl>

@@ -1,0 +1,73 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ctl="clr-namespace:Historia.Controls"
+             xmlns:v="clr-namespace:Historia.Views"
+             xmlns:vm="clr-namespace:Historia.ViewModels;assembly=Historia.Core"
+             x:Class="Historia.Views.SidebarView"
+             x:DataType="vm:SidebarViewModel"
+             Background="{DynamicResource ColorChrome}">
+    <UserControl.Styles>
+        <!-- The inactive half is flat with normal text, like the Working Copy button; the active
+             half is the primary button, whose own foreground applies. -->
+        <Style Selector="Button.sidebar-toggle.flat">
+            <Setter Property="Foreground" Value="{DynamicResource ColorText}" />
+        </Style>
+        <Style Selector="Button.sidebar-toggle">
+            <Setter Property="HorizontalAlignment" Value="Stretch" />
+            <Setter Property="VerticalAlignment" Value="Stretch" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="CornerRadius" Value="0" />
+            <Setter Property="Padding" Value="8,0" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+    </UserControl.Styles>
+
+    <!-- The toggle under the Branch shortcut bar, as tall as the Working Copy button, then the
+         pane it selects. Both panes are built once and swapped by visibility, so the ref
+         navigator keeps its expanded sections, filters and scroll position. -->
+    <Grid RowDefinitions="Auto,*">
+        <Grid x:Name="ToggleRow"
+              Grid.Row="0"
+              ColumnDefinitions="*,*"
+              Height="{x:Static v:SectionFrame.TopBarHeight}">
+            <Button x:Name="BranchesToggle"
+                    Grid.Column="0"
+                    Classes="sidebar-toggle"
+                    Classes.primary="{Binding IsBranchesActive}"
+                    Classes.flat="{Binding IsCmdrActive}"
+                    Command="{Binding ShowBranchesCommand}"
+                    ToolTip.Tip="Show branches, remotes and tags">
+                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <ctl:IconGlyph x:Name="BranchesIcon"
+                                   Icon="graph_8"
+                                   Size="18"
+                                   ForegroundKey="ColorTextMuted"
+                                   FollowForeground="{Binding IsBranchesActive}" />
+                    <TextBlock Text="Branches" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" />
+                </StackPanel>
+            </Button>
+            <Button x:Name="CmdrToggle"
+                    Grid.Column="1"
+                    Classes="sidebar-toggle"
+                    Classes.primary="{Binding IsCmdrActive}"
+                    Classes.flat="{Binding IsBranchesActive}"
+                    Command="{Binding ShowCmdrCommand}"
+                    ToolTip.Tip="Show what agents queued for you">
+                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <Border x:Name="CmdrCount"
+                            Classes="cmdr-count"
+                            Classes.unseen="{Binding HasUnseen}"
+                            Classes.on-active="{Binding IsCmdrActive}"
+                            VerticalAlignment="Center">
+                        <TextBlock x:Name="CmdrCountText" Text="{Binding CountText}" />
+                    </Border>
+                    <TextBlock Text="CMDR" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" />
+                </StackPanel>
+            </Button>
+        </Grid>
+
+        <ContentControl x:Name="BranchesHost" Grid.Row="1" IsVisible="{Binding IsBranchesActive}" />
+        <ContentControl x:Name="CmdrHost" Grid.Row="1" IsVisible="{Binding IsCmdrActive}" />
+    </Grid>
+</UserControl>

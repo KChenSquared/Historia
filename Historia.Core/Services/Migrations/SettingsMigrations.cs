@@ -355,4 +355,17 @@ public sealed class SettingsV22ToV23 : IJsonMigration
     }
 }
 
+/// <summary>v23 → v24: adds <c>cmdrQueueExpiryHours</c> and <c>cmdrQueueNewestFirst</c>. Additive —
+/// absent values keep the record defaults (5 hours, oldest first).</summary>
+public sealed class SettingsV23ToV24 : IJsonMigration
+{
+    public int FromVersion => 23;
+    public int ToVersion => 24;
+
+    public void Apply(JsonObject document)
+    {
+        document["schemaVersion"] = 24;
+    }
+}
+
 
