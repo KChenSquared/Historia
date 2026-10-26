@@ -429,6 +429,8 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
         return repo.CurrentNetworkOperation is { Owner: not NetworkOperationOwner.AutoFetch } holder ? holder.Label : null;
     }
 
+    private const double NetworkGateLogThresholdMs = 50.0;
+
     /// <summary>Takes <paramref name="repo"/>'s network gate, waiting (cancellably, with a
     /// progress line) when auto-fetch holds it. Null — after a notice — when another kind of
     /// operation took it first.</summary>
@@ -445,7 +447,12 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
         }
 
         Report(repo, new GitProgress { Phase = "Waiting for auto-fetch…" });
-        return await repo.BeginNetworkOperationAsync(info, ct);
+        var waitStart = Stopwatch.GetTimestamp();
+        var entered = await repo.BeginNetworkOperationAsync(info, ct);
+        var waitMs = Stopwatch.GetElapsedTime(waitStart).TotalMilliseconds;
+        if (waitMs > NetworkGateLogThresholdMs)
+            PerfLog.Mark($"network gate wait {waitMs:F0}ms ({repo.DisplayName}, {label}) behind auto-fetch");
+        return entered;
     }
 
     private async Task ExecuteAsync(RepositoryContext repo, RepoNetworkAction op, string remote, RepoNetworkRequest request, CancellationToken ct)

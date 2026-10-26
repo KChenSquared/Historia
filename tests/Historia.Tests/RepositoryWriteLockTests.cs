@@ -220,4 +220,87 @@ public sealed class RepositoryWriteLockTests : IAsyncDisposable
             PerfLog.OverrideEnabledForTesting(null);
         }
     }
+
+    [Fact(Timeout = 30000)]
+    public async Task CurrentWriteHolder_names_the_holding_operation_while_held_and_is_null_after()
+    {
+        using var repo = TestRepositoryBuilder.FromTemplate("write-lock-seed", b =>
+        {
+            b.WriteFile("a.txt", "initial\n").Stage();
+            b.Commit("c1");
+        });
+        var ctx = _host.Open(repo.Path);
+        Assert.Null(ctx.CurrentWriteHolder);
+
+        (string Label, TimeSpan Held)? seenWhileHeld = null;
+        await ctx.WithWriteLockAsync(async ct =>
+        {
+            await Task.Delay(60, ct);
+            seenWhileHeld = ctx.CurrentWriteHolder;
+        }, label: "Commit");
+
+        Assert.NotNull(seenWhileHeld);
+        Assert.Equal("Commit", seenWhileHeld.Value.Label);
+        Assert.True(seenWhileHeld.Value.Held >= TimeSpan.FromMilliseconds(20), $"held {seenWhileHeld.Value.Held}");
+        Assert.Null(ctx.CurrentWriteHolder);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task CurrentWriteHolder_is_cleared_when_the_work_throws()
+    {
+        using var repo = TestRepositoryBuilder.FromTemplate("write-lock-seed", b =>
+        {
+            b.WriteFile("a.txt", "initial\n").Stage();
+            b.Commit("c1");
+        });
+        var ctx = _host.Open(repo.Path);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await ctx.WithWriteLockAsync<int>(ct => throw new InvalidOperationException("boom"), label: "Doomed"));
+
+        Assert.Null(ctx.CurrentWriteHolder);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task A_waiters_perf_mark_names_the_holder_it_waited_behind()
+    {
+        // Flow-local: setting PerfLog.Enabled would turn on perf logging for every parallel test.
+        PerfLog.OverrideEnabledForTesting(true);
+        try
+        {
+            using var repo = TestRepositoryBuilder.FromTemplate("write-lock-seed", b =>
+            {
+                b.WriteFile("a.txt", "initial\n").Stage();
+                b.Commit("c1");
+            });
+            var ctx = _host.Open(repo.Path);
+
+            PerfLog.Flush(TimeSpan.FromSeconds(10));
+            var startLineCount = File.Exists(PerfLog.LogPath)
+                ? File.ReadAllLines(PerfLog.LogPath).Length
+                : 0;
+
+            var holding = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var holder = Task.Run(() => ctx.WithWriteLockAsync(async ct =>
+            {
+                holding.SetResult();
+                await release.Task;
+            }, label: "SlowHolderOp"));
+            await holding.Task;
+
+            var waiter = Task.Run(() => ctx.WithWriteLockAsync(ct => Task.CompletedTask, label: "Waiter"));
+            await Task.Delay(100);
+            release.SetResult();
+            await Task.WhenAll(holder, waiter);
+
+            Assert.True(PerfLog.Flush(TimeSpan.FromSeconds(10)));
+            var lines = File.ReadAllLines(PerfLog.LogPath).Skip(startLineCount).ToList();
+            Assert.Contains(lines, l => l.Contains("write lock wait") && l.Contains("behind SlowHolderOp"));
+        }
+        finally
+        {
+            PerfLog.OverrideEnabledForTesting(null);
+        }
+    }
 }
