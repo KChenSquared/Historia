@@ -8,7 +8,8 @@ namespace Historia.Services.Git;
 /// a fraction of a second.
 /// <para>
 /// Tip SHAs are written to the process's stdin (<c>--stdin</c>) and then closed — a large tag/
-/// branch count can exceed the ~32K Windows command-line limit if passed as arguments. Pipe
+/// branch count can exceed the ~32K Windows command-line limit if passed as arguments. A long
+/// list is written on its own thread so starting the stream never waits on git reading it. Pipe
 /// back-pressure between pulls means the walk's in-degree state lives entirely inside the git
 /// process; pausing (letting a caller stop pulling) and resuming (pulling again later) costs
 /// nothing extra.
@@ -24,6 +25,9 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
     private const string Format = "%H%x1f%P%x1f%aI%x1f%cI%x1f%an%x1f%ae%x1f%s";
     private const char FieldSep = '\x1f';
 
+    // Tip counts above this are written to stdin on a dedicated thread.
+    private const int InlineTipLimit = 50;
+
     // Started and not yet disposed, by process id. Only Dispose removes an entry — a stream
     // dropped without Dispose stays listed. Holds no reference to the stream or its process.
     private static readonly ConcurrentDictionary<int, string> Undisposed = new();
@@ -33,7 +37,9 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
     private readonly NulRecordReader _reader;
     private readonly StringBuilder _stderr;
     private readonly Task _stderrDrain;
+    private readonly Thread? _stdinWriter;
     private bool _disposed;
+    private int _lowPriority;
 
     public RawCommit Current { get; private set; }
     object IEnumerator.Current => Current;
@@ -47,13 +53,14 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
     /// the read/parse error. Null while it hasn't failed.</summary>
     public string? FailureReason { get; private set; }
 
-    private GitLogStream(Process process, Task stderrDrain, StringBuilder stderr)
+    private GitLogStream(Process process, Task stderrDrain, StringBuilder stderr, Thread? stdinWriter)
     {
         _process = process;
         try { _processId = process.Id; } catch (InvalidOperationException) { _processId = -1; }
         _reader = new NulRecordReader(process.StandardOutput.BaseStream);
         _stderrDrain = stderrDrain;
         _stderr = stderr;
+        _stdinWriter = stdinWriter;
     }
 
     /// <summary>
@@ -123,6 +130,28 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
             return null;
         }
 
+        Thread? stdinWriter = null;
+        if (tipShas.Count > InlineTipLimit)
+            stdinWriter = StartBackgroundThread(() => WriteTips(process, tipShas), "GitLogStream stdin");
+        else
+            WriteTips(process, tipShas);
+
+        var stderr = new StringBuilder();
+        var drain = StartStderrDrain(process, stderr);
+        var stream = new GitLogStream(process, drain, stderr, stdinWriter);
+        Undisposed[stream._processId] = repositoryPath;
+        return stream;
+    }
+
+    private static Thread StartBackgroundThread(ThreadStart body, string name)
+    {
+        var thread = new Thread(body, maxStackSize: 256 * 1024) { IsBackground = true, Name = name };
+        thread.Start();
+        return thread;
+    }
+
+    private static void WriteTips(Process process, IReadOnlyList<string> tipShas)
+    {
         try
         {
             var writer = process.StandardInput;
@@ -131,30 +160,63 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
                 writer.WriteLine(sha);
             writer.Close();
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
         {
-            // The process may have exited before consuming all of stdin — MoveNext observes it.
+            // The process may have exited, or the stream been disposed, before git consumed all of
+            // stdin — MoveNext observes the outcome.
         }
-
-        var stderr = new StringBuilder();
-        var drain = Task.Run(() => DrainStderr(process, stderr));
-        var stream = new GitLogStream(process, drain, stderr);
-        Undisposed[stream._processId] = repositoryPath;
-        return stream;
     }
 
-    private static async Task DrainStderr(Process process, StringBuilder into)
+    // A blocking read on its own thread: the pool is never parked on a git pipe.
+    private static Task StartStderrDrain(Process process, StringBuilder into)
     {
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        StartBackgroundThread(() =>
+        {
+            try
+            {
+                var text = process.StandardError.ReadToEnd();
+                lock (into)
+                    into.Append(text);
+            }
+            catch
+            {
+                // Best-effort — surfaced only in a failure PerfLog mark.
+            }
+            finally
+            {
+                done.TrySetResult();
+            }
+        }, "GitLogStream stderr");
+        return done.Task;
+    }
+
+    /// <summary>
+    /// Runs the git process at <c>BelowNormal</c> priority when <paramref name="low"/> is true and
+    /// at <c>Normal</c> otherwise, so a background walk yields the CPU to interactive work.
+    /// Idempotent and best-effort: a process that already exited, or a platform refusal, is
+    /// ignored.
+    /// </summary>
+    public void SetLowPriority(bool low)
+    {
+        if (_disposed || Interlocked.Exchange(ref _lowPriority, low ? 1 : 0) == (low ? 1 : 0))
+            return;
         try
         {
-            var text = await process.StandardError.ReadToEndAsync().ConfigureAwait(false);
-            lock (into)
-                into.Append(text);
+            if (!_process.HasExited)
+                _process.PriorityClass = low ? ProcessPriorityClass.BelowNormal : ProcessPriorityClass.Normal;
         }
         catch
         {
-            // Best-effort — surfaced only in a failure PerfLog mark.
+            // Best-effort — the process may be gone or the platform may refuse the change.
         }
+    }
+
+    /// <summary>Test seam: the git process's current priority class, or null when unreadable.</summary>
+    internal ProcessPriorityClass? PriorityClassForTesting()
+    {
+        try { return _process.PriorityClass; }
+        catch { return null; }
     }
 
     /// <summary>Test seam: streams started for <paramref name="repositoryPath"/> and not yet
@@ -182,7 +244,7 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
         {
             // EOF on stdout. A clean exit means the walk is exhausted; anything else is a
             // failure.
-            try { _process.WaitForExit(5_000); } catch { /* best effort */ }
+            try { _process.WaitForExit(1_000); } catch { /* best effort */ }
             var exitCode = SafeExitCode();
             if (exitCode != 0)
                 Fail($"git log exited {exitCode}: {StderrTail()}");
@@ -227,30 +289,62 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
     /// feed it fixture records directly without spawning a process.</summary>
     internal static RawCommit ParseRecord(string record)
     {
-        var parts = record.Split(FieldSep);
-        if (parts.Length < 7)
-            throw new FormatException($"expected 7 fields, got {parts.Length}");
+        var span = record.AsSpan();
+        Span<Range> fields = stackalloc Range[7];
+        var count = 0;
+        var start = 0;
+        while (count < fields.Length)
+        {
+            var sep = span[start..].IndexOf(FieldSep);
+            var end = sep < 0 ? span.Length : start + sep;
+            fields[count++] = start..end;
+            if (sep < 0)
+                break;
+            start = end + 1;
+        }
 
-        var id = GitObjectId.Parse(parts[0]);
-        var parentIds = parts[1].Length == 0
-            ? Array.Empty<GitObjectId>()
-            : parts[1].Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(s => GitObjectId.Parse(s)).ToArray();
+        if (count < fields.Length)
+            throw new FormatException($"expected 7 fields, got {count}");
 
-        var authorWhen = DateTimeOffset.Parse(parts[2], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
-        var commitWhen = DateTimeOffset.Parse(parts[3], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+        var id = GitObjectId.Parse(span[fields[0]]);
+        var parentsText = span[fields[1]];
+        var parentIds = parentsText.Length == 0 ? Array.Empty<GitObjectId>() : ParseParents(parentsText);
+
+        var authorWhen = DateTimeOffset.Parse(span[fields[2]], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+        var commitWhen = DateTimeOffset.Parse(span[fields[3]], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
 
         var metadata = new CommitMetadata
         {
             Id = id,
-            MessageShort = parts[6],
-            AuthorName = parts[4],
-            AuthorEmail = parts[5],
+            MessageShort = record[fields[6]],
+            AuthorName = record[fields[4]],
+            AuthorEmail = record[fields[5]],
             AuthorWhen = authorWhen,
             CommitWhen = commitWhen,
             ParentCount = parentIds.Length,
         };
 
         return new RawCommit(id, parentIds, metadata);
+    }
+
+    private static GitObjectId[] ParseParents(ReadOnlySpan<char> text)
+    {
+        var count = 0;
+        foreach (var range in text.Split(' '))
+        {
+            if (range.End.Value > range.Start.Value)
+                count++;
+        }
+
+        var parents = new GitObjectId[count];
+        var next = 0;
+        foreach (var range in text.Split(' '))
+        {
+            if (range.End.Value > range.Start.Value)
+                parents[next++] = GitObjectId.Parse(text[range]);
+        }
+
+        return parents;
     }
 
     public void Reset() => throw new NotSupportedException("GitLogStream is a forward-only, one-shot enumerator.");
@@ -263,6 +357,7 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
         Undisposed.TryRemove(_processId, out _);
         GitCliProcessSetup.TryKill(_process);
         try { _stderrDrain.Wait(1_000); } catch { /* best effort */ }
+        try { _stdinWriter?.Join(1_000); } catch { /* best effort */ }
         try { _process.Dispose(); } catch { /* best effort */ }
         _reader.Dispose();
     }

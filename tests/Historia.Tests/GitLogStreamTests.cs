@@ -141,3 +141,277 @@ public sealed class GitLogStreamTests
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 }
+
+/// <summary>
+/// The span-slicing record parser against a straightforward <c>Split</c>-based reference over
+/// well-formed and malformed records.
+/// </summary>
+[Trait("tier", "unit")]
+public sealed class GitLogStreamParserEquivalenceTests
+{
+    private const char Sep = '\x1f';
+
+    private static string Sha(int n) => n.ToString("x40");
+
+    private static RawCommit ReferenceParse(string record)
+    {
+        var parts = record.Split(Sep);
+        if (parts.Length < 7)
+            throw new FormatException($"expected 7 fields, got {parts.Length}");
+
+        var id = GitObjectId.Parse(parts[0]);
+        var parentIds = parts[1].Length == 0
+            ? Array.Empty<GitObjectId>()
+            : parts[1].Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(s => GitObjectId.Parse(s)).ToArray();
+        var authorWhen = DateTimeOffset.Parse(parts[2], System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+        var commitWhen = DateTimeOffset.Parse(parts[3], System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+        var metadata = new CommitMetadata
+        {
+            Id = id,
+            MessageShort = parts[6],
+            AuthorName = parts[4],
+            AuthorEmail = parts[5],
+            AuthorWhen = authorWhen,
+            CommitWhen = commitWhen,
+            ParentCount = parentIds.Length,
+        };
+        return new RawCommit(id, parentIds, metadata);
+    }
+
+    private static string Rec(string parents, string subject, string author = "Dev", string email = "dev@example.com",
+        string authorWhen = "2026-01-01T00:00:00-08:00", string commitWhen = "2026-01-01T00:01:00+09:00") =>
+        string.Join(Sep, Sha(7), parents, authorWhen, commitWhen, author, email, subject);
+
+    public static TheoryData<string> WellFormed() => new()
+    {
+        Rec("", "root"),
+        Rec(Sha(1), "one parent"),
+        Rec($"{Sha(1)} {Sha(2)}", "merge"),
+        Rec($"{Sha(1)} {Sha(2)} {Sha(3)}", "octopus"),
+        Rec($"{Sha(1)}  {Sha(2)} ", "extra spaces between and after parents"),
+        Rec(" ", "parents field is only a space"),
+        Rec(Sha(1), ""),
+        Rec(Sha(1), "subject with 日本語 and 🎉 and \"quotes\""),
+        Rec(Sha(1), "subject" + Sep + "with a stray separator"),
+        Rec(Sha(1), "trailing separator" + Sep),
+        Rec(Sha(1), "tz", authorWhen: "2026-03-01T10:15:00+05:30", commitWhen: "2026-03-01T11:00:00Z"),
+        Rec(Sha(1), "empty names", author: "", email: ""),
+    };
+
+    public static TheoryData<string> Malformed() => new()
+    {
+        "",
+        "only",
+        "a" + Sep + "b",
+        string.Join(Sep, Sha(1), "", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "n", "e"),
+        Rec("not-a-sha", "bad parent"),
+        Rec(Sha(1), "bad date", authorWhen: "yesterday"),
+        Rec(Sha(1), "bad commit date", commitWhen: ""),
+        string.Join(Sep, "zz", "", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "n", "e", "bad id"),
+    };
+
+    [Theory]
+    [MemberData(nameof(WellFormed))]
+    public void Parses_well_formed_records_like_the_split_reference(string record)
+    {
+        var expected = ReferenceParse(record);
+        var actual = GitLogStream.ParseRecord(record);
+
+        Assert.Equal(expected.Id, actual.Id);
+        Assert.Equal(expected.ParentIds, actual.ParentIds);
+        Assert.Equal(expected.Metadata.ParentCount, actual.Metadata.ParentCount);
+        Assert.Equal(expected.Metadata.MessageShort, actual.Metadata.MessageShort);
+        Assert.Equal(expected.Metadata.AuthorName, actual.Metadata.AuthorName);
+        Assert.Equal(expected.Metadata.AuthorEmail, actual.Metadata.AuthorEmail);
+        Assert.Equal(expected.Metadata.AuthorWhen, actual.Metadata.AuthorWhen);
+        Assert.Equal(expected.Metadata.AuthorWhen.Offset, actual.Metadata.AuthorWhen.Offset);
+        Assert.Equal(expected.Metadata.CommitWhen, actual.Metadata.CommitWhen);
+        Assert.Equal(expected.Metadata.CommitWhen.Offset, actual.Metadata.CommitWhen.Offset);
+    }
+
+    [Theory]
+    [MemberData(nameof(Malformed))]
+    public void Rejects_malformed_records_like_the_split_reference(string record)
+    {
+        var expected = Record.Exception(() => ReferenceParse(record));
+        var actual = Record.Exception(() => GitLogStream.ParseRecord(record));
+
+        Assert.NotNull(expected);
+        Assert.NotNull(actual);
+        Assert.Equal(expected.GetType(), actual.GetType());
+    }
+
+    [Fact]
+    public void A_short_record_reports_the_field_count()
+    {
+        var ex = Assert.Throws<FormatException>(() => GitLogStream.ParseRecord("a" + Sep + "b" + Sep + "c"));
+
+        Assert.Contains("got 3", ex.Message);
+    }
+}
+
+/// <summary>
+/// <see cref="GitLogStream"/> against a real git process: the stdin writer thread, the stderr
+/// drain, priority changes and dispose. Each test returns early when git.exe is not discoverable
+/// by <see cref="IGitExecutableLocator"/>.
+/// </summary>
+[Trait("tier", "git")]
+public sealed class GitLogStreamProcessTests : IAsyncDisposable
+{
+    private readonly MiniHost _host = new();
+    private readonly TestRepositoryBuilder _repo = TestRepositoryBuilder.FromTemplate(
+        "git-log-stream-process", b => b.LinearHistory(40));
+
+    public async ValueTask DisposeAsync()
+    {
+        _repo.Dispose();
+        await _host.DisposeAsync();
+    }
+
+    private IGitExecutableLocator Locator => _host.Provider.GetRequiredService<IGitExecutableLocator>();
+
+    private static List<GitObjectId> Drain(GitLogStream stream)
+    {
+        var ids = new List<GitObjectId>();
+        while (stream.MoveNext())
+            ids.Add(stream.Current.Id);
+        Assert.False(stream.Failed, stream.FailureReason);
+        return ids;
+    }
+
+    private List<GitObjectId> Walk(IReadOnlyList<string> tips)
+    {
+        using var stream = GitLogStream.TryStart(Locator, _repo.Path, tips);
+        Assert.NotNull(stream);
+        return Drain(stream);
+    }
+
+    [Fact]
+    public void A_large_tip_list_is_written_on_its_own_thread_and_fully_consumed()
+    {
+        if (!Locator.Current.Found)
+            return;
+
+        var expected = Walk([_repo.HeadSha]);
+        Assert.Equal(40, expected.Count);
+
+        // Duplicate tips are harmless to git; 20000 lines is far beyond the pipe buffer.
+        var tips = Enumerable.Repeat(_repo.HeadSha, 20_000).ToList();
+        var started = Stopwatch.StartNew();
+        using var stream = GitLogStream.TryStart(Locator, _repo.Path, tips);
+        Assert.NotNull(stream);
+        var startedIn = started.Elapsed;
+        var actual = Drain(stream);
+
+        Assert.Equal(expected, actual);
+        Assert.True(startedIn < TimeSpan.FromSeconds(10), $"TryStart took {startedIn}");
+    }
+
+    [Fact]
+    public void A_short_tip_list_is_consumed()
+    {
+        if (!Locator.Current.Found)
+            return;
+
+        Assert.Equal(40, Walk([_repo.HeadSha, _repo.HeadSha]).Count);
+    }
+
+    [Fact]
+    public void Priority_changes_do_not_disturb_the_walk()
+    {
+        if (!Locator.Current.Found)
+            return;
+
+        var expected = Walk([_repo.HeadSha]);
+
+        using var stream = GitLogStream.TryStart(Locator, _repo.Path, [_repo.HeadSha]);
+        Assert.NotNull(stream);
+        var actual = new List<GitObjectId>();
+        var toggle = 0;
+        while (stream.MoveNext())
+        {
+            actual.Add(stream.Current.Id);
+            stream.SetLowPriority(++toggle % 2 == 1);
+            stream.SetLowPriority(toggle % 2 == 1);
+        }
+
+        Assert.False(stream.Failed, stream.FailureReason);
+        Assert.Equal(expected, actual);
+    }
+
+    [Fact]
+    public void SetLowPriority_lowers_and_restores_the_process_priority()
+    {
+        if (!Locator.Current.Found)
+            return;
+
+        // Enough output to fill the stdout pipe, so git is still alive and blocked on it while the
+        // priority is read.
+        using var big = TestRepositoryBuilder.FromTemplate("git-log-stream-priority", b => b.LinearHistory(3_000));
+        using var stream = GitLogStream.TryStart(Locator, big.Path, [big.HeadSha]);
+        Assert.NotNull(stream);
+        Assert.True(stream.MoveNext());
+
+        stream.SetLowPriority(true);
+        stream.SetLowPriority(true);
+        var low = stream.PriorityClassForTesting();
+        stream.SetLowPriority(false);
+        stream.SetLowPriority(false);
+        var restored = stream.PriorityClassForTesting();
+
+        Assert.Equal(ProcessPriorityClass.BelowNormal, low);
+        Assert.Equal(ProcessPriorityClass.Normal, restored);
+        Assert.Equal(3_000, 1 + Drain(stream).Count);
+    }
+
+    [Fact]
+    public void SetLowPriority_after_dispose_is_ignored()
+    {
+        if (!Locator.Current.Found)
+            return;
+
+        var stream = GitLogStream.TryStart(Locator, _repo.Path, [_repo.HeadSha]);
+        Assert.NotNull(stream);
+        stream.Dispose();
+
+        stream.SetLowPriority(true);
+        stream.SetLowPriority(false);
+    }
+
+    [Fact]
+    public void Dispose_of_an_unconsumed_stream_returns_promptly()
+    {
+        if (!Locator.Current.Found)
+            return;
+
+        var tips = Enumerable.Repeat(_repo.HeadSha, 5_000).ToList();
+        var stream = GitLogStream.TryStart(Locator, _repo.Path, tips);
+        Assert.NotNull(stream);
+
+        var disposing = Stopwatch.StartNew();
+        stream.Dispose();
+        disposing.Stop();
+
+        // Dispose waits at most one second each for stderr and the stdin writer; the rest is slack
+        // for a loaded machine.
+        Assert.True(disposing.Elapsed < TimeSpan.FromSeconds(8), $"Dispose took {disposing.Elapsed}");
+        Assert.Equal(0, GitLogStream.LiveCountForTesting(_repo.Path));
+    }
+
+    [Fact]
+    public void A_failing_walk_reports_stderr()
+    {
+        if (!Locator.Current.Found)
+            return;
+
+        using var stream = GitLogStream.TryStart(Locator, _repo.Path, [new string('0', 39) + "1"]);
+        Assert.NotNull(stream);
+
+        while (stream.MoveNext())
+        {
+        }
+
+        Assert.True(stream.Failed);
+        Assert.Contains("git log exited", stream.FailureReason);
+    }
+}
