@@ -68,6 +68,7 @@ public sealed class TerminalControl : Control
     private readonly Action _invalidate;
     private readonly Action _pushResizeAction;
     private bool _resizePosted;
+    private bool _tornDown;
     private DrawingContext? _frameDc;
     private uint _frameBgArgb;
     private uint _frameCursorArgb;
@@ -81,12 +82,10 @@ public sealed class TerminalControl : Control
     private readonly record struct GlyphMetric(ushort Index, double Advance, bool Found);
     private readonly record struct RunKey(int ScreenRow, int StartCol);
 
-    private sealed class CachedRun(GlyphRun run, char[] text, double fontSize, double baseline)
+    private sealed class CachedRun(GlyphRun run, char[] text)
     {
         public GlyphRun Run { get; } = run;
         public char[] Text { get; } = text;
-        public double FontSize { get; } = fontSize;
-        public double Baseline { get; } = baseline;
     }
 
     public TerminalControl()
@@ -111,6 +110,7 @@ public sealed class TerminalControl : Control
     {
         if (_wired)
             return;
+        _tornDown = false;
         _theme = services.GetRequiredService<IThemeService>();
         _ui = services.GetRequiredService<IUiDispatcher>();
         _settings = services.GetRequiredService<ISettingsService>();
@@ -158,44 +158,44 @@ public sealed class TerminalControl : Control
 
         _hostWindow = TopLevel.GetTopLevel(this) as WindowBase;
         if (_hostWindow is not null)
-        {
-            _hostWindow.Activated += OnHostWindowActivated;
-            _hostWindow.Deactivated += OnHostWindowDeactivated;
-        }
-        UpdateBlink(IsFocused, _hostWindow?.IsActive ?? true);
+            _hostWindow.PropertyChanged += OnHostWindowPropertyChanged;
+        UpdateBlink();
     }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnDetachedFromVisualTree(e);
         ReleaseHostWindow();
-        UpdateBlink(false, false);
+        UpdateBlink();
+        ClearRuns();
     }
 
     private void ReleaseHostWindow()
     {
         if (_hostWindow is null)
             return;
-        _hostWindow.Activated -= OnHostWindowActivated;
-        _hostWindow.Deactivated -= OnHostWindowDeactivated;
+        _hostWindow.PropertyChanged -= OnHostWindowPropertyChanged;
         _hostWindow = null;
     }
 
-    // The event can fire before the window's IsActive flips, so the new state is passed in.
-    private void OnHostWindowActivated(object? sender, EventArgs e) => UpdateBlink(IsFocused, true);
-
-    private void OnHostWindowDeactivated(object? sender, EventArgs e) => UpdateBlink(IsFocused, false);
+    // Activated is raised before the window restores focus and before IsActive is set, so the
+    // blink follows the property, which changes last.
+    private void OnHostWindowPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property == WindowBase.IsActiveProperty)
+            UpdateBlink();
+    }
 
     /// <summary>The cursor blinks only while the control has focus in an active window and the
     /// setting is on; otherwise the timer is stopped, so an idle terminal never repaints, and the
     /// cursor is left solid.</summary>
-    private void UpdateBlink(bool focused, bool windowActive)
+    private void UpdateBlink()
     {
         if (_blinkTimer is null)
             return;
 
         var blink = _settings?.Current.TerminalCursorBlink ?? true;
-        if (focused && windowActive && blink && this.GetVisualRoot() is not null)
+        if (IsFocused && (_hostWindow?.IsActive ?? true) && blink && this.GetVisualRoot() is not null)
         {
             _blinkTimer.Start();
             return;
@@ -222,6 +222,8 @@ public sealed class TerminalControl : Control
         ReleaseHostWindow();
         _blinkTimer?.Dispose();
         _blinkTimer = null;
+        _resizeDebounce?.Stop();
+        _tornDown = true;
         ClearRuns();
     }
 
@@ -248,9 +250,9 @@ public sealed class TerminalControl : Control
         if (e.OldSettings.TerminalCursorBlink != e.NewSettings.TerminalCursorBlink)
         {
             if (_ui.CheckAccess())
-                UpdateBlink(IsFocused, _hostWindow?.IsActive ?? true);
+                UpdateBlink();
             else
-                _ui.Post(() => UpdateBlink(IsFocused, _hostWindow?.IsActive ?? true));
+                _ui.Post(UpdateBlink);
         }
     }
 
@@ -406,6 +408,8 @@ public sealed class TerminalControl : Control
     private void PushResizeFromPost()
     {
         _resizePosted = false;
+        if (_tornDown)
+            return;
         PushResizeToSession();
     }
 
@@ -436,6 +440,9 @@ public sealed class TerminalControl : Control
 
     public override void Render(DrawingContext dc)
     {
+        if (_tornDown)
+            return;
+
         var palette = HistoriaPalette.For(_themeMode);
         _frameBgArgb = ArgbOf(palette["term-bg"]);
         dc.FillRectangle(Brush(_frameBgArgb), new Rect(Bounds.Size));
@@ -608,8 +615,6 @@ public sealed class TerminalControl : Control
         if (gtf is not null)
         {
             if (_runs.TryGetValue(key, out var cached)
-                && cached.FontSize == _lastFontSize
-                && cached.Baseline == baseline
                 && text.SequenceEqual(cached.Text))
             {
                 dc.DrawGlyphRun(brush, cached.Run);
@@ -655,13 +660,13 @@ public sealed class TerminalControl : Control
         _runMisses++;
         // The glyph run keeps its character memory, so it gets a copy.
         var chars = text.ToArray();
-        var run = new GlyphRun(gtf, _lastFontSize, chars.AsMemory(), _runIndices.AsSpan(0, count).ToArray(),
+        var run = new GlyphRun(gtf, _lastFontSize, chars.AsMemory(), new ArraySegment<ushort>(_runIndices, 0, count),
             baselineOrigin: new Point(key.StartCol * _cellWidth, baseline));
 
         DropRun(key);
         if (_runs.Count >= MaxCachedRuns)
             ClearRuns();
-        _runs[key] = new CachedRun(run, chars, _lastFontSize, baseline);
+        _runs[key] = new CachedRun(run, chars);
         return run;
     }
 
@@ -763,7 +768,7 @@ public sealed class TerminalControl : Control
     protected override void OnGotFocus(Avalonia.Input.GotFocusEventArgs e)
     {
         base.OnGotFocus(e);
-        UpdateBlink(true, _hostWindow?.IsActive ?? true);
+        UpdateBlink();
         InvalidateVisual();
     }
 
@@ -773,7 +778,7 @@ public sealed class TerminalControl : Control
         // Keys released elsewhere never reach OnKeyUp; no synthetic releases are sent.
         _kittyKeysDown.Clear();
         _swallowTextInput = null;
-        UpdateBlink(false, _hostWindow?.IsActive ?? true);
+        UpdateBlink();
         InvalidateVisual();
     }
 

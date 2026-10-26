@@ -85,10 +85,11 @@ public class TerminalRenderPoolTests
         try
         {
             Assert.False(control.IsFocused);
-            pty.Emit(Content);
+            // Undecorated text, so the unfocused cursor outline is the only pen in the frame.
+            pty.Emit("plain text\r\nsecond row");
 
             RenderFrame(control);
-            Assert.True(control.PenMissesForTesting > 0, "the first frame builds the unfocused cursor and underline pens");
+            Assert.Equal(1, control.PenMissesForTesting);
 
             control.ResetRenderCountersForTesting();
             RenderFrame(control);

@@ -118,6 +118,43 @@ public class TerminalBlinkTests
         }
     }
 
+    // Avalonia raises Activated, then restores focus, then sets IsActive, so neither the event nor
+    // the focus change alone sees both conditions true.
+    [AvaloniaFact]
+    public void Focus_restored_on_reactivation_restarts_the_timer()
+    {
+        var (window, control, timer) = Show();
+        var other = new Window { Content = new TextBox(), Width = 200, Height = 100 };
+        try
+        {
+            control.Focus();
+            Dispatcher.UIThread.RunJobs();
+            Assert.True(timer.Running);
+
+            RaisePlatformActivation(window, "Deactivated");
+            other.Show();
+            RaisePlatformActivation(other, "Activated");
+            ((TextBox)other.Content!).Focus();
+            Dispatcher.UIThread.RunJobs();
+            Assert.False(timer.Running);
+
+            RaisePlatformActivation(other, "Deactivated");
+            other.Close();
+            RaisePlatformActivation(window, "Activated");
+            Dispatcher.UIThread.RunJobs();
+
+            Assert.True(control.IsFocused);
+            Assert.True(window.IsActive);
+            Assert.True(timer.Running);
+        }
+        finally
+        {
+            other.Close();
+            window.Close();
+            control.Teardown();
+        }
+    }
+
     [AvaloniaFact]
     public void Leaving_the_visual_tree_stops_the_timer()
     {
