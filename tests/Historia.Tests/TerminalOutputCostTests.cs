@@ -44,7 +44,10 @@ public class TerminalOutputCostTests
 
     [Fact]
     public void SmallChunk_AtDefaultScrollback_AllocatesUnderFourKilobytes()
-        => Assert.True(BytesPerChunk(5_000) < MaxBytesPerChunk);
+    {
+        var bytes = BytesPerChunk(5_000);
+        Assert.True(bytes < MaxBytesPerChunk, $"{bytes} bytes per chunk at 5,000 lines");
+    }
 
     [Fact]
     public void SmallChunk_CostDoesNotGrowWithScrollbackSize()

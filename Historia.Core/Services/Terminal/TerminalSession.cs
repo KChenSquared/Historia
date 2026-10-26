@@ -163,6 +163,7 @@ public sealed class TerminalSession : IDisposable
         rows = Math.Clamp(rows, 1, 1000);
 
         // Resize runs from layout; a failing reflow or pty resize is logged, never thrown into it.
+        var reflowed = false;
         try
         {
             lock (_gate)
@@ -170,6 +171,7 @@ public sealed class TerminalSession : IDisposable
                 if (Volatile.Read(ref _disposed) != 0)
                     return;
                 _term.Resize(columns, rows);
+                reflowed = true;
             }
         }
         catch (Exception ex)
@@ -177,13 +179,22 @@ public sealed class TerminalSession : IDisposable
             AppLog.Write(AppLogLevel.Warn, "terminal", $"Emulator resize to {columns}x{rows} failed: {ex.GetType().Name}: {ex.Message}", ex);
         }
 
-        try
+        // The pty follows the emulator, never leads it: the child must not see a size the emulator lacks.
+        if (reflowed && Volatile.Read(ref _disposed) == 0)
         {
-            _pty.Resize(columns, rows);
-        }
-        catch (Exception ex)
-        {
-            AppLog.Write(AppLogLevel.Warn, "terminal", $"Pty resize to {columns}x{rows} failed: {ex.GetType().Name}: {ex.Message}", ex);
+            try
+            {
+                _pty.Resize(columns, rows);
+            }
+            catch (Exception ex) when (Volatile.Read(ref _disposed) != 0)
+            {
+                // Disposed while resizing; the pty is already gone.
+                _ = ex;
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write(AppLogLevel.Warn, "terminal", $"Pty resize to {columns}x{rows} failed: {ex.GetType().Name}: {ex.Message}", ex);
+            }
         }
 
         MarkBufferDirty();
