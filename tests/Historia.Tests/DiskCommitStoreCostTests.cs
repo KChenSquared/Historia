@@ -166,8 +166,8 @@ public sealed class DiskCommitStoreCostTests : IDisposable
 
     private static string Clean(string s) => s.Replace('\n', ' ').Replace('\r', ' ').Replace(GraphMetaStore.Sep, ' ');
 
-    /// <summary>The scan the store used before it compared bytes: lower-case the term, decode each
-    /// sidecar line, substring on the text after the first separator, prefix on the SHA.</summary>
+    /// <summary>A reference scan: lower-case the term, decode each sidecar line as a string,
+    /// substring on the text after the first separator, prefix on the SHA.</summary>
     private static List<int> ReferenceSearch(IReadOnlyList<CommitMetadata> rows, string term)
     {
         var t = term.Trim().ToLowerInvariant();
@@ -253,6 +253,17 @@ public sealed class DiskCommitStoreCostTests : IDisposable
         Assert.True(index.TryGetValue(Oid(Records - 1), out var last));
         Assert.Equal(Records - 1, last);
         Assert.False(index.TryGetValue(Oid(Records + 5), out _));
-        Assert.InRange(reads, 1, 20);   // one read per record before; a handful of windows now
+        Assert.InRange(reads, 1, 20);   // the SHA index reads .dat in a few large windows
+    }
+
+    [Theory]
+    [InlineData(new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0x1F })]   // fifth byte above 0x0F overflows 32 bits
+    [InlineData(new byte[] { 0x80, 0x80, 0x80, 0x80, 0x80 })]   // a sixth byte would be needed
+    public void A_corrupt_length_prefix_is_reported_as_invalid_data(byte[] prefix)
+    {
+        var record = new byte[20 + prefix.Length];
+        prefix.CopyTo(record, 20);
+
+        Assert.Throws<InvalidDataException>(() => DiskCommitStore.DecodeFrom(record, 20));
     }
 }

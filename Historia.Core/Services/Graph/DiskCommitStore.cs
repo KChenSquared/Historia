@@ -46,6 +46,8 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
 
     private static readonly UTF8Encoding Utf8 = new(false);
 
+    private static readonly System.Buffers.ArrayPool<byte> Pool = System.Buffers.ArrayPool<byte>.Shared;
+
     private static readonly CommitMetadata ClosedStoreStub = new()
     {
         Id = GitObjectId.Zero,
@@ -252,8 +254,7 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
                 var tail = (int)Math.Min((length - startByte) / 8, (long)rowCount - _offsetCount);
                 if (tail > 0)
                 {
-                    var pool = System.Buffers.ArrayPool<byte>.Shared;
-                    var buf = pool.Rent(tail * 8);
+                    var buf = Pool.Rent(tail * 8);
                     try
                     {
                         var readTotal = 0;
@@ -280,7 +281,7 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
                     }
                     finally
                     {
-                        pool.Return(buf);
+                        Pool.Return(buf);
                     }
                 }
             }
@@ -341,8 +342,7 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
         {
             if (_closed)
                 return index;
-            var pool = System.Buffers.ArrayPool<byte>.Shared;
-            var buf = pool.Rent(Window);
+            var buf = Pool.Rent(Window);
             try
             {
                 var windowStart = 0L;
@@ -365,7 +365,7 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
             }
             finally
             {
-                pool.Return(buf);
+                Pool.Return(buf);
             }
         }
         return index;
@@ -392,7 +392,8 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
                 {
                     // A background spill restart (SpillRange from == 0) is rewriting .dat/.idx
                     // under us. Serve a stub for this frame rather than throw off the render
-                    // thread; the offset table is re-read on the next SetCount and reads recover.
+                    // thread; the stub is not cached, so a later read of this row decodes it again
+                    // once the files settle.
                     return ClosedStoreStub;
                 }
             }
@@ -441,8 +442,7 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
                 var span = (int)(end - start);
                 if (span <= 0)
                     return [];
-                var pool = System.Buffers.ArrayPool<byte>.Shared;
-                var buf = pool.Rent(span);
+                var buf = Pool.Rent(span);
                 try
                 {
                     var read = ReadDat(buf.AsSpan(0, span), start);
@@ -461,7 +461,7 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
                 }
                 finally
                 {
-                    pool.Return(buf);
+                    Pool.Return(buf);
                 }
             }
             catch (Exception ex) when (ex is IOException or InvalidDataException
@@ -536,8 +536,7 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
                 var span = (int)Math.Min(end - start, 1 << 22); // cap a pathological single read at 4 MB
                 if (span <= 0)
                     return;
-                var pool = System.Buffers.ArrayPool<byte>.Shared;
-                var buf = pool.Rent(span);
+                var buf = Pool.Rent(span);
                 try
                 {
                     var read = ReadDat(buf.AsSpan(0, span), start);
@@ -554,7 +553,7 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
                 }
                 finally
                 {
-                    pool.Return(buf);
+                    Pool.Return(buf);
                 }
             }
             catch (Exception ex) when (ex is IOException or InvalidDataException
@@ -596,6 +595,7 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
             return [];
 
         var hits = new List<int>();
+        byte[]? buf = null;
         try
         {
             var needle = Utf8.GetBytes(t);
@@ -615,13 +615,18 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
             // rows. Lines end at a '\n' byte, which never occurs inside a multi-byte UTF-8
             // sequence, so lines are cut before matching; an unterminated tail is a line still
             // being appended and is left alone.
-            var buf = new byte[1 << 18];
+            buf = Pool.Rent(1 << 18);
             var len = 0;
             long offset = 0;
             while (!stop)
             {
                 if (len == buf.Length)
-                    Array.Resize(ref buf, buf.Length * 2);
+                {
+                    var grown = Pool.Rent(buf.Length * 2);
+                    Buffer.BlockCopy(buf, 0, grown, 0, len);
+                    Pool.Return(buf);
+                    buf = grown;
+                }
                 var n = RandomAccess.Read(_search, buf.AsSpan(len), offset);
                 if (n <= 0)
                     break;
@@ -665,6 +670,8 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
         }
         finally
         {
+            if (buf is not null)
+                Pool.Return(buf);
             Dispose();
         }
         return hits;
@@ -750,8 +757,7 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
         var len = (int)(end - start);
         if (len <= 0 || start < 0 || end > _datLength)
             throw new InvalidDataException("graph meta record out of range");
-        var pool = System.Buffers.ArrayPool<byte>.Shared;
-        var buf = pool.Rent(len);
+        var buf = Pool.Rent(len);
         try
         {
             var read = ReadDat(buf.AsSpan(0, len), start);
@@ -761,7 +767,7 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
         }
         finally
         {
-            pool.Return(buf);
+            Pool.Return(buf);
         }
     }
 
@@ -769,7 +775,7 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
     /// 2 have no parent-SHA bytes; that format is rejected wholesale by the header version check
     /// before any record is ever read, so a mismatch here would only mean real corruption.
     /// Strings use the length-prefixed UTF-8 layout of <see cref="BinaryWriter.Write(string)"/>.</summary>
-    private static (CommitMetadata Meta, GitObjectId[] Parents) DecodeFrom(ReadOnlySpan<byte> record, int hashSize)
+    internal static (CommitMetadata Meta, GitObjectId[] Parents) DecodeFrom(ReadOnlySpan<byte> record, int hashSize)
     {
         // Trap: a record read at the wrong offset (an index and a data file from different store
         // incarnations) can make the id constructor throw ArgumentException, which no reader
@@ -828,6 +834,8 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
             if (shift == 35)
                 throw new FormatException();
             var b = Take(record, ref pos, 1)[0];
+            if (shift == 28 && b > 0x0F)
+                throw new FormatException();
             length |= (b & 0x7F) << shift;
             if ((b & 0x80) == 0)
                 break;
