@@ -15,7 +15,9 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
     private readonly SafeFileHandle _dat;
     private readonly SafeFileHandle _idx;
     private readonly SafeFileHandle? _search;   // null when the store has no search file
-    private long[] _offsets;            // [record] -> start byte in .dat
+    private long[] _offsets;            // [record] -> start byte in .dat; capacity may exceed _offsetCount
+    private int _offsetCount;           // records held in _offsets
+    private long _datReads;             // reads issued against .dat (test hook)
     private long _datLength;
     private int _count;                 // row count (== record count until the first reorder)
     private readonly int _hashSize;
@@ -42,6 +44,8 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
     private int _leases = 1;
     private volatile bool _closed;
 
+    private static readonly UTF8Encoding Utf8 = new(false);
+
     private static readonly CommitMetadata ClosedStoreStub = new()
     {
         Id = GitObjectId.Zero,
@@ -61,6 +65,7 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
         _idx = idx;
         _search = search;
         _offsets = offsets;
+        _offsetCount = offsets.Length;
         _datLength = datLength;
         _count = count;
         _order = order;
@@ -192,9 +197,9 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
     private bool LastRecordIsReal()
     {
         const int Window = 64 * 1024;
-        if (_offsets.Length == 0)
+        if (_offsetCount == 0)
             return true;
-        var start = _offsets[^1];
+        var start = _offsets[_offsetCount - 1];
         var tail = _datLength - start;
         if (tail <= 0)
             return false;
@@ -213,7 +218,7 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
     private CommitMetadata DecodeTail(long start, int len)
     {
         var buf = new byte[len];
-        if (RandomAccess.Read(_dat, buf, start) < len)
+        if (ReadDat(buf, start) < len)
             throw new InvalidDataException("graph meta store is torn: .dat ends before its last record");
         return DecodeFrom(buf, _hashSize).Meta;
     }
@@ -229,7 +234,8 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
 
     /// <summary>Adopt rows appended since <see cref="Open"/> (called after an Extend spill).
     /// Reads only the <c>.idx</c> bytes appended since the last call instead of
-    /// re-reading the whole file — the existing offsets are kept and only the new tail is appended.
+    /// re-reading the whole file. The offset table grows by capacity doubling, so a long run of
+    /// small appends copies it a logarithmic number of times rather than once per call.
     /// Only valid for an identity-order store (<see cref="_order"/> null) — a store
     /// opened at an explicit order version never grows in place; the layout service reopens a
     /// fresh store after a reorder instead.</summary>
@@ -239,17 +245,58 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
         {
             if (_closed || _order is not null || rowCount <= _count)
                 return;
-            var tail = ReadOffsets(_idx, _offsets.Length, rowCount);
-            if (tail.Length > 0)
+            var startByte = (long)_offsetCount * 8;
+            var length = RandomAccess.GetLength(_idx);
+            if (rowCount > _offsetCount && startByte < length)
             {
-                var merged = new long[_offsets.Length + tail.Length];
-                Array.Copy(_offsets, merged, _offsets.Length);
-                Array.Copy(tail, 0, merged, _offsets.Length, tail.Length);
-                _offsets = merged;
+                var tail = (int)Math.Min((length - startByte) / 8, (long)rowCount - _offsetCount);
+                if (tail > 0)
+                {
+                    var pool = System.Buffers.ArrayPool<byte>.Shared;
+                    var buf = pool.Rent(tail * 8);
+                    try
+                    {
+                        var readTotal = 0;
+                        while (readTotal < tail * 8)
+                        {
+                            var r = RandomAccess.Read(_idx, buf.AsSpan(readTotal, tail * 8 - readTotal), startByte + readTotal);
+                            if (r <= 0)
+                                break;
+                            readTotal += r;
+                        }
+                        var n = readTotal / 8;
+                        if (n > 0)
+                        {
+                            if (_offsetCount + n > _offsets.Length)
+                            {
+                                var grown = new long[Math.Max(_offsetCount + n, _offsets.Length * 2)];
+                                Array.Copy(_offsets, grown, _offsetCount);
+                                _offsets = grown;
+                            }
+                            for (var i = 0; i < n; i++)
+                                _offsets[_offsetCount + i] = BinaryPrimitives.ReadInt64LittleEndian(buf.AsSpan(i * 8, 8));
+                            Volatile.Write(ref _offsetCount, _offsetCount + n);
+                        }
+                    }
+                    finally
+                    {
+                        pool.Return(buf);
+                    }
+                }
             }
             _datLength = RandomAccess.GetLength(_dat);
-            _count = Math.Min(rowCount, _offsets.Length);
+            _count = Math.Min(rowCount, _offsetCount);
         }
+    }
+
+    /// <summary>Reads issued against <c>.dat</c> since open; lets a test prove that a warm
+    /// <see cref="Prefetch"/> performs no IO.</summary>
+    internal long DatReadCount => Interlocked.Read(ref _datReads);
+
+    private int ReadDat(Span<byte> buffer, long offset)
+    {
+        Interlocked.Increment(ref _datReads);
+        return RandomAccess.Read(_dat, buffer, offset);
     }
 
     public int HashSize => _hashSize;
@@ -259,7 +306,7 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
     /// <summary>Total distinct commit records in <c>.meta.dat</c> right now (can exceed
     /// <see cref="Count"/> once history has been reordered — old records superseded by a reorder
     /// stay in the file, unreferenced, until compaction).</summary>
-    public int RecordCount => _offsets.Length;
+    public int RecordCount => Volatile.Read(ref _offsetCount);
 
     /// <summary>Row <paramref name="row"/>'s record index — identity unless an order file is
     /// loaded.</summary>
@@ -275,9 +322,10 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
     /// <summary>Builds a SHA -&gt; record-index table by reading just the leading
     /// SHA of every existing record (skips message/author/parent bytes entirely) — used
     /// by the reorder job to find which commits in a freshly walked history already have a
-    /// durable record, so it only appends genuinely new ones. One small read per record; this is
-    /// a background, gated, lowest-priority job (never on the render thread), so it trades read
-    /// count for simplicity rather than batching.
+    /// durable record, so it only appends genuinely new ones. Records are read through a large
+    /// sequential window that is refilled when the next record's SHA falls outside it, so a
+    /// million records cost a few hundred reads instead of a million. This is a background,
+    /// gated, lowest-priority job (never on the render thread).
     /// <para>
     /// Keyed by <see cref="CompactShaIndex"/> (an 8-byte prefix per entry, verified
     /// against the full id on any hit) rather than the 40-char hex string — at
@@ -287,17 +335,37 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
     /// </summary>
     public CompactShaIndex BuildShaIndex()
     {
+        const int Window = 1 << 20;
         var index = new CompactShaIndex(RecordCount);
         lock (_sync)
         {
             if (_closed)
                 return index;
-            Span<byte> shaBuf = stackalloc byte[_hashSize];
-            for (var rec = 0; rec < _offsets.Length; rec++)
+            var pool = System.Buffers.ArrayPool<byte>.Shared;
+            var buf = pool.Rent(Window);
+            try
             {
-                if (RandomAccess.Read(_dat, shaBuf, _offsets[rec]) != _hashSize)
-                    continue;
-                index.Add(new GitObjectId(shaBuf), rec);
+                var windowStart = 0L;
+                var windowLen = 0;
+                for (var rec = 0; rec < _offsetCount; rec++)
+                {
+                    var offset = _offsets[rec];
+                    if (offset < windowStart || offset + _hashSize > windowStart + windowLen)
+                    {
+                        windowStart = offset;
+                        windowLen = ReadDat(buf.AsSpan(0, Window), offset);
+                        if (windowLen < _hashSize)
+                        {
+                            windowLen = 0;
+                            continue;
+                        }
+                    }
+                    index.Add(new GitObjectId(buf.AsSpan((int)(offset - windowStart), _hashSize)), rec);
+                }
+            }
+            finally
+            {
+                pool.Return(buf);
             }
         }
         return index;
@@ -369,24 +437,32 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
                 }
 
                 var start = _offsets[first];
-                var end = last + 1 < _offsets.Length ? _offsets[last + 1] : _datLength;
+                var end = last + 1 < _offsetCount ? _offsets[last + 1] : _datLength;
                 var span = (int)(end - start);
                 if (span <= 0)
                     return [];
-                var buf = new byte[span];
-                var read = RandomAccess.Read(_dat, buf, start);
-                var result = new List<RawCommit>(last - first + 1);
-                for (var row = first; row <= last; row++)
+                var pool = System.Buffers.ArrayPool<byte>.Shared;
+                var buf = pool.Rent(span);
+                try
                 {
-                    var rs = _offsets[row] - start;
-                    var re = (row + 1 < _offsets.Length ? _offsets[row + 1] : _datLength) - start;
-                    if (rs < 0 || re > read || re <= rs)
-                        break;
-                    var (meta, parents) = DecodeFrom(buf.AsSpan((int)rs, (int)(re - rs)), _hashSize);
-                    Cache(row, meta);
-                    result.Add(new RawCommit(meta.Id, parents, meta));
+                    var read = ReadDat(buf.AsSpan(0, span), start);
+                    var result = new List<RawCommit>(last - first + 1);
+                    for (var row = first; row <= last; row++)
+                    {
+                        var rs = _offsets[row] - start;
+                        var re = (row + 1 < _offsetCount ? _offsets[row + 1] : _datLength) - start;
+                        if (rs < 0 || re > read || re <= rs)
+                            break;
+                        var (meta, parents) = DecodeFrom(buf.AsSpan((int)rs, (int)(re - rs)), _hashSize);
+                        Cache(row, meta);
+                        result.Add(new RawCommit(meta.Id, parents, meta));
+                    }
+                    return result;
                 }
-                return result;
+                finally
+                {
+                    pool.Return(buf);
+                }
             }
             catch (Exception ex) when (ex is IOException or InvalidDataException
                                        or ArgumentOutOfRangeException or IndexOutOfRangeException)
@@ -446,20 +522,39 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
                     return;
                 }
 
+                // A window whose rows are all decoded already costs no read and no allocation:
+                // only the span between the first and last missing row is fetched.
+                while (firstRow <= lastRow && _decoded.ContainsKey(firstRow))
+                    firstRow++;
+                while (lastRow >= firstRow && _decoded.ContainsKey(lastRow))
+                    lastRow--;
+                if (lastRow < firstRow)
+                    return;
+
                 var start = _offsets[firstRow];
-                var end = lastRow + 1 < _offsets.Length ? _offsets[lastRow + 1] : _datLength;
+                var end = lastRow + 1 < _offsetCount ? _offsets[lastRow + 1] : _datLength;
                 var span = (int)Math.Min(end - start, 1 << 22); // cap a pathological single read at 4 MB
-                var buf = new byte[span];
-                var read = RandomAccess.Read(_dat, buf, start);
-                for (var row = firstRow; row <= lastRow; row++)
+                if (span <= 0)
+                    return;
+                var pool = System.Buffers.ArrayPool<byte>.Shared;
+                var buf = pool.Rent(span);
+                try
                 {
-                    if (_decoded.ContainsKey(row))
-                        continue;
-                    var rs = _offsets[row] - start;
-                    var re = (row + 1 < _offsets.Length ? _offsets[row + 1] : _datLength) - start;
-                    if (rs < 0 || re > read || re <= rs)
-                        break;
-                    Cache(row, DecodeFrom(buf.AsSpan((int)rs, (int)(re - rs)), _hashSize).Meta);
+                    var read = ReadDat(buf.AsSpan(0, span), start);
+                    for (var row = firstRow; row <= lastRow; row++)
+                    {
+                        if (_decoded.ContainsKey(row))
+                            continue;
+                        var rs = _offsets[row] - start;
+                        var re = (row + 1 < _offsetCount ? _offsets[row + 1] : _datLength) - start;
+                        if (rs < 0 || re > read || re <= rs)
+                            break;
+                        Cache(row, DecodeFrom(buf.AsSpan((int)rs, (int)(re - rs)), _hashSize).Meta);
+                    }
+                }
+                finally
+                {
+                    pool.Return(buf);
                 }
             }
             catch (Exception ex) when (ex is IOException or InvalidDataException
@@ -483,7 +578,9 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
     /// Ctrl+F backing scan: streams <c>.meta.search</c>, one line per RECORD (
     /// the file is record-indexed, like <c>.dat</c>/<c>.idx</c>, so it is never rewritten by a
     /// reorder). Matches the in-memory find exactly — substring on message or author, prefix on
-    /// the SHA. For an identity-order store a record index IS the row; otherwise the hits are
+    /// the SHA. The file is already lowercased, so the lowercased term is compared as UTF-8 bytes
+    /// against each line in place: no line is decoded, and nothing is allocated per record. For an
+    /// identity-order store a record index IS the row; otherwise the hits are
     /// mapped back to rows via the inverse of the current order, built once per call (no
     /// persisted reverse map), and a record no longer referenced
     /// by the current order (superseded by a reorder, not yet compacted) is dropped.
@@ -501,6 +598,7 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
         var hits = new List<int>();
         try
         {
+            var needle = Utf8.GetBytes(t);
             Dictionary<int, int>? recordToRow = null;
             if (_order is not null)
             {
@@ -515,26 +613,24 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
 
             // Scans the handle's own file, so a store opened before a reset keeps searching its own
             // rows. Lines end at a '\n' byte, which never occurs inside a multi-byte UTF-8
-            // sequence, so lines are cut before decoding; an unterminated tail is a line still
+            // sequence, so lines are cut before matching; an unterminated tail is a line still
             // being appended and is left alone.
-            var chunk = new byte[1 << 16];
-            var pending = new byte[1 << 16];
-            var pendingLen = 0;
+            var buf = new byte[1 << 18];
+            var len = 0;
             long offset = 0;
             while (!stop)
             {
-                var n = RandomAccess.Read(_search, chunk, offset);
+                if (len == buf.Length)
+                    Array.Resize(ref buf, buf.Length * 2);
+                var n = RandomAccess.Read(_search, buf.AsSpan(len), offset);
                 if (n <= 0)
                     break;
                 offset += n;
-                if (pendingLen + n > pending.Length)
-                    Array.Resize(ref pending, Math.Max(pending.Length * 2, pendingLen + n));
-                Buffer.BlockCopy(chunk, 0, pending, pendingLen, n);
-                pendingLen += n;
+                len += n;
 
                 var start = 0;
                 int nl;
-                while (!stop && (nl = Array.IndexOf(pending, (byte)'\n', start, pendingLen - start)) >= 0)
+                while (!stop && (nl = buf.AsSpan(start, len - start).IndexOf((byte)'\n')) >= 0)
                 {
                     record++;
                     if (record >= recordCount)
@@ -542,15 +638,13 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
                         stop = true;
                         break;
                     }
-                    var line = Encoding.UTF8.GetString(pending, start, nl - start);
-                    start = nl + 1;
+                    var line = buf.AsSpan(start, nl);
+                    start += nl + 1;
 
-                    var sep = line.IndexOf(GraphMetaStore.Sep);
+                    var sep = line.IndexOf((byte)GraphMetaStore.Sep);
                     if (sep < 0)
                         continue;
-                    var sha = line.AsSpan(0, sep);
-                    var rest = line.AsSpan(sep + 1);
-                    if (!rest.Contains(t, StringComparison.Ordinal) && !sha.StartsWith(t, StringComparison.Ordinal))
+                    if (line[(sep + 1)..].IndexOf(needle) < 0 && !line[..sep].StartsWith(needle))
                         continue;
 
                     if (recordToRow is null)
@@ -558,8 +652,9 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
                     else if (recordToRow.TryGetValue(record, out var row))
                         hits.Add(row);
                 }
-                pendingLen -= start;
-                Buffer.BlockCopy(pending, start, pending, 0, pendingLen);
+                len -= start;
+                if (start > 0 && len > 0)
+                    Buffer.BlockCopy(buf, start, buf, 0, len);
             }
             if (recordToRow is not null)
                 hits.Sort();
@@ -648,27 +743,34 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
         if (row < 0 || row >= _count)
             throw new ArgumentOutOfRangeException(nameof(row));
         var rec = RecordOf(row);
-        if (rec < 0 || rec >= _offsets.Length)
+        if (rec < 0 || rec >= _offsetCount)
             throw new InvalidDataException("graph meta order points at an unknown record");
         var start = _offsets[rec];
-        var end = rec + 1 < _offsets.Length ? _offsets[rec + 1] : _datLength;
+        var end = rec + 1 < _offsetCount ? _offsets[rec + 1] : _datLength;
         var len = (int)(end - start);
         if (len <= 0 || start < 0 || end > _datLength)
             throw new InvalidDataException("graph meta record out of range");
-        var buf = new byte[len];
-        var read = RandomAccess.Read(_dat, buf, start);
-        if (read < len)
-            throw new InvalidDataException("graph meta record truncated");
-        return DecodeFrom(buf, _hashSize);
+        var pool = System.Buffers.ArrayPool<byte>.Shared;
+        var buf = pool.Rent(len);
+        try
+        {
+            var read = ReadDat(buf.AsSpan(0, len), start);
+            if (read < len)
+                throw new InvalidDataException("graph meta record truncated");
+            return DecodeFrom(buf.AsSpan(0, len), _hashSize);
+        }
+        finally
+        {
+            pool.Return(buf);
+        }
     }
 
-    /// <summary>Parses one <c>.dat</c> record. Records written before <see cref="GraphMetaStore.Version"/>
+    /// <summary>Parses one <c>.dat</c> record straight from its bytes. Records written before <see cref="GraphMetaStore.Version"/>
     /// 2 have no parent-SHA bytes; that format is rejected wholesale by the header version check
-    /// before any record is ever read, so a mismatch here would only mean real corruption.</summary>
+    /// before any record is ever read, so a mismatch here would only mean real corruption.
+    /// Strings use the length-prefixed UTF-8 layout of <see cref="BinaryWriter.Write(string)"/>.</summary>
     private static (CommitMetadata Meta, GitObjectId[] Parents) DecodeFrom(ReadOnlySpan<byte> record, int hashSize)
     {
-        using var ms = new MemoryStream(record.ToArray(), writable: false);
-        using var br = new BinaryReader(ms, new UTF8Encoding(false));
         // Trap: a record read at the wrong offset (an index and a data file from different store
         // incarnations) can make the id constructor throw ArgumentException, which no reader
         // catches; a garbage parent count could also allocate an absurd array. So every way a record
@@ -676,20 +778,20 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
         // graph render already treat as "serve a stub".
         try
         {
-            var sha = br.ReadBytes(hashSize);
-            var id = new GitObjectId(sha);
-            var msg = br.ReadString();
-            var author = br.ReadString();
-            var email = br.ReadString();
-            var authorWhen = ReadWhen(br);
-            var commitWhen = ReadWhen(br);
-            var parentCount = br.ReadInt32();
-            var remaining = ms.Length - ms.Position;
+            var pos = 0;
+            var id = new GitObjectId(Take(record, ref pos, hashSize));
+            var msg = ReadString(record, ref pos);
+            var author = ReadString(record, ref pos);
+            var email = ReadString(record, ref pos);
+            var authorWhen = ReadWhen(record, ref pos);
+            var commitWhen = ReadWhen(record, ref pos);
+            var parentCount = BinaryPrimitives.ReadInt32LittleEndian(Take(record, ref pos, 4));
+            var remaining = record.Length - pos;
             if (parentCount < 0 || parentCount > remaining / hashSize)
                 throw new InvalidDataException("graph meta record has an impossible parent count");
             var parents = new GitObjectId[parentCount];
             for (var i = 0; i < parentCount; i++)
-                parents[i] = new GitObjectId(br.ReadBytes(hashSize));
+                parents[i] = new GitObjectId(Take(record, ref pos, hashSize));
             var meta = new CommitMetadata
             {
                 Id = id,
@@ -708,10 +810,37 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
         }
     }
 
-    private static DateTimeOffset ReadWhen(BinaryReader br)
+    private static ReadOnlySpan<byte> Take(ReadOnlySpan<byte> record, ref int pos, int length)
     {
-        var ticks = br.ReadInt64();
-        var offsetMinutes = br.ReadInt16();
+        if (length < 0 || length > record.Length - pos)
+            throw new EndOfStreamException();
+        var slice = record.Slice(pos, length);
+        pos += length;
+        return slice;
+    }
+
+    private static string ReadString(ReadOnlySpan<byte> record, ref int pos)
+    {
+        // 7-bit encoded byte length, at most five bytes, as BinaryWriter writes it.
+        var length = 0;
+        for (var shift = 0; ; shift += 7)
+        {
+            if (shift == 35)
+                throw new FormatException();
+            var b = Take(record, ref pos, 1)[0];
+            length |= (b & 0x7F) << shift;
+            if ((b & 0x80) == 0)
+                break;
+        }
+        if (length < 0)
+            throw new FormatException();
+        return length == 0 ? "" : Utf8.GetString(Take(record, ref pos, length));
+    }
+
+    private static DateTimeOffset ReadWhen(ReadOnlySpan<byte> record, ref int pos)
+    {
+        var ticks = BinaryPrimitives.ReadInt64LittleEndian(Take(record, ref pos, 8));
+        var offsetMinutes = BinaryPrimitives.ReadInt16LittleEndian(Take(record, ref pos, 2));
         try { return new DateTimeOffset(ticks, TimeSpan.FromMinutes(offsetMinutes)); }
         catch { return DateTimeOffset.UnixEpoch; }
     }
