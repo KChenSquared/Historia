@@ -34,24 +34,151 @@ public sealed partial class CommitGraphControl
         }
     }
 
-    private void RecomputeMatches()
+    // ── Find ──
+    // The scan runs off the UI thread, after a pause in typing. Each request replaces the one
+    // before it: the version number is bumped and the previous token cancelled, and a result is
+    // applied only if its version is still the latest. _findTerm, _findStore and _findRows
+    // describe the latest request, whether its result is applied yet or still on its way.
+
+    private static readonly TimeSpan DefaultFindDebounce = TimeSpan.FromMilliseconds(200);
+    private TimeSpan _findDebounce = DefaultFindDebounce;
+    private CancellationTokenSource? _findCts;
+    private int _findVersion;
+    private string _findTerm = "";
+    private ICommitStore? _findStore;
+    private int _findRows;
+    private Func<string, CancellationToken, IReadOnlyList<int>>? _findSearchForTesting;
+    private Task? _findTask;
+
+    internal TimeSpan FindDebounceForTesting
+    {
+        get => _findDebounce;
+        set => _findDebounce = value;
+    }
+
+    /// <summary>Test-only: stands in for the store's search so a test can count, delay and
+    /// cancel scans. Runs on a pool thread with the request's token.</summary>
+    internal Func<string, CancellationToken, IReadOnlyList<int>>? FindSearchForTesting
+    {
+        get => _findSearchForTesting;
+        set => _findSearchForTesting = value;
+    }
+
+    internal Task? FindTaskForTesting => _findTask;
+
+    /// <summary>Starts a search for the box's text over the current layout. Typing waits out the
+    /// debounce; a new layout searches at once. Asking again for what the latest request already
+    /// covers (same text, same store, same row count) changes nothing, so a recompute that left
+    /// the rows alone keeps its matches and the cursor on them.</summary>
+    private void RecomputeMatches(bool debounce = true)
     {
         var term = _searchBox.Text?.Trim() ?? "";
+        var layout = _layout?.Layout;
+        var store = layout?.Commits;
+        var rows = layout?.RowCount ?? 0;
+        if (string.Equals(term, _findTerm, StringComparison.Ordinal)
+            && ReferenceEquals(store, _findStore) && rows == _findRows)
+            return;
 
-        // The store owns the scan: an in-memory array loops; a disk-backed store streams its
-        // search sidecar rather than paging every record.
-        _matches.Reset(term.Length > 0 && _layout is { } l ? l.Layout.Commits.Search(term) : []);
-        if (_matches.HasMatches)
-            ScrollRowIntoView(_matches.Rows[0]);
+        var sameTerm = string.Equals(term, _findTerm, StringComparison.Ordinal);
+        CancelFind();
+        _findTerm = term;
+        _findStore = store;
+        _findRows = rows;
+
+        // A lease keeps the store's file open for the scan however soon a re-walk lets go of it.
+        if (term.Length == 0 || store?.AddRef() is not { } lease)
+        {
+            ApplyMatches([], preserveCursor: false);
+            return;
+        }
+
+        _matchLabel.Text = "";
+        var cts = _findCts = new CancellationTokenSource();
+        _findTask = RunFindAsync(term, lease, _findVersion, debounce ? _findDebounce : TimeSpan.Zero, sameTerm, cts.Token);
+    }
+
+    private async Task RunFindAsync(string term, ICommitStore lease, int version, TimeSpan delay,
+        bool preserveCursor, CancellationToken ct)
+    {
+        try
+        {
+            if (delay > TimeSpan.Zero)
+                await Task.Delay(delay, ct).ConfigureAwait(true);
+
+            // The store owns the scan: an in-memory array loops; a disk-backed store streams its
+            // search sidecar rather than paging every record. The scan itself cannot be
+            // interrupted, so a superseded one finishes and its result is dropped.
+            var search = _findSearchForTesting;
+            var hits = await Task.Run(() => search is null ? lease.Search(term) : search(term, ct), ct).ConfigureAwait(true);
+            if (version == _findVersion)
+                ApplyMatches(hits, preserveCursor);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            AppLog.Write(AppLogLevel.Warn, "graph", "Find failed", ex);
+            if (version == _findVersion)
+                ApplyMatches([], preserveCursor: false);
+        }
+        finally
+        {
+            lease.Dispose();
+        }
+    }
+
+    /// <summary>Shows a search result. A result equal to the matches already shown, for the same
+    /// text, leaves the cursor and the scroll position where they are.</summary>
+    private void ApplyMatches(IReadOnlyList<int> hits, bool preserveCursor)
+    {
+        var shown = _matches.Rows;
+        var same = preserveCursor && hits.Count == shown.Count;
+        for (var i = 0; same && i < hits.Count; i++)
+            same = hits[i] == shown[i];
+
+        if (!same)
+        {
+            _matches.Reset(hits);
+            if (_matches.HasMatches)
+                ScrollRowIntoView(_matches.Rows[0]);
+        }
 
         UpdateMatchLabel();
         InvalidateVisual();
     }
 
+    /// <summary>Supersedes any search in flight: its result will be dropped and its token is
+    /// cancelled.</summary>
+    private void CancelFind()
+    {
+        _findVersion++;
+        var cts = _findCts;
+        _findCts = null;
+        if (cts is null)
+            return;
+        try { cts.Cancel(); }
+        catch (ObjectDisposedException) { }
+        cts.Dispose();
+    }
+
+    /// <summary>Forgets the search and its matches, for a control that is switching or releasing
+    /// its repository.</summary>
+    private void ResetFind()
+    {
+        CancelFind();
+        _findTerm = "";
+        _findStore = null;
+        _findRows = 0;
+        _matches.Clear();
+        UpdateMatchLabel();
+    }
+
     private void StepMatch(int direction)
     {
         var row = _matches.Step(direction);
-        if (row < 0)
+        // Matches from a layout that has since been replaced can point past the new rows until
+        // the new search lands.
+        if (row < 0 || _layout is not { } stepLayout || row >= stepLayout.Layout.RowCount)
             return;
         ScrollRowIntoView(row);
         _state?.SetSelectedCommit(_layout!.Layout.Commits[row].Id);
