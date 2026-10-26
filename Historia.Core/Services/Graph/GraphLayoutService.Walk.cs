@@ -709,9 +709,10 @@ public sealed partial class GraphLayoutService
         var sw = Stopwatch.StartNew();
         void Report(PrefixWalkOutcome outcome)
         {
-            Diagnostics.PerfLog.Mark(outcome.Proven
-                ? $"graph prefix walk: {outcome.RecentTips} of {outcome.TotalTips} tips, proof ok, {outcome.Rows} rows in {sw.Elapsed.TotalMilliseconds:F0} ms"
-                : $"graph prefix walk: {outcome.RecentTips} of {outcome.TotalTips} tips, full walk instead ({outcome.FallbackReason}) after {sw.Elapsed.TotalMilliseconds:F0} ms");
+            if (outcome.Proven)
+                Diagnostics.PerfLog.Mark($"graph prefix walk: {outcome.RecentTips} of {outcome.TotalTips} tips, proof ok, {outcome.Rows} rows in {sw.Elapsed.TotalMilliseconds:F0} ms");
+            else
+                Diagnostics.PerfLog.Mark($"graph prefix walk: {outcome.RecentTips} of {outcome.TotalTips} tips, full walk instead ({outcome.FallbackReason}) after {sw.Elapsed.TotalMilliseconds:F0} ms");
             TestPrefixWalkObserved?.Invoke(outcome);
         }
 

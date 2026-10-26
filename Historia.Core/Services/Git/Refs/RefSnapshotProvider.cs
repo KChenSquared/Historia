@@ -350,8 +350,7 @@ public sealed class RefSnapshotProvider
         if (dropped.Count > 0)
             LogDropped(dropped);
         Diagnostics.PerfLog.Mark(
-            $"ref snapshot: fast scan {refs.Count} refs (graph {fromGraph}, packed peel {fromPeel}, cat-file {unknownList.Count}) in {sw.Elapsed.TotalMilliseconds:F0} ms"
-            + (dropped.Count > 0 ? $", dropped {dropped.Count} refs with missing objects" : ""));
+            $"ref snapshot: fast scan {refs.Count} refs (graph {fromGraph}, packed peel {fromPeel}, cat-file {unknownList.Count}) in {sw.Elapsed.TotalMilliseconds:F0} ms{(dropped.Count > 0 ? $", dropped {dropped.Count} refs with missing objects" : "")}");
         return refs;
     }
 
