@@ -57,6 +57,53 @@ public sealed class AppLogTests : IDisposable
     }
 
     [Fact]
+    public void Disabled_never_formats_interpolated_arguments_passed_through_IAppLog()
+    {
+        var bomb = new PerfLogTests.FormatBomb();
+        IAppLog log = AppLog.Current;
+
+        log.Trace("test", $"never {bomb}");
+        log.Debug("test", $"never {bomb}");
+        log.Info("test", $"never {bomb,8:x}");
+        log.Warn("test", $"never {bomb}");
+        log.Warn("test", $"never {bomb}", new InvalidOperationException("x"));
+        log.Error("test", $"never {bomb}", new InvalidOperationException("x"));
+
+        Assert.Equal(0, bomb.Calls);
+        Assert.Empty(SessionFiles());
+    }
+
+    [Fact]
+    public void An_interpolated_IAppLog_call_logs_the_same_text_as_the_string_overload()
+    {
+        var saved = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("fi-FI");
+            AppLog.Enabled = true;
+            IAppLog log = AppLog.Current;
+            var value = 1234.5;
+            var name = "abc";
+
+            log.Info("parity-a", $"v {value:F2} [{name,6}] [{name,-6}] {null as string}|");
+            log.Info("parity-b", string.Format("v {0:F2} [{1,6}] [{2,-6}] {3}|", value, name, name, null as string));
+            log.Warn("parity-w", $"w {name}", new InvalidOperationException("boom"));
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = saved;
+        }
+
+        var text = ReadSession();
+        var a = Assert.Single(text.Split(Environment.NewLine), l => l.Contains("[parity-a]"));
+        var b = Assert.Single(text.Split(Environment.NewLine), l => l.Contains("[parity-b]"));
+        Assert.Equal(a[(a.IndexOf("[parity-a]", StringComparison.Ordinal) + "[parity-a]".Length)..],
+            b[(b.IndexOf("[parity-b]", StringComparison.Ordinal) + "[parity-b]".Length)..]);
+        Assert.Contains("[parity-w]  w abc", text);
+        Assert.Contains("InvalidOperationException: boom", text);
+    }
+
+    [Fact]
     public void An_interpolated_write_logs_the_same_text_as_the_string_overload()
     {
         var saved = System.Globalization.CultureInfo.CurrentCulture;

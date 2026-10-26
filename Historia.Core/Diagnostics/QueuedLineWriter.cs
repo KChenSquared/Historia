@@ -87,8 +87,10 @@ internal sealed class QueuedLineWriter : IDisposable
     /// catches up.</summary>
     public void Enqueue(string path, string line)
     {
-        line = CutToMaxLine(line);
-        var chars = line.Length;
+        // The count the check uses is the length the line will have once cut, worked out without
+        // building the cut text: a refused line allocates nothing.
+        var keep = KeptChars(line);
+        var chars = keep == line.Length ? line.Length : keep + MarkerLength(line.Length - keep);
 
         // Both counters are claimed before the check and given back together when the line is
         // refused, so neither drifts however the callers interleave.
@@ -102,6 +104,9 @@ internal sealed class QueuedLineWriter : IDisposable
             return;
         }
 
+        if (keep != line.Length)
+            line = string.Concat(line.AsSpan(0, keep), CutMarker(line.Length - keep));
+
         if (!TryAdd(new Item(path, line, null, null, null)))
         {
             Interlocked.Decrement(ref _backlog);
@@ -109,15 +114,28 @@ internal sealed class QueuedLineWriter : IDisposable
         }
     }
 
-    private static string CutToMaxLine(string line)
+    private const string CutMarkerEnd = " more characters not logged]";
+
+    /// <summary>How many leading characters of <paramref name="line"/> are kept.</summary>
+    private static int KeptChars(string line)
     {
         if (line.Length <= MaxLineChars)
-            return line;
+            return line.Length;
 
         var keep = MaxLineChars;
         if (char.IsHighSurrogate(line[keep - 1]))
             keep--; // never end the kept text on half a surrogate pair
-        return string.Concat(line.AsSpan(0, keep), $"… [{line.Length - keep} more characters not logged]");
+        return keep;
+    }
+
+    private static string CutMarker(int cut) => $"… [{cut}{CutMarkerEnd}";
+
+    private static int MarkerLength(int cut)
+    {
+        var digits = 1;
+        for (var n = cut; n >= 10; n /= 10)
+            digits++;
+        return "… [".Length + digits + CutMarkerEnd.Length;
     }
 
     /// <summary>Waits until every line enqueued before this call is written and flushed to disk

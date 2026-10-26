@@ -148,16 +148,16 @@ public static class PerfLog
     [InterpolatedStringHandler]
     public ref struct MessageHandler
     {
-        private DefaultInterpolatedStringHandler _text;
+        private LogMessageText _text;
 
         public MessageHandler(int literalLength, int formattedCount, out bool shouldAppend)
         {
-            Active = shouldAppend = Enabled;
-            _text = Active ? new DefaultInterpolatedStringHandler(literalLength, formattedCount) : default;
+            _text = new LogMessageText(literalLength, formattedCount, Enabled);
+            shouldAppend = _text.Active;
         }
 
         /// <summary>True when logging was enabled as the message started and the holes were formatted.</summary>
-        internal bool Active { get; }
+        internal bool Active => _text.Active;
 
         public void AppendLiteral(string value) => _text.AppendLiteral(value);
         public void AppendFormatted(string? value) => _text.AppendFormatted(value);
