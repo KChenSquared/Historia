@@ -255,6 +255,25 @@ public sealed class RepositoryContext : IAsyncDisposable
 
     private const double WriteLockLogThresholdMs = 5.0;
 
+    /// <summary>The write-lock holder's label and acquisition time. Immutable and swapped whole, so
+    /// a reader on another thread never sees a label from one holder and a time from another.</summary>
+    private sealed record WriteHolder(string Label, long StartTimestamp);
+
+    private WriteHolder? _writeHolder;
+
+    /// <summary>The operation holding the write lock and how long it has held it, or null while the
+    /// lock is free. Safe to read from any thread; the value is a snapshot.</summary>
+    public (string Label, TimeSpan Held)? CurrentWriteHolder
+    {
+        get
+        {
+            var holder = Volatile.Read(ref _writeHolder);
+            return holder is null
+                ? null
+                : (holder.Label, System.Diagnostics.Stopwatch.GetElapsedTime(holder.StartTimestamp));
+        }
+    }
+
     private static string ResolveCallerLabel(string? label, string callerMember, string callerFile)
     {
         if (!string.IsNullOrEmpty(label))
@@ -282,17 +301,33 @@ public sealed class RepositoryContext : IAsyncDisposable
             throw new InvalidOperationException("Nested or re-entrant write lock acquisition is not permitted.");
 
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, Lifetime);
+        var holderAtWaitStart = Volatile.Read(ref _writeHolder);
         var waitStart = System.Diagnostics.Stopwatch.GetTimestamp();
-        await _writeLock.WaitAsync(linked.Token).ConfigureAwait(false);
+        try
+        {
+            await _writeLock.WaitAsync(linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            var cancelledMs = System.Diagnostics.Stopwatch.GetElapsedTime(waitStart).TotalMilliseconds;
+            if (cancelledMs > WriteLockLogThresholdMs && PerfLog.Enabled)
+            {
+                var holder = holderAtWaitStart is null ? "" : $" behind {holderAtWaitStart.Label}";
+                PerfLog.Mark($"write lock wait {cancelledMs:F1}ms ({DisplayName}){holder}, cancelled");
+            }
+            throw;
+        }
         var waitMs = System.Diagnostics.Stopwatch.GetElapsedTime(waitStart).TotalMilliseconds;
+        var resolvedLabel = ResolveCallerLabel(label, callerMember, callerFile);
+        var holdStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        Volatile.Write(ref _writeHolder, new WriteHolder(resolvedLabel, holdStart));
         if (waitMs > WriteLockLogThresholdMs && PerfLog.Enabled)
         {
-            PerfLog.Mark($"write lock wait {waitMs:F1}ms ({DisplayName})");
+            var behind = holderAtWaitStart is null ? "" : $" behind {holderAtWaitStart.Label}";
+            PerfLog.Mark($"write lock wait {waitMs:F1}ms ({DisplayName}){behind}");
         }
 
-        var resolvedLabel = ResolveCallerLabel(label, callerMember, callerFile);
         _isHoldingWriteLock.Value = true;
-        var holdStart = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             return await work(linked.Token).ConfigureAwait(false);
@@ -305,6 +340,7 @@ public sealed class RepositoryContext : IAsyncDisposable
                 PerfLog.Mark($"write lock hold {resolvedLabel} {holdMs:F1}ms ({DisplayName})");
             }
             _isHoldingWriteLock.Value = false;
+            Volatile.Write(ref _writeHolder, null);
             _writeLock.Release();
         }
     }

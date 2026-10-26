@@ -30,7 +30,16 @@ public sealed class FileWatcherService : IAsyncDisposable
     private DateTimeOffset _firstPendingAt;
     private bool _refsTouched;
     private bool _forceFull;
+    private string? _firstRefPath;
+    private long _lastOverflowLogTimestamp;
+    private int _suppressedOverflowLogs;
+    private Timer? _overflowFlushTimer;
+    private readonly bool _watchFilesystem;
     private volatile bool _disposed;
+
+    /// <summary>Minimum gap between two logged watcher overflows; overflows inside it are counted
+    /// and reported on the next logged one, so a sustained storm leaves a few lines, not thousands.</summary>
+    internal TimeSpan OverflowLogWindow { get; set; } = TimeSpan.FromSeconds(10);
 
     public bool IsDegraded { get; private set; }
     public string? DegradedReason { get; private set; }
@@ -51,11 +60,24 @@ public sealed class FileWatcherService : IAsyncDisposable
         IRepositoryStateService state,
         ISettingsService settings,
         IWorkspaceService? workspace = null)
+        : this(context, state, settings, workspace, watchFilesystem: true)
+    {
+    }
+
+    /// <summary>Test seam: with <paramref name="watchFilesystem"/> false no operating-system
+    /// watcher is attached, so only events a test injects reach the debounce.</summary>
+    internal FileWatcherService(
+        RepositoryContext context,
+        IRepositoryStateService state,
+        ISettingsService settings,
+        IWorkspaceService? workspace,
+        bool watchFilesystem)
     {
         _context = context;
         _state = state;
         _settings = settings;
         _workspace = workspace ?? context.Workspace;
+        _watchFilesystem = watchFilesystem;
 
         try
         {
@@ -107,6 +129,9 @@ public sealed class FileWatcherService : IAsyncDisposable
 
     private void AddWatcher(string path, bool includeSubdirectories, bool isGitDir)
     {
+        if (!_watchFilesystem)
+            return;
+
         var watcher = new FileSystemWatcher(path)
         {
             IncludeSubdirectories = includeSubdirectories,
@@ -135,15 +160,82 @@ public sealed class FileWatcherService : IAsyncDisposable
             return;
 
         // Buffer overflow: discard pending state and force one full refresh — never ignored.
+        var now = Stopwatch.GetTimestamp();
+        var logIt = false;
+        var suppressed = 0;
         lock (_sync)
         {
             if (_disposed)
                 return;
             _pendingPaths.Clear();
+            _firstRefPath = null;
             _forceFull = true;
             _refsTouched = true;
             ScheduleLocked();
+
+            if (_lastOverflowLogTimestamp == 0
+                || Stopwatch.GetElapsedTime(_lastOverflowLogTimestamp, now) >= OverflowLogWindow)
+            {
+                logIt = true;
+                suppressed = _suppressedOverflowLogs;
+                _suppressedOverflowLogs = 0;
+                _lastOverflowLogTimestamp = now;
+            }
+            else
+            {
+                _suppressedOverflowLogs++;
+                ArmOverflowFlushLocked(now);
+            }
         }
+
+        if (!logIt)
+            return;
+
+        var repeats = suppressed > 0 ? $"; {suppressed} further overflow(s) in the last window not logged" : "";
+        var error = e.GetException();
+        AppLog.Write(
+            AppLogLevel.Warn,
+            "watcher",
+            $"file watcher overflowed or failed on {_context.DisplayName} ({error.GetType().Name}: {error.Message}); pending changes dropped, full refresh forced{repeats}");
+    }
+
+    /// <summary>Arms a one-shot timer for the end of the log window so overflows suppressed after
+    /// the last logged line are reported even when no further overflow arrives. Caller holds
+    /// <see cref="_sync"/>.</summary>
+    private void ArmOverflowFlushLocked(long now)
+    {
+        var remaining = OverflowLogWindow - Stopwatch.GetElapsedTime(_lastOverflowLogTimestamp, now);
+        if (remaining < TimeSpan.Zero)
+            remaining = TimeSpan.Zero;
+        try
+        {
+            if (_overflowFlushTimer is null)
+                _overflowFlushTimer = new Timer(_ => FlushSuppressedOverflows(force: false), null, remaining, Timeout.InfiniteTimeSpan);
+            else
+                _overflowFlushTimer.Change(remaining, Timeout.InfiniteTimeSpan);
+        }
+        catch (ObjectDisposedException) { }
+    }
+
+    /// <summary>Logs overflows that were counted but never reported. Unless <paramref name="force"/>,
+    /// waits for the log window to expire so a sustained storm still leaves few lines.</summary>
+    private void FlushSuppressedOverflows(bool force)
+    {
+        int suppressed;
+        lock (_sync)
+        {
+            if (_suppressedOverflowLogs == 0)
+                return;
+            if (!force && Stopwatch.GetElapsedTime(_lastOverflowLogTimestamp) < OverflowLogWindow)
+                return;
+            suppressed = _suppressedOverflowLogs;
+            _suppressedOverflowLogs = 0;
+        }
+
+        AppLog.Write(
+            AppLogLevel.Warn,
+            "watcher",
+            $"{suppressed} further overflow(s) on {_context.DisplayName} not logged");
     }
 
     private void OnRawEvent(string fullPath, bool isGitDir)
@@ -174,6 +266,7 @@ public sealed class FileWatcherService : IAsyncDisposable
             lock (_sync)
             {
                 _refsTouched = true;
+                _firstRefPath ??= rel;
                 _pendingPaths.Add(rel);
                 ScheduleLocked();
             }
@@ -231,8 +324,11 @@ public sealed class FileWatcherService : IAsyncDisposable
         if (_disposed)
             return;
 
+        FlushSuppressedOverflows(force: false);
+
         bool refs;
         bool full;
+        string? firstRefPath;
         lock (_sync)
         {
             if (_disposed)
@@ -242,20 +338,28 @@ public sealed class FileWatcherService : IAsyncDisposable
                 return;
             refs = _refsTouched;
             full = _forceFull;
+            firstRefPath = _firstRefPath;
+            _firstRefPath = null;
             _pendingPaths.Clear();
             _refsTouched = false;
             _forceFull = false;
             _firstPendingAt = default;
         }
 
-        _ = PublishAsync(refs, full);
+        _ = PublishAsync(refs, full, firstRefPath);
     }
 
-    private async Task PublishAsync(bool refsTouched, bool full)
+    private async Task PublishAsync(bool refsTouched, bool full, string? firstRefPath)
     {
         try
         {
             var isFull = full || refsTouched;
+            if (isFull && PerfLog.Enabled)
+            {
+                var trigger = full ? "overflow" : $"refs:{firstRefPath}";
+                PerfLog.Mark($"watcher full refresh ({_context.DisplayName}) trigger {trigger}");
+            }
+
             var ws = _workspace ?? _context.Workspace;
             if (ws is not null)
             {
@@ -376,6 +480,7 @@ public sealed class FileWatcherService : IAsyncDisposable
     {
         IsDegraded = true;
         DegradedReason = reason;
+        AppLog.Write(AppLogLevel.Warn, "watcher", $"file watcher degraded on {_context.DisplayName}: {reason}");
     }
 
     public ValueTask DisposeAsync()
@@ -399,7 +504,10 @@ public sealed class FileWatcherService : IAsyncDisposable
         {
             _debounceTimer?.Dispose();
             _debounceTimer = null;
+            _overflowFlushTimer?.Dispose();
+            _overflowFlushTimer = null;
         }
+        FlushSuppressedOverflows(force: true);
         return ValueTask.CompletedTask;
     }
 }
