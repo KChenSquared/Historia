@@ -46,14 +46,9 @@ public sealed class App : Application
 
         _loggingBinding = LoggingSettingBinding.Attach(_settings);
 
-        // Both samplers exist only while logging is on. The heartbeat has no switch of its own to
-        // follow, so it reconciles whenever the runtime sampler starts or stops.
-        var heartbeat = new UiHeartbeat(Dispatcher.UIThread, static () => LoggingSwitch.Enabled);
-        var runtimeStats = new RuntimeStatsSampler();
-        runtimeStats.RunningChanged += _ => heartbeat.Reconcile();
-        heartbeat.Reconcile();
-        _uiHeartbeat = heartbeat;
-        _runtimeStats = runtimeStats;
+        // Both samplers exist only while logging is on, and each follows the logging switch itself.
+        _uiHeartbeat = new UiHeartbeat(Dispatcher.UIThread);
+        _runtimeStats = new RuntimeStatsSampler();
 
         // Without developer mode, developer-only options are switched off before any theme is resolved.
         if (!Historia.Platform.DevMode.Enabled && _settings.Current.UseCustomTheme)

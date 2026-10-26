@@ -15,7 +15,10 @@ public sealed class RuntimeStatsSampler : IDisposable
     internal static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(5);
 
     /// <summary>One reading of the pool and the GC. <c>Gen0</c> counts every collection, including
-    /// those that also collected an older generation, as <see cref="GC.CollectionCount"/> does.</summary>
+    /// those that also collected an older generation, as <see cref="GC.CollectionCount"/> does.
+    /// <c>MemoryLoadBytes</c> and <c>HighMemoryLoadThresholdBytes</c> (the <c>load=</c> figure in the
+    /// log line) come from <see cref="GC.GetGCMemoryInfo()"/> and describe the last collection, not the
+    /// moment of the sample.</summary>
     internal readonly record struct Snapshot(
         int PoolThreads,
         long PendingWork,
@@ -62,10 +65,6 @@ public sealed class RuntimeStatsSampler : IDisposable
         Reconcile();
     }
 
-    /// <summary>Raised, on the thread that flipped the logging switch, after sampling starts
-    /// (<c>true</c>) or stops (<c>false</c>). Never raised under a lock.</summary>
-    public event Action<bool>? RunningChanged;
-
     /// <summary>Whether the sampling timer exists.</summary>
     public bool IsRunning
     {
@@ -87,7 +86,6 @@ public sealed class RuntimeStatsSampler : IDisposable
             var want = _enabled();
             var baseline = want ? SafeRead() : default;
             string? modeLine = null;
-            bool? flippedTo = null;
 
             lock (_gate)
             {
@@ -103,24 +101,16 @@ public sealed class RuntimeStatsSampler : IDisposable
                         _modeLogged = true;
                         modeLine = ModeLine();
                     }
-                    flippedTo = true;
                 }
                 else if (!want && _timer is not null)
                 {
                     _timer.Dispose();
                     _timer = null;
-                    flippedTo = false;
                 }
             }
 
             if (modeLine is not null)
                 Write(modeLine);
-
-            if (flippedTo is { } running)
-            {
-                try { RunningChanged?.Invoke(running); }
-                catch { /* diagnostics must never throw */ }
-            }
 
             if (_enabled() == IsRunning)
                 return;

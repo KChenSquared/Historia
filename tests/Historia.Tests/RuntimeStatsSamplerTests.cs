@@ -132,22 +132,6 @@ public sealed class RuntimeStatsSamplerTests
     }
 
     [Fact]
-    public void Running_changes_are_raised_when_the_timer_starts_and_stops()
-    {
-        using var h = new Harness(enabled: false);
-        var raised = new List<bool>();
-        h.Sampler.RunningChanged += raised.Add;
-
-        h.Enabled = true;
-        h.Sampler.Reconcile();
-        h.Sampler.Reconcile();
-        h.Enabled = false;
-        h.Sampler.Reconcile();
-
-        Assert.Equal(new[] { true, false }, raised);
-    }
-
-    [Fact]
     public void The_timer_ticks_on_its_own()
     {
         using var h = new Harness(interval: TimeSpan.FromMilliseconds(20));

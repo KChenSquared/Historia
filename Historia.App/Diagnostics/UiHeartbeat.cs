@@ -9,7 +9,7 @@ namespace Historia.Diagnostics;
 /// waiting are skipped, and the one stall that ends is reported once, with its whole duration.
 /// <para>
 /// While the <c>shouldRun</c> answer is false no timer exists; <see cref="Reconcile"/> applies
-/// a change in that answer.
+/// a change in that answer. The production heartbeat follows <see cref="LoggingSwitch"/> itself.
 /// </para>
 /// </summary>
 public sealed class UiHeartbeat : IDisposable
@@ -23,25 +23,35 @@ public sealed class UiHeartbeat : IDisposable
     private readonly Action<string> _write;
     private readonly TimeSpan _interval;
     private readonly TimeSpan _threshold;
+    private readonly bool _followLoggingSwitch;
     private System.Threading.Timer? _timer;
     private bool _disposed;
     private int _inFlight;
     private long _probesPosted;
     private long _probesCompleted;
 
-    /// <summary>Probes the UI thread and writes stalls to <see cref="PerfLog"/>.</summary>
-    public UiHeartbeat(Dispatcher dispatcher, Func<bool> shouldRun)
-        : this(dispatcher, shouldRun, PerfLog.Mark, DefaultInterval, DefaultThreshold)
+    /// <summary>Follows the process-wide logging switch and writes stalls to <see cref="PerfLog"/>.</summary>
+    public UiHeartbeat(Dispatcher dispatcher)
+        : this(dispatcher, static () => LoggingSwitch.ProcessEnabled, PerfLog.Mark, DefaultInterval, DefaultThreshold, followLoggingSwitch: true)
     {
     }
 
-    internal UiHeartbeat(Dispatcher dispatcher, Func<bool> shouldRun, Action<string> write, TimeSpan interval, TimeSpan threshold)
+    internal UiHeartbeat(
+        Dispatcher dispatcher,
+        Func<bool> shouldRun,
+        Action<string> write,
+        TimeSpan interval,
+        TimeSpan threshold,
+        bool followLoggingSwitch = false)
     {
         _dispatcher = dispatcher;
         _shouldRun = shouldRun;
         _write = write;
         _interval = interval;
         _threshold = threshold;
+        _followLoggingSwitch = followLoggingSwitch;
+        if (followLoggingSwitch)
+            LoggingSwitch.Changed += OnLoggingSwitchChanged;
         Reconcile();
     }
 
@@ -60,6 +70,8 @@ public sealed class UiHeartbeat : IDisposable
     internal long ProbesPosted => Interlocked.Read(ref _probesPosted);
 
     internal long ProbesCompleted => Interlocked.Read(ref _probesCompleted);
+
+    private void OnLoggingSwitchChanged(bool enabled) => Reconcile();
 
     /// <summary>Starts or stops the timer to match <c>shouldRun</c>, repeating until the two agree
     /// so concurrent changes cannot leave the last one unapplied.</summary>
@@ -89,6 +101,9 @@ public sealed class UiHeartbeat : IDisposable
 
     private void Tick()
     {
+        if (Volatile.Read(ref _disposed))
+            return;
+
         if (Interlocked.CompareExchange(ref _inFlight, 1, 0) != 0)
             return;
 
@@ -109,18 +124,24 @@ public sealed class UiHeartbeat : IDisposable
         var waited = Stopwatch.GetElapsedTime(posted);
         Interlocked.Increment(ref _probesCompleted);
         Volatile.Write(ref _inFlight, 0);
-        if (waited <= _threshold)
+        if (Volatile.Read(ref _disposed) || waited <= _threshold)
             return;
 
         try { _write(string.Create(CultureInfo.InvariantCulture, $"ui stall {waited.TotalMilliseconds:F0}ms")); }
         catch { /* diagnostics must never throw */ }
     }
 
+    /// <summary>Stops the timer. A tick or probe already running when this returns does nothing
+    /// visible: both check the disposed flag, because <see cref="System.Threading.Timer.Dispose()"/>
+    /// does not wait for a running callback and waiting here would block the UI thread.</summary>
     public void Dispose()
     {
+        if (_followLoggingSwitch)
+            LoggingSwitch.Changed -= OnLoggingSwitchChanged;
+
         lock (_gate)
         {
-            _disposed = true;
+            Volatile.Write(ref _disposed, true);
             _timer?.Dispose();
             _timer = null;
         }

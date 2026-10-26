@@ -60,7 +60,7 @@ public sealed class UiHeartbeatTests
         var stall = Assert.Single(marks.All());
         Assert.Matches(@"^ui stall \d+ms$", stall);
         var ms = int.Parse(stall["ui stall ".Length..^"ms".Length], System.Globalization.CultureInfo.InvariantCulture);
-        Assert.True(ms >= 250, $"the stall was reported as {ms} ms for a 300 ms block");
+        Assert.True(ms >= 300, $"the stall was reported as {ms} ms for a 300 ms block");
     }
 
     [AvaloniaFact]
@@ -97,6 +97,57 @@ public sealed class UiHeartbeatTests
         PumpUntil(() => heartbeat.ProbesCompleted >= 1, "the first probe");
         PumpUntil(() => heartbeat.ProbesPosted >= 2, "a second probe after the first ran");
         Assert.True(heartbeat.ProbesPosted <= heartbeat.ProbesCompleted + 1);
+    }
+
+    [AvaloniaFact]
+    public void A_probe_that_runs_after_dispose_writes_nothing()
+    {
+        var marks = new Marks();
+        var heartbeat = Start(marks, TimeSpan.Zero);
+
+        var clock = Stopwatch.StartNew();
+        while (!heartbeat.ProbeInFlight)
+        {
+            Assert.True(clock.Elapsed < Patience, "the heartbeat never posted a probe");
+            Thread.Sleep(2);
+        }
+
+        // Every probe that has waited at all would be a stall at a zero threshold; the probe is
+        // still queued here, so only the disposed check can keep it from writing.
+        Thread.Sleep(20);
+        heartbeat.Dispose();
+
+        PumpUntil(() => heartbeat.ProbesCompleted >= 1, "the queued probe");
+        Dispatcher.UIThread.RunJobs();
+
+        Assert.Empty(marks.All());
+        Assert.False(heartbeat.ProbeInFlight);
+        Assert.False(heartbeat.IsRunning);
+    }
+
+    [AvaloniaFact]
+    public void The_production_heartbeat_follows_the_logging_switch()
+    {
+        var envBefore = Environment.GetEnvironmentVariable("HISTORIA_LOG");
+        var switchBefore = Historia.Diagnostics.LoggingSwitch.ProcessEnabled;
+        try
+        {
+            Environment.SetEnvironmentVariable("HISTORIA_LOG", null);
+            Historia.Diagnostics.LoggingSwitch.Set(false);
+            using var heartbeat = new Historia.Diagnostics.UiHeartbeat(Dispatcher.UIThread);
+            Assert.False(heartbeat.IsRunning);
+
+            Historia.Diagnostics.LoggingSwitch.Set(true);
+            Assert.True(heartbeat.IsRunning);
+
+            Historia.Diagnostics.LoggingSwitch.Set(false);
+            Assert.False(heartbeat.IsRunning);
+        }
+        finally
+        {
+            Historia.Diagnostics.LoggingSwitch.Set(switchBefore);
+            Environment.SetEnvironmentVariable("HISTORIA_LOG", envBefore);
+        }
     }
 
     [AvaloniaFact]
