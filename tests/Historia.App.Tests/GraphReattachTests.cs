@@ -99,6 +99,22 @@ public sealed class GraphReattachTests
         }
     }
 
+    /// <summary>Pumps the dispatcher until <paramref name="condition"/> holds; the generous limit
+    /// covers a machine busy with other builds.</summary>
+    private static async Task<bool> WaitForAsync(Func<bool> condition, int timeoutMs = 20_000)
+    {
+        var deadline = Environment.TickCount64 + timeoutMs;
+        while (true)
+        {
+            Dispatcher.UIThread.RunJobs();
+            if (condition())
+                return true;
+            if (Environment.TickCount64 > deadline)
+                return false;
+            await Task.Delay(20);
+        }
+    }
+
     private static async Task<TestSetup> CreateSetupAsync(Action<TestRepo>? seed = null)
     {
         var repo = new TestRepo();
@@ -243,7 +259,7 @@ public sealed class GraphReattachTests
         var placeholder = new Border();
 
         graph.SearchBoxForTesting.Text = "needle";
-        Dispatcher.UIThread.RunJobs();
+        Assert.True(await WaitForAsync(() => graph.MatchRowsForTesting.Count == 3), "the search never landed");
         graph.StepMatchForTesting(1);
         var steppedRow = graph.CurrentMatchRowForTesting;
         Assert.NotEqual(-1, steppedRow);
@@ -259,6 +275,93 @@ public sealed class GraphReattachTests
         Dispatcher.UIThread.RunJobs();
 
         Assert.Equal(steppedRow, graph.CurrentMatchRowForTesting);
+    }
+
+    /// <summary>A graph off the visual tree, its repository still open. Holds the repository
+    /// only through a weak reference, so the test can watch it being collected.</summary>
+    private sealed record DetachedGraph(
+        CommitGraphControl Graph, Window Window, ServiceProvider Services, TestRepo Repo,
+        WeakReference Context) : IDisposable
+    {
+        public void Dispose()
+        {
+            try { Window.Close(); } catch { }
+            try { Services.Dispose(); } catch { }
+            try { Repo.Dispose(); } catch { }
+        }
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static async Task<DetachedGraph> OpenDetachedGraphAsync()
+    {
+        var setup = await CreateSetupAsync();
+        setup.Window.Content = new Border();
+        Dispatcher.UIThread.RunJobs();
+        return new DetachedGraph(setup.Graph, setup.Window, setup.Services, setup.Repo, new WeakReference(setup.Context));
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static async Task CloseTheOpenRepositoryAsync(IWorkspaceService workspace)
+    {
+        var context = Assert.Single(workspace.OpenRepositories);
+        await workspace.CloseAsync(context);
+    }
+
+    [AvaloniaFact]
+    public async Task A_detached_graph_lets_a_closed_repository_be_collected()
+    {
+        using var detached = await OpenDetachedGraphAsync();
+        Assert.NotNull(detached.Graph.LayoutForTesting);
+
+        await CloseTheOpenRepositoryAsync(detached.Services.GetRequiredService<IWorkspaceService>());
+
+        // The release is posted to the dispatcher when the tab closes; the wait is long because
+        // collection and the post both slow down on a loaded machine.
+        var collected = await WaitForAsync(() =>
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            return !detached.Context.IsAlive;
+        }, timeoutMs: 30_000);
+
+        Assert.True(collected, "the detached graph still holds the closed repository");
+        Assert.Null(detached.Graph.ContextForTesting);
+        Assert.Null(detached.Graph.LayoutForTesting);
+    }
+
+    [AvaloniaFact]
+    public async Task A_detached_graph_keeps_its_layout_while_the_repository_stays_open()
+    {
+        using var detached = await OpenDetachedGraphAsync();
+        var layout = detached.Graph.LayoutForTesting;
+        Assert.NotNull(layout);
+
+        for (var i = 0; i < 5; i++)
+        {
+            await Task.Delay(50);
+            GC.Collect();
+            Dispatcher.UIThread.RunJobs();
+        }
+
+        Assert.True(detached.Context.IsAlive);
+        Assert.NotNull(detached.Graph.ContextForTesting);
+        Assert.Same(layout, detached.Graph.LayoutForTesting);
+    }
+
+    [AvaloniaFact]
+    public async Task A_head_lookup_that_found_no_row_is_not_repeated_for_the_same_layout()
+    {
+        using var setup = await CreateSetupAsync();
+        var graph = setup.Graph;
+        Assert.NotNull(setup.Context.State.CurrentBranch?.TipCommitId);
+
+        // The empty layout has no rows, so HEAD's commit is never found in it.
+        var before = graph.HeadRowLookupsForTesting;
+        for (var i = 0; i < 3; i++)
+            Assert.Equal(-1, graph.ResolveHeadRowForTesting(GraphLayout.Empty));
+
+        Assert.InRange(graph.HeadRowLookupsForTesting - before, 0, 1);
     }
 
     [AvaloniaFact]
