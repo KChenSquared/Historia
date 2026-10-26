@@ -13,8 +13,8 @@ public enum TerminalSessionState { Starting, Running, Exited, Failed }
 /// <para>
 /// Pty chunks go to the emulator as raw bytes, and the emulator carries a UTF-8 sequence split
 /// across two chunks itself, so a character on a chunk boundary is never mangled.
-/// XTerm.NET has no damage event (<c>BufferChanged</c> fires only when the active buffer
-/// switches), so a row-hash diff here synthesises the dirty-row set for the control.
+/// The session does no per-row work on the output path: the control repaints on the coalesced
+/// <c>BufferChanged</c> and reads the rows it draws under the gate.
 /// </para>
 /// </summary>
 public sealed class TerminalSession : IDisposable
@@ -25,8 +25,6 @@ public sealed class TerminalSession : IDisposable
     private readonly object _gate = new();
     private readonly IUiTimer _coalesceTimer;
 
-    private long[] _rowHashes = [];
-    private readonly HashSet<int> _dirtyRows = [];
     private bool _bufferDirtyPending;
     private bool _coalesceTimerArmed;
     private int _disposed;
@@ -164,12 +162,41 @@ public sealed class TerminalSession : IDisposable
         columns = Math.Clamp(columns, 1, 1000);
         rows = Math.Clamp(rows, 1, 1000);
 
-        lock (_gate)
+        // Resize runs from layout; a failing reflow or pty resize is logged, never thrown into it.
+        var reflowed = false;
+        try
         {
-            _term.Resize(columns, rows);
-            _rowHashes = [];          // force a full redraw after a reflow
+            lock (_gate)
+            {
+                if (Volatile.Read(ref _disposed) != 0)
+                    return;
+                _term.Resize(columns, rows);
+                reflowed = true;
+            }
         }
-        _pty.Resize(columns, rows);
+        catch (Exception ex)
+        {
+            AppLog.Write(AppLogLevel.Warn, "terminal", $"Emulator resize to {columns}x{rows} failed: {ex.GetType().Name}: {ex.Message}", ex);
+        }
+
+        // The pty follows the emulator, never leads it: the child must not see a size the emulator lacks.
+        if (reflowed && Volatile.Read(ref _disposed) == 0)
+        {
+            try
+            {
+                _pty.Resize(columns, rows);
+            }
+            catch (Exception ex) when (Volatile.Read(ref _disposed) != 0)
+            {
+                // Disposed while resizing; the pty is already gone.
+                _ = ex;
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write(AppLogLevel.Warn, "terminal", $"Pty resize to {columns}x{rows} failed: {ex.GetType().Name}: {ex.Message}", ex);
+            }
+        }
+
         MarkBufferDirty();
     }
 
@@ -225,19 +252,6 @@ public sealed class TerminalSession : IDisposable
             return read(new BufferView(_term));
     }
 
-    /// <summary>Returns the rows that changed since the last call and clears the set.</summary>
-    public IReadOnlyList<int> TakeDirtyRows()
-    {
-        lock (_gate)
-        {
-            if (_dirtyRows.Count == 0)
-                return [];
-            var copy = _dirtyRows.ToArray();
-            _dirtyRows.Clear();
-            return copy;
-        }
-    }
-
     // ── pty → emulator pump ─────────────────────────────────────────────────────────────────
 
     private void OnPtyOutput(ReadOnlyMemory<byte> chunk)
@@ -252,7 +266,6 @@ public sealed class TerminalSession : IDisposable
             if (Volatile.Read(ref _disposed) != 0)
                 return;
             _term.Write(chunk.Span);
-            RecomputeDirtyRows_NoLock();
         }
         MarkBufferDirty();
     }
@@ -268,47 +281,8 @@ public sealed class TerminalSession : IDisposable
             if (Volatile.Read(ref _disposed) != 0)
                 return;
             _term.Write(s);
-            RecomputeDirtyRows_NoLock();
         }
         MarkBufferDirty();
-    }
-
-    private void RecomputeDirtyRows_NoLock()
-    {
-        var buffer = _term.Buffer;
-        var total = buffer.Length;
-        if (_rowHashes.Length != total)
-        {
-            _rowHashes = new long[total];
-            for (var y = 0; y < total; y++)
-            {
-                _rowHashes[y] = HashLine(y);
-                _dirtyRows.Add(y);
-            }
-            return;
-        }
-
-        for (var y = 0; y < total; y++)
-        {
-            var h = HashLine(y);
-            if (_rowHashes[y] != h)
-            {
-                _rowHashes[y] = h;
-                _dirtyRows.Add(y);
-            }
-        }
-    }
-
-    private long HashLine(int y)
-    {
-        // FNV-1a over the line's text — cheap, process-stable, and enough to localise damage.
-        const long offset = unchecked((long)14695981039346656037);
-        const long prime = 1099511628211;
-        var text = _term.GetLine(y) ?? string.Empty;
-        var hash = offset;
-        foreach (var ch in text)
-            hash = (hash ^ ch) * prime;
-        return hash;
     }
 
     private void OnEmulatorData(object? sender, XTermLib.Events.TerminalEvents.DataEventArgs e)

@@ -6,6 +6,7 @@ public class TerminalResizeGuardTests
     private sealed class RecordingPty : IPtyConnection
     {
         public readonly List<(int Cols, int Rows)> Resizes = [];
+        public bool ThrowOnResize;
 
 #pragma warning disable CS0067
         public event Action<ReadOnlyMemory<byte>>? OutputReceived;
@@ -13,7 +14,12 @@ public class TerminalResizeGuardTests
 #pragma warning restore CS0067
 
         public void Write(ReadOnlySpan<byte> data) { }
-        public void Resize(int columns, int rows) => Resizes.Add((columns, rows));
+        public void Resize(int columns, int rows)
+        {
+            Resizes.Add((columns, rows));
+            if (ThrowOnResize)
+                throw new InvalidOperationException("resize failed");
+        }
         public void Kill() { }
         public void Dispose() { }
     }
@@ -98,7 +104,7 @@ public class TerminalResizeGuardTests
     }
 
     [AvaloniaFact]
-    public void FirstLayout_PushesRealSizeImmediately()
+    public void FirstLayout_PushesRealSizeAfterThePass()
     {
         var services = CreateServices();
         var control = new TerminalControl();
@@ -120,6 +126,8 @@ public class TerminalResizeGuardTests
         var window = new Window { Content = control, Width = 640, Height = 384 };
         window.Show();
         window.UpdateLayout();
+
+        Assert.Empty(pty.Resizes);
         Dispatcher.UIThread.RunJobs();
 
         Assert.Single(pty.Resizes);
@@ -166,5 +174,52 @@ public class TerminalResizeGuardTests
 
         window.Close();
         control.Teardown();
+    }
+
+    [AvaloniaFact]
+    public void SessionResizeFailure_IsLoggedAndDoesNotEscape()
+    {
+        var stateDir = TestScratch.NewDirectory("historia-terminal-resize-log-");
+        Historia.Diagnostics.AppLog.Enabled = false;
+        AppPaths.OverrideForTesting(stateDir);
+        try
+        {
+            var services = CreateServices();
+            var control = new TerminalControl();
+            control.Attach(services);
+
+            var pty = new RecordingPty { ThrowOnResize = true };
+            using var session = new TerminalSession(
+                TerminalOrigin.Home("/home/me"),
+                pty,
+                services.GetRequiredService<IUiDispatcher>(),
+                80,
+                24,
+                1000);
+            control.SetSession(session);
+
+            Historia.Diagnostics.AppLog.Enabled = true;
+
+            var window = new Window { Content = control, Width = 640, Height = 384 };
+            window.Show();
+            window.UpdateLayout();
+            Dispatcher.UIThread.RunJobs();
+
+            Assert.Single(pty.Resizes);
+            window.Close();
+            control.Teardown();
+
+            Historia.Diagnostics.AppLog.Enabled = false; // close the session writer before reading the file back
+            var logFile = Assert.Single(Directory.GetFiles(AppPaths.LogsDirectory, "dev-*.log"));
+            var text = File.ReadAllText(logFile);
+            Assert.Contains("[terminal]", text);
+            Assert.Contains("resize failed", text);
+        }
+        finally
+        {
+            Historia.Diagnostics.AppLog.Enabled = false;
+            AppPaths.OverrideForTesting(null);
+            TestScratch.Delete(stateDir);
+        }
     }
 }
