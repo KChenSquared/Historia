@@ -36,7 +36,18 @@ internal sealed class GraphWalkCache
     // short TTL bounds how long a result could theoretically go unnoticed if something else ever
     // reads this cache long after these two calls. Only successful reads are cached — a miss
     // isn't worth remembering and must never mask a save that lands moments later.
-    private static readonly TimeSpan ReadCacheTtl = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan DefaultReadCacheTtl = TimeSpan.FromSeconds(5);
+
+    // An entry nothing reads again is removed this long after its TTL has passed.
+    private static readonly TimeSpan ExpiryGrace = TimeSpan.FromSeconds(1);
+
+    private readonly TimeSpan _readCacheTtl;
+
+    public GraphWalkCache() : this(DefaultReadCacheTtl)
+    {
+    }
+
+    internal GraphWalkCache(TimeSpan readCacheTtl) => _readCacheTtl = readCacheTtl;
 
     private sealed class CachedRead
     {
@@ -138,11 +149,21 @@ internal sealed class GraphWalkCache
         return GetOrConvert(entry!, metadataOnDisk);
     }
 
+    /// <summary>How many repos currently hold a cached read.</summary>
+    internal int CachedReadCount
+    {
+        get
+        {
+            lock (_readCacheSync)
+                return _readCache.Count;
+        }
+    }
+
     /// <summary>Drops this repo's cached read
     /// entry (the raw DTO plus up to two converted <see cref="Loaded"/> commit lists) — called on
     /// <see cref="GraphLayoutService.Hibernate"/> so a warm-loaded repo's walk cache doesn't stay
     /// resident for the rest of the session after the tab is switched away from. A miss on the
-    /// next read is no different from one past <see cref="ReadCacheTtl"/> — just a re-read.</summary>
+    /// next read is no different from one past the read TTL — just a re-read.</summary>
     public void Evict(string repoPath)
     {
         lock (_readCacheSync)
@@ -154,7 +175,7 @@ internal sealed class GraphWalkCache
         lock (_readCacheSync)
         {
             if (_readCache.TryGetValue(repoPath, out var cached)
-                && System.Diagnostics.Stopwatch.GetElapsedTime(cached.Timestamp) < ReadCacheTtl)
+                && System.Diagnostics.Stopwatch.GetElapsedTime(cached.Timestamp) < _readCacheTtl)
                 return cached;
         }
 
@@ -165,7 +186,23 @@ internal sealed class GraphWalkCache
         var entry = new CachedRead { Dto = dto, Timestamp = System.Diagnostics.Stopwatch.GetTimestamp() };
         lock (_readCacheSync)
             _readCache[repoPath] = entry;
+        ScheduleExpiry(repoPath, entry);
         return entry;
+    }
+
+    /// <summary>Removes <paramref name="entry"/> shortly after its TTL, so a repo nobody reads
+    /// again does not keep its DTO and converted commit lists resident. The removal is skipped
+    /// when a newer read, a save or an eviction has already replaced the entry.</summary>
+    private void ScheduleExpiry(string repoPath, CachedRead entry)
+    {
+        _ = Task.Delay(_readCacheTtl + ExpiryGrace).ContinueWith(_ =>
+        {
+            lock (_readCacheSync)
+            {
+                if (_readCache.TryGetValue(repoPath, out var current) && ReferenceEquals(current, entry))
+                    _readCache.Remove(repoPath);
+            }
+        }, TaskScheduler.Default);
     }
 
     /// <summary>Converts (and caches) exactly once per distinct <paramref name="metadataOnDisk"/>
