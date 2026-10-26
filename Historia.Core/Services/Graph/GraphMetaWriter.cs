@@ -585,7 +585,12 @@ internal sealed class GraphMetaWriter(string repoPath, long fingerprint, bool in
             buf = new char[Math.Max(s.Length, buf.Length * 2)];
 
         var span = buf.AsSpan(0, s.Length);
-        s.AsSpan().ToLowerInvariant(span);
+        if (s.AsSpan().ToLowerInvariant(span) != s.Length)
+        {
+            // The buffer was not written; never emit whatever it held before.
+            span = s.ToLowerInvariant().ToCharArray();
+        }
+
         for (var i = 0; i < span.Length; i++)
         {
             if (span[i] is '\n' or '\r' || span[i] == GraphMetaStore.Sep)

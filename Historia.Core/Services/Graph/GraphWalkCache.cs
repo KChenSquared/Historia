@@ -42,12 +42,21 @@ internal sealed class GraphWalkCache
     private static readonly TimeSpan ExpiryGrace = TimeSpan.FromSeconds(1);
 
     private readonly TimeSpan _readCacheTtl;
+    private readonly TimeSpan _expiryGrace;
 
     public GraphWalkCache() : this(DefaultReadCacheTtl)
     {
     }
 
-    internal GraphWalkCache(TimeSpan readCacheTtl) => _readCacheTtl = readCacheTtl;
+    internal GraphWalkCache(TimeSpan readCacheTtl) : this(readCacheTtl, ExpiryGrace)
+    {
+    }
+
+    internal GraphWalkCache(TimeSpan readCacheTtl, TimeSpan expiryGrace)
+    {
+        _readCacheTtl = readCacheTtl;
+        _expiryGrace = expiryGrace;
+    }
 
     private sealed class CachedRead
     {
@@ -195,7 +204,7 @@ internal sealed class GraphWalkCache
     /// when a newer read, a save or an eviction has already replaced the entry.</summary>
     private void ScheduleExpiry(string repoPath, CachedRead entry)
     {
-        _ = Task.Delay(_readCacheTtl + ExpiryGrace).ContinueWith(_ =>
+        _ = Task.Delay(_readCacheTtl + _expiryGrace).ContinueWith(_ =>
         {
             lock (_readCacheSync)
             {

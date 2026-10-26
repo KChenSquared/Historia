@@ -49,6 +49,49 @@ public sealed class GraphCacheLifetimeTests : IDisposable
         Assert.Equal(0, cache.CachedReadCount);
     }
 
+    [Fact]
+    public async Task An_expired_entrys_timer_does_not_remove_the_entry_that_replaced_it()
+    {
+        var commits = Enumerable.Range(0, 5).Select(i => Raw(Meta(i, $"c{i}", "Dev"), i)).ToList();
+        new GraphWalkCache().Save(Repo, Query, fingerprint: 7, exhausted: true, commits, NoDecos);
+
+        // Entry A's timer fires at ttl + grace after its creation. Entry B replaces A once A is
+        // past its TTL but before that timer fires, so A's timer lands while B is the cached entry
+        // and B's own timer fires a full gap later.
+        var ttl = TimeSpan.FromMilliseconds(200);
+        var grace = TimeSpan.FromSeconds(3);
+        var gap = TimeSpan.FromSeconds(1);
+        var cache = new GraphWalkCache(ttl, grace);
+
+        var start = System.Diagnostics.Stopwatch.GetTimestamp();
+        Assert.NotNull(cache.TryLoadStale(Repo, Query));   // entry A
+
+        await Task.Delay(gap);
+        Assert.NotNull(cache.TryLoadStale(Repo, Query));   // A is past its TTL: entry B replaces it
+        var replacedAt = System.Diagnostics.Stopwatch.GetElapsedTime(start);
+        Assert.Equal(1, cache.CachedReadCount);
+
+        // Let A's timer fire, then look before B's own timer does.
+        var aFires = ttl + grace;
+        var bFires = replacedAt + ttl + grace;
+        var look = aFires + TimeSpan.FromMilliseconds(400);
+        var wait = look - System.Diagnostics.Stopwatch.GetElapsedTime(start);
+        if (wait > TimeSpan.Zero)
+            await Task.Delay(wait);
+
+        // A heavily loaded machine can overshoot B's own timer or fall behind A's before this
+        // point; the stale-timer check only means something when the look falls between the two.
+        var looked = System.Diagnostics.Stopwatch.GetElapsedTime(start);
+        if (replacedAt < aFires && looked > aFires && looked < bFires - TimeSpan.FromMilliseconds(200))
+            Assert.Equal(1, cache.CachedReadCount);
+
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (cache.CachedReadCount != 0 && DateTime.UtcNow < deadline)
+            await Task.Delay(50);
+
+        Assert.Equal(0, cache.CachedReadCount);
+    }
+
     /// <summary>What the writer produced before it lower-cased through a reused buffer: clean the
     /// text, then lower-case it into a new string.</summary>
     private static string ExpectedField(string s)
