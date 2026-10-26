@@ -44,6 +44,48 @@ public sealed class AppLogTests : IDisposable
     }
 
     [Fact]
+    public void Disabled_never_formats_interpolated_arguments()
+    {
+        var bomb = new PerfLogTests.FormatBomb();
+
+        AppLog.Write(AppLogLevel.Error, "test", $"never {bomb}");
+        AppLog.Write(AppLogLevel.Error, "test", $"never {bomb,8:x}", new InvalidOperationException("x"));
+        using (AppLog.Operation("test", $"never {bomb}")) { }
+
+        Assert.Equal(0, bomb.Calls);
+        Assert.Empty(SessionFiles());
+    }
+
+    [Fact]
+    public void An_interpolated_write_logs_the_same_text_as_the_string_overload()
+    {
+        var saved = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("fi-FI");
+            AppLog.Enabled = true;
+            var value = 1234.5;
+            var name = "abc";
+
+            AppLog.Write(AppLogLevel.Warn, "parity", $"v {value:F2} [{name,6}] [{name,-6}] {null as string}|");
+            string viaString = $"v {value:F2} [{name,6}] [{name,-6}] {null as string}|";
+            AppLog.Write(AppLogLevel.Warn, "parity", viaString);
+            using (AppLog.Operation("parity", $"op {value:F1}")) { }
+
+            var lines = ReadSession().Split(Environment.NewLine);
+            var written = lines.Where(l => l.Contains("[parity]  v ", StringComparison.Ordinal)).ToArray();
+            Assert.Equal(2, written.Length);
+            Assert.EndsWith($"[parity]  {viaString}", written[0], StringComparison.Ordinal);
+            Assert.EndsWith($"[parity]  {viaString}", written[1], StringComparison.Ordinal);
+            Assert.Contains(lines, l => l.EndsWith("[parity]  -> op 1234,5", StringComparison.Ordinal));
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = saved;
+        }
+    }
+
+    [Fact]
     public void Enabling_creates_one_session_file_with_a_header()
     {
         AppLog.Enabled = true;

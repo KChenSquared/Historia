@@ -132,6 +132,109 @@ public sealed class QueuedLineWriterTests : IDisposable
     }
 
     [Fact]
+    public void A_line_over_the_cap_is_written_cut_with_a_marker_saying_how_much_was_left_out()
+    {
+        var path = Path.Combine(_dir, "long.log");
+        using var writer = QueuedLineWriter.OpenPerBatch("test-writer");
+        writer.Enqueue(path, new string('a', 20_000));
+        writer.Enqueue(path, "short");
+        Assert.True(writer.Flush(TimeSpan.FromSeconds(10)));
+
+        var lines = ReadShared(path);
+        Assert.Equal(2, lines.Length);
+        Assert.Equal(new string('a', QueuedLineWriter.MaxLineChars) + "… [4000 more characters not logged]", lines[0]);
+        Assert.Equal("short", lines[1]);
+    }
+
+    [Fact]
+    public void A_line_exactly_at_the_cap_is_written_whole()
+    {
+        var path = Path.Combine(_dir, "exact.log");
+        using var writer = QueuedLineWriter.OpenPerBatch("test-writer");
+        writer.Enqueue(path, new string('b', QueuedLineWriter.MaxLineChars));
+        Assert.True(writer.Flush(TimeSpan.FromSeconds(10)));
+
+        Assert.Equal([new string('b', QueuedLineWriter.MaxLineChars)], ReadShared(path));
+    }
+
+    [Fact]
+    public void A_cut_never_leaves_half_a_surrogate_pair()
+    {
+        var path = Path.Combine(_dir, "surrogate.log");
+        // The emoji's high surrogate is the last character that would be kept.
+        var line = new string('a', QueuedLineWriter.MaxLineChars - 1) + "\U0001F600" + new string('b', 100);
+        using var writer = QueuedLineWriter.OpenPerBatch("test-writer");
+        writer.Enqueue(path, line);
+        Assert.True(writer.Flush(TimeSpan.FromSeconds(10)));
+
+        var written = Assert.Single(ReadShared(path));
+        Assert.DoesNotContain('\uFFFD', written);
+        Assert.Equal(new string('a', QueuedLineWriter.MaxLineChars - 1) + $"… [{line.Length - (QueuedLineWriter.MaxLineChars - 1)} more characters not logged]", written);
+    }
+
+    [Fact]
+    public void A_stalled_disk_does_not_let_huge_lines_pile_up_in_memory()
+    {
+        var path = Path.Combine(_dir, "memory.log");
+        using var release = new ManualResetEventSlim();
+        using var entered = new ManualResetEventSlim();
+        var writer = QueuedLineWriter.OpenPerBatch("test-writer",
+            p => new StallingStream(Append(p), release, entered));
+        try
+        {
+            writer.Enqueue(path, "first");
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(10)), "the writer thread never reached the sink");
+
+            var before = GC.GetTotalMemory(forceFullCollection: true);
+            // Each line is a fresh megacharacter string: kept whole, 100 of them would hold 200 MB.
+            for (var i = 0; i < 100; i++)
+                writer.Enqueue(path, new string('x', 1_000_000));
+            var retained = GC.GetTotalMemory(forceFullCollection: true) - before;
+
+            Assert.True(retained < 40L * 1024 * 1024, $"the queue retained {retained / (1024 * 1024)} MB behind a stalled write");
+        }
+        finally
+        {
+            release.Set();
+            writer.Dispose();
+        }
+
+        var lines = ReadShared(path);
+        Assert.Equal(101, lines.Length);
+        Assert.All(lines.Skip(1), l => Assert.Equal(QueuedLineWriter.MaxLineChars + "… [984000 more characters not logged]".Length, l.Length));
+    }
+
+    [Fact]
+    public void A_full_character_backlog_drops_lines_and_the_note_names_characters()
+    {
+        var path = Path.Combine(_dir, "chars.log");
+        using var release = new ManualResetEventSlim();
+        using var entered = new ManualResetEventSlim();
+        var writer = QueuedLineWriter.OpenPerBatch("test-writer",
+            p => new StallingStream(Append(p), release, entered));
+
+        writer.Enqueue(path, "first");
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(10)));
+        const int count = 400;
+        const int lineChars = 15_000; // under the line cap, so only the character backlog can refuse them
+        for (var i = 0; i < count; i++)
+            writer.Enqueue(path, new string('y', lineChars));
+        release.Set();
+        Assert.True(writer.Flush(TimeSpan.FromSeconds(30)));
+        writer.Dispose();
+
+        var lines = ReadShared(path);
+        var note = Assert.Single(lines, l => l.Contains("log lines dropped"));
+        Assert.Contains($"({QueuedLineWriter.DefaultMaxBacklog} lines or {QueuedLineWriter.MaxBacklogChars} characters)", note);
+        var dropped = int.Parse(Regex.Match(note, @"(\d+) log lines dropped").Groups[1].Value);
+        var written = lines.Count(l => l.Length == lineChars && l[0] == 'y');
+
+        Assert.True(dropped > 0, "the character backlog never refused a line");
+        Assert.Equal(count, written + dropped);
+        Assert.True((long)written * lineChars <= QueuedLineWriter.MaxBacklogChars, $"{written} lines of {lineChars} characters passed the backlog cap");
+    }
+
+    [Fact]
     public void A_held_open_file_stays_open_until_dispose_which_drains_the_queue()
     {
         var path = Path.Combine(_dir, "e.log");

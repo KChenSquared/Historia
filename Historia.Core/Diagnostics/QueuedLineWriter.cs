@@ -21,6 +21,13 @@ namespace Historia.Diagnostics;
 internal sealed class QueuedLineWriter : IDisposable
 {
     internal const int DefaultMaxBacklog = 100_000;
+
+    /// <summary>Longest line kept; the rest is cut and replaced by a marker saying how much.</summary>
+    internal const int MaxLineChars = 16_000;
+
+    /// <summary>Most characters queued at once. With a stalled disk the queue holds this much
+    /// (about twice that in bytes) and no more, however many lines arrive.</summary>
+    internal const int MaxBacklogChars = 4_000_000;
     private static readonly UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
     private static readonly TimeSpan DisposeDrainLimit = TimeSpan.FromSeconds(5);
 
@@ -33,6 +40,7 @@ internal sealed class QueuedLineWriter : IDisposable
     private readonly int _maxBacklog;
     private readonly Thread _thread;
     private int _backlog;
+    private int _backlogChars;
     private long _dropped;
     private int _disposed;
 
@@ -73,19 +81,43 @@ internal sealed class QueuedLineWriter : IDisposable
     /// <summary>Queues a line for the file this writer holds open. Never blocks.</summary>
     public void Enqueue(string line) => Enqueue(_fixedPath!, line);
 
-    /// <summary>Queues a line for <paramref name="path"/>. Never blocks. Beyond the backlog cap
-    /// the line is dropped and counted; the count is written once the writer catches up.</summary>
+    /// <summary>Queues a line for <paramref name="path"/>. Never blocks. A line longer than
+    /// <see cref="MaxLineChars"/> is cut and says how much was left out. Beyond the line or
+    /// character backlog cap the line is dropped and counted; the count is written once the writer
+    /// catches up.</summary>
     public void Enqueue(string path, string line)
     {
-        if (Interlocked.Increment(ref _backlog) > _maxBacklog)
+        line = CutToMaxLine(line);
+        var chars = line.Length;
+
+        // Both counters are claimed before the check and given back together when the line is
+        // refused, so neither drifts however the callers interleave.
+        var overLines = Interlocked.Increment(ref _backlog) > _maxBacklog;
+        var overChars = Interlocked.Add(ref _backlogChars, chars) > MaxBacklogChars;
+        if (overLines || overChars)
         {
             Interlocked.Decrement(ref _backlog);
+            Interlocked.Add(ref _backlogChars, -chars);
             Interlocked.Increment(ref _dropped);
             return;
         }
 
         if (!TryAdd(new Item(path, line, null, null, null)))
+        {
             Interlocked.Decrement(ref _backlog);
+            Interlocked.Add(ref _backlogChars, -chars);
+        }
+    }
+
+    private static string CutToMaxLine(string line)
+    {
+        if (line.Length <= MaxLineChars)
+            return line;
+
+        var keep = MaxLineChars;
+        if (char.IsHighSurrogate(line[keep - 1]))
+            keep--; // never end the kept text on half a surrogate pair
+        return string.Concat(line.AsSpan(0, keep), $"… [{line.Length - keep} more characters not logged]");
     }
 
     /// <summary>Waits until every line enqueued before this call is written and flushed to disk
@@ -155,7 +187,8 @@ internal sealed class QueuedLineWriter : IDisposable
                 }
 
                 Interlocked.Decrement(ref _backlog);
-                Write(item.Path!, item.Line!);
+                Interlocked.Add(ref _backlogChars, -item.Line!.Length);
+                Write(item.Path!, item.Line);
                 if (_queue.Count == 0)
                     FlushSink(closeIfPerBatch: true);
             }
@@ -189,7 +222,7 @@ internal sealed class QueuedLineWriter : IDisposable
 
             var dropped = Interlocked.Exchange(ref _dropped, 0);
             if (dropped > 0)
-                _sink.WriteLine($"… {dropped} log lines dropped: the writer fell {_maxBacklog} lines behind");
+                _sink.WriteLine($"… {dropped} log lines dropped: the writer fell too far behind ({_maxBacklog} lines or {MaxBacklogChars} characters)");
             _sink.WriteLine(line);
         }
         catch

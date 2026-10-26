@@ -82,6 +82,16 @@ public static class PerfLog
         catch { /* diagnostics must never throw */ }
     }
 
+    /// <summary>Queues one timestamped line. An interpolated string binds here rather than to
+    /// <see cref="Mark(string)"/>, and its holes are not formatted while logging is off.</summary>
+    public static void Mark(MessageHandler message)
+    {
+        var active = message.Active;
+        var text = message.ToStringAndClear();
+        if (active)
+            Mark(text);
+    }
+
     /// <summary>Waits (at most <paramref name="timeout"/>, default 2 s) until every mark queued so
     /// far is in the file. True when it got there in time.</summary>
     public static bool Flush(TimeSpan? timeout = null)
@@ -94,6 +104,15 @@ public static class PerfLog
     /// <summary>Times the scope and logs <c>label: N.Nms</c> on dispose.</summary>
     public static IDisposable Scope(string label) =>
         Enabled ? new Timer(label) : Noop.Instance;
+
+    /// <summary>Times the scope and logs <c>label: N.Nms</c> on dispose. An interpolated label
+    /// is not formatted while logging is off.</summary>
+    public static IDisposable Scope(MessageHandler label)
+    {
+        var active = label.Active;
+        var text = label.ToStringAndClear();
+        return active && Enabled ? new Timer(text) : Noop.Instance;
+    }
 
     /// <summary>
     /// One line of GC/process memory stats,
@@ -120,6 +139,37 @@ public static class PerfLog
                 $"workingSet={Mb(Environment.WorkingSet)}MB  totalAllocated={Mb(GC.GetTotalAllocatedBytes())}MB");
         }
         catch { /* diagnostics must never throw */ }
+    }
+
+    /// <summary>Builds an interpolated message only while logging is enabled: the compiler skips
+    /// every <c>Append*</c> call, and so every hole's <c>ToString</c>, when
+    /// <c>shouldAppend</c> comes back false. Formats under the current culture, exactly as an
+    /// interpolated <see cref="string"/> does.</summary>
+    [InterpolatedStringHandler]
+    public ref struct MessageHandler
+    {
+        private DefaultInterpolatedStringHandler _text;
+
+        public MessageHandler(int literalLength, int formattedCount, out bool shouldAppend)
+        {
+            Active = shouldAppend = Enabled;
+            _text = Active ? new DefaultInterpolatedStringHandler(literalLength, formattedCount) : default;
+        }
+
+        /// <summary>True when logging was enabled as the message started and the holes were formatted.</summary>
+        internal bool Active { get; }
+
+        public void AppendLiteral(string value) => _text.AppendLiteral(value);
+        public void AppendFormatted(string? value) => _text.AppendFormatted(value);
+        public void AppendFormatted(string? value, int alignment = 0, string? format = null) => _text.AppendFormatted(value, alignment, format);
+        public void AppendFormatted(ReadOnlySpan<char> value) => _text.AppendFormatted(value);
+        public void AppendFormatted(ReadOnlySpan<char> value, int alignment = 0, string? format = null) => _text.AppendFormatted(value, alignment, format);
+        public void AppendFormatted<T>(T value) => _text.AppendFormatted(value);
+        public void AppendFormatted<T>(T value, string? format) => _text.AppendFormatted(value, format);
+        public void AppendFormatted<T>(T value, int alignment) => _text.AppendFormatted(value, alignment);
+        public void AppendFormatted<T>(T value, int alignment, string? format) => _text.AppendFormatted(value, alignment, format);
+
+        internal string ToStringAndClear() => _text.ToStringAndClear();
     }
 
     private sealed class Timer(string label) : IDisposable

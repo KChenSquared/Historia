@@ -183,10 +183,60 @@ public static partial class AppLog
         catch { /* logging must never throw */ }
     }
 
+    /// <summary>Write one entry. An interpolated message binds here rather than to the
+    /// <see cref="string"/> overload, and its holes are not formatted while logging is off.</summary>
+    public static void Write(AppLogLevel level, string category, MessageHandler message, Exception? ex = null)
+    {
+        var active = message.Active;
+        var text = message.ToStringAndClear();
+        if (active)
+            Write(level, category, text, ex);
+    }
+
     /// <summary>Logs <c>-&gt; message</c> now and <c>&lt;- message (outcome, N.Nms)</c> on dispose.
     /// Cheap default-struct no-op when disabled.</summary>
     public static OperationScope Operation(string category, string message)
         => Enabled ? new OperationScope(category, Redact(message)) : default;
+
+    /// <summary>As <see cref="Operation(string, string)"/>; an interpolated message is not
+    /// formatted while logging is off.</summary>
+    public static OperationScope Operation(string category, MessageHandler message)
+    {
+        var active = message.Active;
+        var text = message.ToStringAndClear();
+        return active && Enabled ? new OperationScope(category, Redact(text)) : default;
+    }
+
+    /// <summary>Builds an interpolated message only while logging is enabled: the compiler skips
+    /// every <c>Append*</c> call, and so every hole's <c>ToString</c>, when
+    /// <c>shouldAppend</c> comes back false. Formats under the current culture, exactly as an
+    /// interpolated <see cref="string"/> does.</summary>
+    [InterpolatedStringHandler]
+    public ref struct MessageHandler
+    {
+        private DefaultInterpolatedStringHandler _text;
+
+        public MessageHandler(int literalLength, int formattedCount, out bool shouldAppend)
+        {
+            Active = shouldAppend = Enabled;
+            _text = Active ? new DefaultInterpolatedStringHandler(literalLength, formattedCount) : default;
+        }
+
+        /// <summary>True when logging was enabled as the message started and the holes were formatted.</summary>
+        internal bool Active { get; }
+
+        public void AppendLiteral(string value) => _text.AppendLiteral(value);
+        public void AppendFormatted(string? value) => _text.AppendFormatted(value);
+        public void AppendFormatted(string? value, int alignment = 0, string? format = null) => _text.AppendFormatted(value, alignment, format);
+        public void AppendFormatted(ReadOnlySpan<char> value) => _text.AppendFormatted(value);
+        public void AppendFormatted(ReadOnlySpan<char> value, int alignment = 0, string? format = null) => _text.AppendFormatted(value, alignment, format);
+        public void AppendFormatted<T>(T value) => _text.AppendFormatted(value);
+        public void AppendFormatted<T>(T value, string? format) => _text.AppendFormatted(value, format);
+        public void AppendFormatted<T>(T value, int alignment) => _text.AppendFormatted(value, alignment);
+        public void AppendFormatted<T>(T value, int alignment, string? format) => _text.AppendFormatted(value, alignment, format);
+
+        internal string ToStringAndClear() => _text.ToStringAndClear();
+    }
 
     /// <summary>Test seam: starts an isolated per-flow logging session.</summary>
     internal static AppLogSession StartSessionForTesting(string? dir = null)
