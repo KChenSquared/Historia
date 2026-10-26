@@ -14,7 +14,9 @@ public static class BodyColumnLayout
     /// <summary>
     /// Resolves the width of the Left, Centre, and Right columns given the total content width,
     /// stored user intents, and effective pane minimums. Floors both side panes at their minimums
-    /// (left wins over right when even that doesn't fit) and gives way centre-first.
+    /// (left wins over right when even that doesn't fit) and gives way centre-first. Every width is
+    /// finite and non-negative and the three sum to <paramref name="total"/>; a non-finite or
+    /// negative input counts as 0.
     /// </summary>
     public static (double Left, double Centre, double Right) Resolve(
         double total,
@@ -23,35 +25,46 @@ public static class BodyColumnLayout
         double leftMin,
         double rightMin)
     {
+        total = Sanitize(total);
         if (total <= 0)
             return (0, 0, 0);
 
-        var lIntent = Math.Max(leftMin, leftIntent);
-        var rIntent = Math.Max(rightMin, rightIntent);
+        leftMin = Sanitize(leftMin);
+        rightMin = Sanitize(rightMin);
+        var lIntent = Math.Max(leftMin, Sanitize(leftIntent));
+        var rIntent = Math.Max(rightMin, Sanitize(rightIntent));
 
+        double left;
+        double right;
         if (total >= lIntent + rIntent)
         {
-            var left = lIntent;
-            var right = rIntent;
-            var centre = total - left - right;
-            return (left, centre, right);
+            left = lIntent;
+            right = rIntent;
+        }
+        else if (total >= leftMin + rightMin)
+        {
+            // Narrow space: centre collapses first and both sides stay >= their minimums.
+            left = Math.Clamp(total - rightMin, leftMin, lIntent);
+            right = total - left;
+        }
+        else
+        {
+            // Extremely narrow: left is kept up to total; right takes whatever space remains.
+            left = Math.Min(leftMin, total);
+            right = total - left;
         }
 
-        // Narrow space: centre collapses first.
-        if (total >= leftMin + rightMin)
+        left = Math.Min(left, total);
+        var centre = total - left - right;
+        if (centre < 0)
         {
-            // Both sides remain >= their minimums.
-            var left = Math.Clamp(total - rightMin, leftMin, lIntent);
-            var right = total - left;
-            return (left, 0, right);
+            // Rounding or an over-wide intent: the right column takes the remainder.
+            centre = 0;
+            right = Math.Max(0, total - left);
         }
 
-        // Extremely narrow: total below leftMin + rightMin.
-        // Left is kept up to total; right takes whatever space remains.
-        {
-            var left = Math.Min(leftMin, total);
-            var right = Math.Max(0, total - left);
-            return (left, 0, right);
-        }
+        return (left, centre, right);
     }
+
+    private static double Sanitize(double value) => double.IsFinite(value) && value > 0 ? value : 0;
 }
