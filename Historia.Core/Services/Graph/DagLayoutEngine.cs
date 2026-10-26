@@ -29,8 +29,8 @@ public sealed class DagLayoutEngine
     {
         var state = new GraphLayoutState { MaxLanes = Math.Max(2, maxLanes), RetainCommits = retainCommits };
         SeedTipPriority(state, commits, decorations, isAncestor);
-        Consume(state, commits, decorations, maxRows, ct);
-        return Build(state, complete: commits.Count <= maxRows);
+        Consume(state, commits, 0, decorations, maxRows, ct);
+        return Build(state, complete: commits.Count <= maxRows, incremental: false);
     }
 
     /// <summary>
@@ -46,22 +46,47 @@ public sealed class DagLayoutEngine
         CancellationToken ct = default)
     {
         var state = previous.State;
-        Consume(state, nextCommits, decorations, state.Rows.Count + additionalRows, ct);
-        return Build(state, complete: nextCommits.Count == 0);
+        Consume(state, nextCommits, 0, decorations, state.Rows.Count + additionalRows, ct);
+        return Build(state, complete: nextCommits.Count == 0, incremental: true);
     }
+
+    /// <summary>
+    /// Places commits from <paramref name="nextCommits"/>, starting at index
+    /// <paramref name="start"/>, until the state holds <paramref name="rowCeiling"/> rows or the
+    /// list ends, without building a snapshot. Each commit is placed completely before the next
+    /// one is looked at, so the state is consistent between any two calls: a long extend can be
+    /// split into several calls, each under its own hold of the state's lock, and ended by one
+    /// <see cref="Snapshot"/>. The caller holds <c>lock (state)</c>.
+    /// </summary>
+    internal static void ExtendInPlace(
+        GraphLayoutState state,
+        IReadOnlyList<RawCommit> nextCommits,
+        int start,
+        IReadOnlyDictionary<GitObjectId, IReadOnlyList<GraphDecorationInput>>? decorations,
+        int rowCeiling,
+        CancellationToken ct = default)
+        => Consume(state, nextCommits, start, decorations, rowCeiling, ct);
+
+    /// <summary>Builds the immutable snapshot of <paramref name="state"/> as it stands — the
+    /// closing step of a chunked <see cref="ExtendInPlace"/>. The caller holds
+    /// <c>lock (state)</c>.</summary>
+    internal static GraphLayoutResult Snapshot(GraphLayoutState state, bool complete)
+        => Build(state, complete, incremental: true);
 
     private static void Consume(
         GraphLayoutState s,
         IReadOnlyList<RawCommit> commits,
+        int start,
         IReadOnlyDictionary<GitObjectId, IReadOnlyList<GraphDecorationInput>>? decorations,
         int rowCeiling,
         CancellationToken ct)
     {
-        foreach (var commit in commits)
+        for (var ci = start; ci < commits.Count; ci++)
         {
             if (s.Rows.Count >= rowCeiling)
                 break;
             ct.ThrowIfCancellationRequested();
+            var commit = commits[ci];
 
             var row = s.NextRowIndex++;
             var deco = decorations is not null && decorations.TryGetValue(commit.Id, out var d) ? d : null;
@@ -255,7 +280,9 @@ public sealed class DagLayoutEngine
         }
     }
 
-    private static GraphLayoutResult Build(GraphLayoutState s, bool complete)
+    /// <param name="incremental">True when the state already backed an earlier snapshot, so the
+    /// per-row metadata is shared with it instead of copied again.</param>
+    private static GraphLayoutResult Build(GraphLayoutState s, bool complete, bool incremental)
     {
         var offWindowList = RegenerateOffWindow(s);
         var offWindow = offWindowList.ToArray();
@@ -275,8 +302,8 @@ public sealed class DagLayoutEngine
             SourceState = s,
             RealEdgeCap = s.RealEdges.Count,
             OffWindowEdges = offWindow,
-            Commits = new ArrayCommitStore(s.Commits.ToArray()),
-            Decorations = s.Decorations.ToArray(),
+            Commits = BuildCommitStore(s, incremental),
+            Decorations = DecorationsOf(s),
             RowCount = s.Rows.Count,
             EdgeCount = s.RealEdges.Count + offWindow.Length,
             TotalLaneCount = s.NextCompactedLane,
@@ -289,6 +316,82 @@ public sealed class DagLayoutEngine
         };
 
         return new GraphLayoutResult(layout, s);
+    }
+
+    // Decorations only ever append, so the array last built for a state is still exact while its
+    // length matches the accumulator's: an extend that places no decorated row reuses it, and a
+    // reader's per-array index (keyed on the array's identity) stays valid across the extend.
+    private sealed record DecorationSnapshot(int Count, GraphDecoration[] Items);
+
+    private static readonly ConditionalWeakTable<GraphLayoutState, DecorationSnapshot> DecorationSnapshots = [];
+
+    private static GraphDecoration[] DecorationsOf(GraphLayoutState s)
+    {
+        if (DecorationSnapshots.TryGetValue(s, out var last) && last.Count == s.Decorations.Count)
+            return last.Items;
+        var items = s.Decorations.ToArray();
+        DecorationSnapshots.AddOrUpdate(s, new DecorationSnapshot(items.Length, items));
+        return items;
+    }
+
+    private static ICommitStore BuildCommitStore(GraphLayoutState s, bool incremental)
+    {
+        if (!s.RetainCommits || s.Commits.Count == 0)
+            return new ArrayCommitStore([]);
+        return incremental
+            ? new BoundedCommitStore(s.Commits, s.Commits.Count)
+            : new ArrayCommitStore(s.Commits.ToArray());
+    }
+
+    /// <summary>An in-memory <see cref="ICommitStore"/> over the first <c>count</c> entries of a
+    /// state's append-only metadata list. The list is shared with every later snapshot of the same
+    /// state instead of being copied per extend; an entry below <c>count</c> is never rewritten,
+    /// so reading it needs no lock while the list keeps growing behind it.</summary>
+    private sealed class BoundedCommitStore(List<CommitMetadata> source, int count) : ICommitStore
+    {
+        public CommitMetadata this[int index]
+        {
+            get
+            {
+                if ((uint)index >= (uint)count)
+                    throw new ArgumentOutOfRangeException(nameof(index));
+                return source[index];
+            }
+        }
+
+        public int Count => count;
+
+        public void Prefetch(int firstRow, int lastRow) { }
+
+        // In-memory: no handle to lease, nothing to release.
+        public ICommitStore? AddRef() => this;
+
+        public void Dispose() { }
+
+        public IReadOnlyList<int> Search(string term)
+        {
+            var hits = new List<int>();
+            var t = term.Trim();
+            if (t.Length == 0)
+                return hits;
+            for (var i = 0; i < count; i++)
+            {
+                var m = source[i];
+                if (m.MessageShort.Contains(t, StringComparison.OrdinalIgnoreCase)
+                    || m.AuthorName.Contains(t, StringComparison.OrdinalIgnoreCase)
+                    || m.Id.ToString().StartsWith(t, StringComparison.OrdinalIgnoreCase))
+                    hits.Add(i);
+            }
+            return hits;
+        }
+
+        public IEnumerator<CommitMetadata> GetEnumerator()
+        {
+            for (var i = 0; i < count; i++)
+                yield return source[i];
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
 
     /// <summary>Indexes a newly created real edge into the crossing checkpoints it
