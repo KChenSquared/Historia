@@ -9,6 +9,8 @@ public sealed class App : Application
     private SettingsService? _settings;
     private AvaloniaThemeApplier? _themeApplier;
     private LoggingSettingBinding? _loggingBinding;
+    private RuntimeStatsSampler? _runtimeStats;
+    private UiHeartbeat? _uiHeartbeat;
     private CancellationTokenSource? _singleInstanceCts;
     private SplashWindow? _splash;
     private MainWindow? _mainWindow;
@@ -44,6 +46,15 @@ public sealed class App : Application
 
         _loggingBinding = LoggingSettingBinding.Attach(_settings);
 
+        // Both samplers exist only while logging is on. The heartbeat has no switch of its own to
+        // follow, so it reconciles whenever the runtime sampler starts or stops.
+        var heartbeat = new UiHeartbeat(Dispatcher.UIThread, static () => LoggingSwitch.Enabled);
+        var runtimeStats = new RuntimeStatsSampler();
+        runtimeStats.RunningChanged += _ => heartbeat.Reconcile();
+        heartbeat.Reconcile();
+        _uiHeartbeat = heartbeat;
+        _runtimeStats = runtimeStats;
+
         // Without developer mode, developer-only options are switched off before any theme is resolved.
         if (!Historia.Platform.DevMode.Enabled && _settings.Current.UseCustomTheme)
             _settings.UpdateAsync(s => s.WithoutDevOnlyOptions()).GetAwaiter().GetResult();
@@ -76,6 +87,9 @@ public sealed class App : Application
                 Historia.Diagnostics.PerfLog.Mark("desktop.Exit singleInstanceCts cancelled");
                 _singleInstanceCts?.Dispose();
                 Historia.Diagnostics.PerfLog.Mark("desktop.Exit singleInstanceCts disposed");
+                _uiHeartbeat?.Dispose();
+                _runtimeStats?.Dispose();
+                Historia.Diagnostics.PerfLog.Mark("desktop.Exit diagnostics samplers disposed");
                 _loggingBinding?.Dispose();
                 Historia.Diagnostics.PerfLog.Mark("desktop.Exit loggingBinding disposed");
                 _themeApplier?.Dispose();
