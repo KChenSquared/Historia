@@ -290,6 +290,49 @@ public class ShortcutBarLayoutTests
     }
 
     [AvaloniaFact]
+    public async Task Columns_fill_the_body_for_fractional_intents_at_a_tight_width()
+    {
+        await using var sp = CreateServices();
+        var window = new MainWindow(sp);
+        window.Width = 1100;
+        window.Height = 800;
+        window.Show();
+        Dispatcher.UIThread.RunJobs();
+
+        window.SetIntents(520.2, 479.8);
+        Dispatcher.UIThread.RunJobs();
+
+        var exception = Record.Exception(() =>
+        {
+            window.Width = 1008;
+            Dispatcher.UIThread.RunJobs();
+        });
+        Assert.Null(exception);
+
+        var bodyGrid = window.FindControl<Grid>("BodyGrid")!;
+        var columnsAndDividers = bodyGrid.ColumnDefinitions.Sum(c => c.ActualWidth);
+        Assert.Equal(bodyGrid.Bounds.Width, columnsAndDividers, 2);
+        Assert.True(bodyGrid.ColumnDefinitions[2].ActualWidth >= 0);
+        Assert.True(bodyGrid.ColumnDefinitions[2].Width.IsStar);
+
+        window.Close();
+    }
+
+    [AvaloniaFact]
+    public async Task Right_bar_natural_width_ignores_a_narrow_host()
+    {
+        await using var sp = CreateServices();
+        var bar = new ShortcutsBarView(sp, ShortcutsBarSide.Right);
+        var window = new Window { Width = 200, Height = 600, Content = bar };
+        window.Show();
+        Dispatcher.UIThread.RunJobs();
+
+        Assert.InRange(bar.NaturalWidth, 356.0, 360.0);
+
+        window.Close();
+    }
+
+    [AvaloniaFact]
     public async Task Route_change_does_not_replace_bars()
     {
         await using var sp = CreateServices();
