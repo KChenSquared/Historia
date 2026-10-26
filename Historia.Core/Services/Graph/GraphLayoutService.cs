@@ -250,8 +250,11 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
     private readonly ConditionalWeakTable<GraphLayoutState, RepoCache> _layoutOwners = [];
     // Keyed by repository path, not context: survives tab close/reopen and context re-creation,
     // and decorations are a function of the repo's refs, not the context object.
+    // Least-recently-used eviction: every read and write stamps the entry from _decoClock, and a
+    // full map drops the entry with the lowest stamp. Both are guarded by _sync.
     private readonly Dictionary<string, DecoCache> _decoByPath = new(StringComparer.OrdinalIgnoreCase);
-    private const int DecoCacheCap = 24;
+    private long _decoClock;
+    internal const int DecoCacheCap = 24;
     private readonly object _sync = new();
 
     public async Task<GraphLayoutResult> ComputeLayoutAsync(
@@ -686,6 +689,50 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
         // Drop this repo's .gz read-cache entry too — kept resident it would outlive the tab
         // switch for the rest of the session.
         _walkCache.Evict(context.RepositoryPath);
+    }
+
+    /// <summary>This repository's cached decorations, if any, marked as just used.</summary>
+    internal DecoCache? GetDecoCache(string repoPath)
+    {
+        lock (_sync)
+        {
+            if (!_decoByPath.TryGetValue(repoPath, out var deco))
+                return null;
+            deco.Stamp = ++_decoClock;
+            return deco;
+        }
+    }
+
+    /// <summary>Stores a repository's decorations as the most recently used entry. A new
+    /// repository arriving at <see cref="DecoCacheCap"/> entries evicts the least recently used.</summary>
+    internal void StoreDecoCache(
+        string repoPath, long fingerprint, Dictionary<GitObjectId, IReadOnlyList<GraphDecorationInput>> decorations)
+    {
+        lock (_sync)
+        {
+            if (_decoByPath.Count >= DecoCacheCap && !_decoByPath.ContainsKey(repoPath))
+            {
+                string? oldest = null;
+                var oldestStamp = long.MaxValue;
+                foreach (var (path, entry) in _decoByPath)
+                {
+                    if (entry.Stamp < oldestStamp)
+                    {
+                        oldest = path;
+                        oldestStamp = entry.Stamp;
+                    }
+                }
+                _decoByPath.Remove(oldest!);
+            }
+            _decoByPath[repoPath] = new DecoCache(fingerprint, decorations) { Stamp = ++_decoClock };
+        }
+    }
+
+    /// <summary>Whether this repository has cached decorations, without marking them used. Tests only.</summary>
+    internal bool HasDecoCache(string repoPath)
+    {
+        lock (_sync)
+            return _decoByPath.ContainsKey(repoPath);
     }
 
     public int ClearPersistentCache()

@@ -43,9 +43,7 @@ public sealed partial class GraphLayoutService
         if (cache.Exhausted || cache.WalkHalted || TotalWalked(cache) >= wantCount)
             return;
 
-        DecoCache? deco;
-        lock (_sync)
-            _decoByPath.TryGetValue(context.RepositoryPath, out deco);
+        var deco = GetDecoCache(context.RepositoryPath);
 
         Diagnostics.PerfLog.Mark($"EnsureWalked need {wantCount}, have {TotalWalked(cache)}, decoFp={deco?.Fingerprint ?? 0}");
         var repoPath = context.RepositoryPath;
@@ -171,14 +169,7 @@ public sealed partial class GraphLayoutService
         }
 
         if (walked.DecosFresh && walked.Fingerprint != 0)
-        {
-            lock (_sync)
-            {
-                if (_decoByPath.Count >= DecoCacheCap && !_decoByPath.ContainsKey(repoPath))
-                    _decoByPath.Remove(_decoByPath.Keys.First());
-                _decoByPath[repoPath] = new DecoCache(walked.Fingerprint, walked.Decorations);
-            }
-        }
+            StoreDecoCache(repoPath, walked.Fingerprint, walked.Decorations);
 
         // Persist a freshly-walked window for the next launch (best-effort, off the gate). Only
         // the bounded foreground walks do this — a background spill chunk's rows already reach

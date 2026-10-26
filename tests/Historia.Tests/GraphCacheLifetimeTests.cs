@@ -2,7 +2,7 @@ namespace Historia.Tests;
 
 /// <summary>
 /// The graph's caches expire on their own: an unread walk-cache entry leaves memory after its TTL,
-/// and the search sidecar the metadata writer produces keeps its exact bytes while it lower-cases
+/// the decoration cache evicts its least recently used entry, and the search sidecar the metadata writer produces keeps its exact bytes while it lower-cases
 /// through a reused buffer.
 /// </summary>
 [Trait("tier", "unit")]
@@ -90,6 +90,53 @@ public sealed class GraphCacheLifetimeTests : IDisposable
             await Task.Delay(50);
 
         Assert.Equal(0, cache.CachedReadCount);
+    }
+
+    private static string DecoRepo(int i) => $"C:/repos/deco-{i:00}";
+
+    private static void StoreDecos(GraphLayoutService svc, int i) =>
+        svc.StoreDecoCache(DecoRepo(i), fingerprint: 100 + i, new Dictionary<GitObjectId, IReadOnlyList<GraphDecorationInput>>());
+
+    [Fact]
+    public async Task The_25th_decoration_entry_evicts_the_least_recently_used()
+    {
+        await using var host = new MiniHost();
+        var svc = new GraphLayoutService(host.Settings, host.Locator);
+        for (var i = 0; i < GraphLayoutService.DecoCacheCap; i++)
+            StoreDecos(svc, i);
+
+        // The oldest entry is read, so it is now the most recently used; entry 1 is the stalest.
+        Assert.NotNull(svc.GetDecoCache(DecoRepo(0)));
+        // Rewriting an entry stamps it too: entry 1 is replaced, entry 2 becomes the stalest.
+        StoreDecos(svc, 1);
+
+        StoreDecos(svc, GraphLayoutService.DecoCacheCap);
+
+        Assert.True(svc.HasDecoCache(DecoRepo(0)), "a recently read entry was evicted");
+        Assert.True(svc.HasDecoCache(DecoRepo(1)), "a recently written entry was evicted");
+        Assert.False(svc.HasDecoCache(DecoRepo(2)), "the least recently used entry was kept");
+        Assert.True(svc.HasDecoCache(DecoRepo(GraphLayoutService.DecoCacheCap)));
+        for (var i = 3; i < GraphLayoutService.DecoCacheCap; i++)
+            Assert.True(svc.HasDecoCache(DecoRepo(i)));
+    }
+
+    [Fact]
+    public async Task Decorations_survive_forget_and_leave_with_the_persistent_cache()
+    {
+        await using var host = new MiniHost();
+        var svc = new GraphLayoutService(host.Settings, host.Locator);
+        using var repo = TestRepositoryBuilder.FromTemplate("linear-20", b => b.LinearHistory(20));
+        await using var ctx = host.Open(repo.Path);
+        svc.StoreDecoCache(ctx.RepositoryPath, fingerprint: 5, new Dictionary<GitObjectId, IReadOnlyList<GraphDecorationInput>>());
+
+        svc.Forget(ctx);
+
+        var kept = svc.GetDecoCache(ctx.RepositoryPath);
+        Assert.NotNull(kept);
+        Assert.Equal(5, kept!.Fingerprint);
+
+        svc.ClearPersistentCache();
+        Assert.False(svc.HasDecoCache(ctx.RepositoryPath));
     }
 
     /// <summary>What the writer produced before it lower-cased through a reused buffer: clean the
