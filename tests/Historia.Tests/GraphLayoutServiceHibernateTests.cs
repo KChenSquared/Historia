@@ -80,12 +80,11 @@ public sealed class GraphLayoutServiceHibernateTests : IAsyncDisposable
     [Fact]
     public async Task Forget_evicts_the_walk_cache_read_entry()
     {
-        await _host.Settings.UpdateAsync(s => s with { GraphMetadataFromDisk = false });
         var svc = new GraphLayoutService(_host.Settings, _host.Locator);
         await using var ctx = _host.Open(_repo.Path);
-        var query = new GraphQuery { RefScope = GraphRefScope.AllRefs };
-        await svc.ComputeLayoutAsync(ctx, query);
-        PrimeWalkCacheReadEntry(svc, ctx.RepositoryPath, query);
+        // No compute first: a compute's background walk-cache save replaces the read entry, which
+        // would race the primed one. Forget evicts whether or not the context has a cache.
+        PrimeWalkCacheReadEntry(svc, ctx.RepositoryPath, new GraphQuery { RefScope = GraphRefScope.AllRefs });
 
         svc.Forget(ctx);
 
@@ -99,15 +98,18 @@ public sealed class GraphLayoutServiceHibernateTests : IAsyncDisposable
         await _host.Settings.UpdateAsync(s => s with { GraphMetadataFromDisk = false });
         var svc = new GraphLayoutService(_host.Settings, _host.Locator);
         await using var ctx = _host.Open(_repo.Path);
-        var query = new GraphQuery { RefScope = GraphRefScope.AllRefs };
+        // The walk cache supports only an all-refs query, so computing and recomputing a
+        // current-branch graph never saves or loads the entry the primed read created.
+        var query = new GraphQuery { RefScope = GraphRefScope.CurrentBranch };
+        Assert.False(GraphWalkCache.Supports(query));
         var previous = await svc.ComputeLayoutAsync(ctx, query);
-        PrimeWalkCacheReadEntry(svc, ctx.RepositoryPath, query);
+        PrimeWalkCacheReadEntry(svc, ctx.RepositoryPath, new GraphQuery { RefScope = GraphRefScope.AllRefs });
         var entry = WalkCacheReadEntry(svc, ctx.RepositoryPath);
 
         await svc.RecomputeAsync(ctx, query, previous, InvalidationReason.HistoryRewritten);
 
         // The entry is the object the primed read created: a recompute that evicted it would have
-        // replaced it with a fresh read.
+        // removed it, and a later read would build a fresh one.
         Assert.Same(entry, WalkCacheReadEntry(svc, ctx.RepositoryPath));
     }
 

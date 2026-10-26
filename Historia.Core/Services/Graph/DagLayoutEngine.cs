@@ -37,6 +37,9 @@ public sealed class DagLayoutEngine
     /// Resumes the walk from where <paramref name="previous"/> left off, appending up to
     /// <paramref name="additionalRows"/> more rows. Lane indices already assigned are never
     /// renumbered — extension is byte-identical to a full recomputation over the same range.
+    /// Places everything in one go with no lock taken, so it is the single-shot reference the
+    /// tests compare the service's chunked extend against; the service itself calls
+    /// <see cref="ExtendInPlace"/> and <see cref="Snapshot"/> under short holds of the state's lock.
     /// </summary>
     public GraphLayoutResult Extend(
         GraphLayoutResult previous,
@@ -46,8 +49,8 @@ public sealed class DagLayoutEngine
         CancellationToken ct = default)
     {
         var state = previous.State;
-        Consume(state, nextCommits, 0, decorations, state.Rows.Count + additionalRows, ct);
-        return Build(state, complete: nextCommits.Count == 0, incremental: true);
+        ExtendInPlace(state, nextCommits, 0, decorations, state.Rows.Count + additionalRows, ct);
+        return Snapshot(state, complete: nextCommits.Count == 0);
     }
 
     /// <summary>
@@ -337,7 +340,7 @@ public sealed class DagLayoutEngine
     private static ICommitStore BuildCommitStore(GraphLayoutState s, bool incremental)
     {
         if (!s.RetainCommits || s.Commits.Count == 0)
-            return new ArrayCommitStore([]);
+            return ArrayCommitStore.Empty;
         return incremental
             ? new BoundedCommitStore(s.Commits, s.Commits.Count)
             : new ArrayCommitStore(s.Commits.ToArray());
@@ -346,8 +349,10 @@ public sealed class DagLayoutEngine
     /// <summary>An in-memory <see cref="ICommitStore"/> over the first <c>count</c> entries of a
     /// state's append-only metadata list. The list is shared with every later snapshot of the same
     /// state instead of being copied per extend; an entry below <c>count</c> is never rewritten,
-    /// so reading it needs no lock while the list keeps growing behind it.</summary>
-    private sealed class BoundedCommitStore(List<CommitMetadata> source, int count) : ICommitStore
+    /// so reading it needs no lock while the list keeps growing behind it — the list's own
+    /// concurrency contract, which is why it is a <see cref="ChunkedAppendList{T}"/> and not a
+    /// <see cref="List{T}"/> whose array a reallocation replaces.</summary>
+    private sealed class BoundedCommitStore(ChunkedAppendList<CommitMetadata> source, int count) : ICommitStore
     {
         public CommitMetadata this[int index]
         {
@@ -368,22 +373,7 @@ public sealed class DagLayoutEngine
 
         public void Dispose() { }
 
-        public IReadOnlyList<int> Search(string term)
-        {
-            var hits = new List<int>();
-            var t = term.Trim();
-            if (t.Length == 0)
-                return hits;
-            for (var i = 0; i < count; i++)
-            {
-                var m = source[i];
-                if (m.MessageShort.Contains(t, StringComparison.OrdinalIgnoreCase)
-                    || m.AuthorName.Contains(t, StringComparison.OrdinalIgnoreCase)
-                    || m.Id.ToString().StartsWith(t, StringComparison.OrdinalIgnoreCase))
-                    hits.Add(i);
-            }
-            return hits;
-        }
+        public IReadOnlyList<int> Search(string term) => CommitSearch.Matching(this, term);
 
         public IEnumerator<CommitMetadata> GetEnumerator()
         {
@@ -445,7 +435,7 @@ public sealed class DagLayoutEngine
         // runs on the render thread against that same live state, so it must take the same lock
         // or a scroll-triggered extend can mutate a List<int> mid-enumeration here
         // (InvalidOperationException: "Collection was modified").
-        lock (state)
+        using (state.EnterAsReader())
         {
             var candidates = new SortedSet<int>();
             if (state.CheckpointCrossing.TryGetValue(checkpoint, out var crossing))

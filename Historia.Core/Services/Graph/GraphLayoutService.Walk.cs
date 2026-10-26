@@ -4,28 +4,26 @@ public sealed partial class GraphLayoutService
 {
     private RepoCache GetOrResetCache(RepositoryContext context, GraphQuery query, bool force)
     {
+        RepoCache? stale;
+        RepoCache fresh;
         lock (_sync)
         {
             if (!force && _caches.TryGetValue(context, out var existing) && SameWalkShape(existing.Query, query))
                 return existing;
 
-            // A forced reset (stale fingerprint) discards a cache that may have a background
-            // spill task and an open on-disk store still live — tear those down explicitly,
-            // the same as Forget(), or the old task keeps writing to a now-orphaned RepoCache
-            // and its DiskCommitStore file handle never closes.
-            if (_caches.TryGetValue(context, out var stale))
-            {
-                try { stale.Cts.Cancel(); } catch (ObjectDisposedException) { }
-                stale.Cts.Dispose();
-                stale.MetaStore?.Dispose();
-                stale.DisposeLiveWalkWhenFree(); // disposed once no pull holds WalkLock
-            }
-
+            _caches.TryGetValue(context, out stale);
             _caches.Remove(context);
-            var fresh = new RepoCache { Query = query };
+            fresh = new RepoCache { Query = query };
             _caches.Add(context, fresh);
-            return fresh;
         }
+
+        // A forced reset (stale fingerprint) discards a cache that may have a background
+        // spill task and an open on-disk store still live — tear those down explicitly, the
+        // same as DropCache, or the old task keeps writing to a now-orphaned RepoCache and its
+        // DiskCommitStore file handle never closes.
+        if (stale is not null)
+            TearDown(stale);
+        return fresh;
     }
 
     /// <summary>True when two queries walk the same history — every knob that changes the tip

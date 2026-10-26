@@ -455,11 +455,14 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
     /// to derive each frame's lines, so no hold may last longer than the time these rows take.</summary>
     internal const int ExtendChunkRows = 1_000;
 
+    /// <summary>Most spin turns an extend takes, between two chunks, to let a blocked reader in.</summary>
+    private const int MaxYieldSpins = 32;
+
     /// <summary>
     /// Places up to <paramref name="additionalRows"/> of <paramref name="next"/> (whose first
     /// entry is row <paramref name="consumed"/>) into <paramref name="existing"/>'s state, taking
-    /// and releasing <c>lock (state)</c> once per <paramref name="chunkRows"/> rows, then publishes
-    /// the snapshot in a hold of its own. A chunk leaves the state consistent (the engine places
+    /// and releasing <c>lock (state)</c> once per <paramref name="chunkRows"/> rows, and publishes
+    /// the snapshot inside the last hold. A chunk leaves the state consistent (the engine places
     /// each commit completely), and a snapshot taken between chunks is bounded by its own row and
     /// edge counts, so a render between two chunks sees a layout that was valid before the extend.
     /// Returns null, having placed nothing, when the state has already moved past
@@ -475,33 +478,45 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
     {
         var state = existing.State;
         var take = Math.Min(additionalRows, next.Count);
+        var complete = next.Count == 0;
         var done = 0;
         while (true)
         {
-            var contended = Monitor.LockContentionCount;
             lock (state)
             {
                 if (state.Rows.Count != consumed + done)
                 {
                     if (done == 0)
                         return null;
-                    break; // another extender advanced the state mid-way; publish what it holds
+                    // another extender advanced the state mid-way; publish what it holds
+                    return DagLayoutEngine.Snapshot(state, complete);
                 }
                 var end = Math.Min(done + chunkRows, take);
                 DagLayoutEngine.ExtendInPlace(state, next, done, decorations, consumed + end);
                 done = end;
+                if (done >= take)
+                    return DagLayoutEngine.Snapshot(state, complete);
             }
-            if (done >= take)
-                break;
-            // Trap: the monitor is not fair. Taking the lock straight back would let this thread
-            // win it again before a renderer queued on it has woken, leaving that renderer behind
-            // every remaining chunk. When something waited during the chunk, sleep so it can run.
-            if (Monitor.LockContentionCount != contended)
-                Thread.Sleep(1);
+            YieldToWaitingReaders(state);
         }
+    }
 
-        lock (state)
-            return DagLayoutEngine.Snapshot(state, complete: next.Count == 0);
+    /// <summary>
+    /// Trap: the monitor is not fair. Taking the lock straight back would let this thread win it
+    /// again before a renderer queued on it has woken, leaving that renderer behind every remaining
+    /// chunk. While a reader is registered in <see cref="GraphLayoutState.LockWaiters"/>, spin
+    /// (yielding the processor, never sleeping) so it can run; the count is the state's own, so
+    /// contention on any other lock in the process does not slow an extend, and the bound keeps a
+    /// reader that is slow to wake from stalling it.
+    /// </summary>
+    private static void YieldToWaitingReaders(GraphLayoutState state)
+    {
+        if (Volatile.Read(ref state.LockWaiters) <= 0)
+            return;
+        state.ExtendYields++;
+        var spin = new SpinWait();
+        for (var i = 0; i < MaxYieldSpins && Volatile.Read(ref state.LockWaiters) > 0; i++)
+            spin.SpinOnce(sleep1Threshold: -1);
     }
 
     public async Task<GraphLayoutResult> RecomputeAsync(
@@ -536,17 +551,25 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
     /// touching the shared .gz read cache, which a recompute of the same repository reuses.</summary>
     private void DropCache(RepositoryContext context)
     {
+        RepoCache? cache;
         lock (_sync)
         {
-            if (_caches.TryGetValue(context, out var cache))
-            {
-                try { cache.Cts.Cancel(); } catch (ObjectDisposedException) { }
-                cache.Cts.Dispose();
-                cache.MetaStore?.Dispose();
-                cache.DisposeLiveWalkWhenFree(); // disposed once no pull holds WalkLock
-            }
+            _caches.TryGetValue(context, out cache);
             _caches.Remove(context);
         }
+        if (cache is not null)
+            TearDown(cache);
+    }
+
+    /// <summary>Cancels a cache that is no longer registered and releases what it holds: its
+    /// token source, its on-disk store, and its live walk once no pull holds <c>WalkLock</c>.
+    /// Never called under a lock — cancelling runs the callbacks registered on the token.</summary>
+    private static void TearDown(RepoCache cache)
+    {
+        try { cache.Cts.Cancel(); } catch (ObjectDisposedException) { }
+        cache.Cts.Dispose();
+        cache.MetaStore?.Dispose();
+        cache.DisposeLiveWalkWhenFree();
     }
 
     /// <summary>What <see cref="GetCacheStateForTesting"/> reports: the counters that must agree with

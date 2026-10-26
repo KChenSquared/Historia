@@ -46,7 +46,7 @@ public sealed partial class GraphLayoutService
         /// start, or it failed before exhausting (no fallback). The graph keeps whatever
         /// rows were already walked (none, for a failure before the first row) and nothing more
         /// is attempted for this cache: no respawn from the crawler or the spill, no disk write.
-        /// <see cref="Forget"/> or a forced reset drops the cache, so a ref change or a reopen
+        /// <see cref="DropCache"/> or a forced reset drops the cache, so a ref change or a reopen
         /// tries again. Written under <see cref="WalkLock"/>.</summary>
         public bool WalkFailed { get; set; }
 
@@ -54,7 +54,7 @@ public sealed partial class GraphLayoutService
         /// set): its rows still picture the old refs correctly, but a walk over the new tips
         /// doesn't line up with them row for row, so nothing more is walked or written for this
         /// cache — no resume, no re-prime, no spill, no disk save. The next
-        /// <see cref="ComputeLayoutAsync"/> (or the RefsChanged recompute's <see cref="Forget"/>)
+        /// <see cref="ComputeLayoutAsync"/> (or the RefsChanged recompute's <see cref="DropCache"/>)
         /// replaces it with a fresh walk from row 0. Normal, not a failure. Written under
         /// <see cref="WalkLock"/>.</summary>
         public bool WalkSuperseded { get; set; }

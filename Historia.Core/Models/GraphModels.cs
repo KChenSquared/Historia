@@ -219,6 +219,30 @@ public interface ICommitStore : IReadOnlyList<CommitMetadata>, IDisposable
     ICommitStore? AddRef();
 }
 
+/// <summary>The match rule the in-memory stores share for <see cref="ICommitStore.Search"/>.</summary>
+internal static class CommitSearch
+{
+    /// <summary>Ascending indices of the rows of <paramref name="rows"/> whose message or author
+    /// contains the trimmed <paramref name="term"/> (case-insensitive) or whose SHA starts with it;
+    /// none for an empty term.</summary>
+    internal static List<int> Matching(IReadOnlyList<CommitMetadata> rows, string term)
+    {
+        var hits = new List<int>();
+        var t = term.Trim();
+        if (t.Length == 0)
+            return hits;
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var m = rows[i];
+            if (m.MessageShort.Contains(t, StringComparison.OrdinalIgnoreCase)
+                || m.AuthorName.Contains(t, StringComparison.OrdinalIgnoreCase)
+                || m.Id.ToString().StartsWith(t, StringComparison.OrdinalIgnoreCase))
+                hits.Add(i);
+        }
+        return hits;
+    }
+}
+
 /// <summary>In-memory <see cref="ICommitStore"/> — the array the layout engine builds.</summary>
 public sealed class ArrayCommitStore(CommitMetadata[] items) : ICommitStore
 {
@@ -232,22 +256,7 @@ public sealed class ArrayCommitStore(CommitMetadata[] items) : ICommitStore
     public ICommitStore? AddRef() => this;
     public void Dispose() { }
 
-    public IReadOnlyList<int> Search(string term)
-    {
-        var hits = new List<int>();
-        var t = term.Trim();
-        if (t.Length == 0)
-            return hits;
-        for (var i = 0; i < items.Length; i++)
-        {
-            var m = items[i];
-            if (m.MessageShort.Contains(t, StringComparison.OrdinalIgnoreCase)
-                || m.AuthorName.Contains(t, StringComparison.OrdinalIgnoreCase)
-                || m.Id.ToString().StartsWith(t, StringComparison.OrdinalIgnoreCase))
-                hits.Add(i);
-        }
-        return hits;
-    }
+    public IReadOnlyList<int> Search(string term) => CommitSearch.Matching(this, term);
 
     public IEnumerator<CommitMetadata> GetEnumerator() => ((IEnumerable<CommitMetadata>)items).GetEnumerator();
     System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => items.GetEnumerator();

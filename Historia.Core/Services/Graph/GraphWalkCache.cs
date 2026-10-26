@@ -170,8 +170,9 @@ internal sealed class GraphWalkCache
 
     /// <summary>Drops this repo's cached read
     /// entry (the raw DTO plus up to two converted <see cref="Loaded"/> commit lists) — called on
-    /// <see cref="GraphLayoutService.Hibernate"/> so a warm-loaded repo's walk cache doesn't stay
-    /// resident for the rest of the session after the tab is switched away from. A miss on the
+    /// <see cref="GraphLayoutService.Hibernate"/> and <see cref="GraphLayoutService.Forget"/> so a
+    /// warm-loaded repo's walk cache doesn't stay resident for the rest of the session after the
+    /// tab is switched away from or closed. A miss on the
     /// next read is no different from one past the read TTL — just a re-read.</summary>
     public void Evict(string repoPath)
     {

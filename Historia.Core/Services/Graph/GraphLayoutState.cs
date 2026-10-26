@@ -61,11 +61,43 @@ public sealed class GraphLayoutState
     // comment. This is what lets GraphLayout.Rows be a RowCount-bounded VIEW over this same
     // instance instead of a fresh array copy on every Build/Extend.
     internal readonly ChunkedAppendList<GraphRow> Rows = new();
-    internal readonly List<CommitMetadata> Commits = [];
+    // Commits is chunked too: BoundedCommitStore snapshots read it with no lock (Find searches it
+    // from a background thread) while an extend appends, which ChunkedAppendList's contract
+    // allows and a List<T> reallocating its array does not.
+    internal readonly ChunkedAppendList<CommitMetadata> Commits = new();
     internal readonly List<GraphEdge> RealEdges = [];
     internal readonly List<GraphDecoration> Decorations = [];
     internal readonly Dictionary<GitObjectId, int> RowByCommitId = [];
     internal int HeadRow = -1;
+
+    /// <summary>How many threads are blocked in <see cref="EnterAsReader"/> waiting for this
+    /// state's lock. The monitor is not fair, so a chunked extend that takes the lock straight
+    /// back would beat a waiting reader to it every time; the extend reads this between chunks and
+    /// stands aside while it is above zero.</summary>
+    internal int LockWaiters;
+
+    /// <summary>How many times a chunked extend stood aside for a waiting reader. Tests only.</summary>
+    internal int ExtendYields;
+
+    /// <summary>Takes <c>lock (this)</c> for a reader, announcing itself in <see
+    /// cref="LockWaiters"/> while it has to wait. Same mutual exclusion as the <c>lock</c>
+    /// statement; dispose the result to release.</summary>
+    internal ReaderHold EnterAsReader()
+    {
+        if (!Monitor.TryEnter(this))
+        {
+            Interlocked.Increment(ref LockWaiters);
+            try { Monitor.Enter(this); }
+            finally { Interlocked.Decrement(ref LockWaiters); }
+        }
+        return new ReaderHold(this);
+    }
+
+    /// <summary>Releases the lock taken by <see cref="EnterAsReader"/>.</summary>
+    internal readonly struct ReaderHold(GraphLayoutState state) : IDisposable
+    {
+        public void Dispose() => Monitor.Exit(state);
+    }
 
     /// <summary>Crossing index: boundary rows are multiples of this stride. Sized so a
     /// window's checkpoint lookup costs about (concurrent lanes) work, not (total rows) — linux
