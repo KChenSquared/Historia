@@ -39,6 +39,7 @@ public sealed class TerminalControl : Control
 
     private IUiTimer? _blinkTimer;
     private bool _blinkOn = true;
+    private WindowBase? _hostWindow;
 
     // Keys whose press went through the Kitty encoder and are still held; a second KeyDown is a
     // repeat, and only these keys get a release, reported as the press was.
@@ -50,8 +51,43 @@ public sealed class TerminalControl : Control
     private readonly RenderResourceCache<PenKey, IPen> _pens;
     private readonly RenderResourceCache<int, GlyphMetric> _glyphs;
 
+    // Glyph runs by the cell a text run starts at. A run is reused while its text is unchanged;
+    // GlyphRun owns a reference-counted platform object that only Dispose releases (DrawGlyphRun
+    // records its own reference), so a replaced or dropped run is disposed.
+    private const int MaxCachedRuns = 4096;
+    private readonly Dictionary<RunKey, CachedRun> _runs = [];
+    private long _runMisses;
+
+    // Per-control scratch for building one text run; grown on demand, never per run.
+    private char[] _runText = new char[256];
+    private int _runTextLength;
+    private ushort[] _runIndices = new ushort[256];
+
+    // Frame state read by the buffer callback, which is built once instead of per frame.
+    private readonly Func<ITerminalBufferView, int> _renderBuffer;
+    private readonly Action _invalidate;
+    private readonly Action _pushResizeAction;
+    private bool _resizePosted;
+    private DrawingContext? _frameDc;
+    private uint _frameBgArgb;
+    private uint _frameCursorArgb;
+    private int _frameCols;
+    private int _frameRows;
+    private int _frameMetMax;
+    private int _frameMetValue;
+    private double _ascentPx;
+
     private readonly record struct PenKey(uint Argb, double Thickness, int Style);
     private readonly record struct GlyphMetric(ushort Index, double Advance, bool Found);
+    private readonly record struct RunKey(int ScreenRow, int StartCol);
+
+    private sealed class CachedRun(GlyphRun run, char[] text, double fontSize, double baseline)
+    {
+        public GlyphRun Run { get; } = run;
+        public char[] Text { get; } = text;
+        public double FontSize { get; } = fontSize;
+        public double Baseline { get; } = baseline;
+    }
 
     public TerminalControl()
     {
@@ -63,6 +99,10 @@ public sealed class TerminalControl : Control
         _pens = new RenderResourceCache<PenKey, IPen>(
             256, k => new ImmutablePen(new ImmutableSolidColorBrush(AvColor.FromUInt32(k.Argb)), k.Thickness));
         _glyphs = new RenderResourceCache<int, GlyphMetric>(4096, ResolveGlyph);
+
+        _renderBuffer = RenderBuffer;
+        _invalidate = InvalidateVisual;
+        _pushResizeAction = PushResizeFromPost;
     }
 
     // ── lifecycle ───────────────────────────────────────────────────────────────────────────
@@ -115,13 +155,58 @@ public sealed class TerminalControl : Control
     {
         base.OnAttachedToVisualTree(e);
         _blinkTimer ??= _ui?.CreateTimer(TimeSpan.FromMilliseconds(530), OnBlinkTick);
-        _blinkTimer?.Start();
+
+        _hostWindow = TopLevel.GetTopLevel(this) as WindowBase;
+        if (_hostWindow is not null)
+        {
+            _hostWindow.Activated += OnHostWindowActivated;
+            _hostWindow.Deactivated += OnHostWindowDeactivated;
+        }
+        UpdateBlink(IsFocused, _hostWindow?.IsActive ?? true);
     }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnDetachedFromVisualTree(e);
-        _blinkTimer?.Stop();
+        ReleaseHostWindow();
+        UpdateBlink(false, false);
+    }
+
+    private void ReleaseHostWindow()
+    {
+        if (_hostWindow is null)
+            return;
+        _hostWindow.Activated -= OnHostWindowActivated;
+        _hostWindow.Deactivated -= OnHostWindowDeactivated;
+        _hostWindow = null;
+    }
+
+    // The event can fire before the window's IsActive flips, so the new state is passed in.
+    private void OnHostWindowActivated(object? sender, EventArgs e) => UpdateBlink(IsFocused, true);
+
+    private void OnHostWindowDeactivated(object? sender, EventArgs e) => UpdateBlink(IsFocused, false);
+
+    /// <summary>The cursor blinks only while the control has focus in an active window and the
+    /// setting is on; otherwise the timer is stopped, so an idle terminal never repaints, and the
+    /// cursor is left solid.</summary>
+    private void UpdateBlink(bool focused, bool windowActive)
+    {
+        if (_blinkTimer is null)
+            return;
+
+        var blink = _settings?.Current.TerminalCursorBlink ?? true;
+        if (focused && windowActive && blink && this.GetVisualRoot() is not null)
+        {
+            _blinkTimer.Start();
+            return;
+        }
+
+        _blinkTimer.Stop();
+        if (!_blinkOn)
+        {
+            _blinkOn = true;
+            InvalidateVisual();
+        }
     }
 
     public void Teardown()
@@ -134,8 +219,10 @@ public sealed class TerminalControl : Control
             _settings.Changed -= OnSettingsChanged;
             _wired = false;
         }
+        ReleaseHostWindow();
         _blinkTimer?.Dispose();
         _blinkTimer = null;
+        ClearRuns();
     }
 
     private void OnThemeChanged(object? sender, ThemeChangedEventArgs e)
@@ -157,6 +244,14 @@ public sealed class TerminalControl : Control
             else
                 _ui.Post(ApplyFontChange);
         }
+
+        if (e.OldSettings.TerminalCursorBlink != e.NewSettings.TerminalCursorBlink)
+        {
+            if (_ui.CheckAccess())
+                UpdateBlink(IsFocused, _hostWindow?.IsActive ?? true);
+            else
+                _ui.Post(() => UpdateBlink(IsFocused, _hostWindow?.IsActive ?? true));
+        }
     }
 
     internal (double Width, double Height) CellSize => (_cellWidth, _cellHeight);
@@ -173,16 +268,10 @@ public sealed class TerminalControl : Control
     }
 
     private void OnSessionBufferChanged(object? sender, EventArgs e)
-        => Dispatcher.UIThread.Post(InvalidateVisual, DispatcherPriority.Render);
+        => Dispatcher.UIThread.Post(_invalidate, DispatcherPriority.Render);
 
     private void OnBlinkTick()
     {
-        var blink = _settings?.Current.TerminalCursorBlink ?? true;
-        if (!blink)
-        {
-            if (!_blinkOn) { _blinkOn = true; InvalidateVisual(); }
-            return;
-        }
         _blinkOn = !_blinkOn;
         InvalidateVisual();
     }
@@ -216,7 +305,22 @@ public sealed class TerminalControl : Control
         _cellWidth = Math.Max(1, Math.Round(probe.WidthIncludingTrailingWhitespace));
         _cellHeight = Math.Max(1, Math.Ceiling(probe.Height));
 
+        _ascentPx = 0;
+        if (_glyphTypeface is { } measured)
+        {
+            var em = measured.Metrics.DesignEmHeight == 0 ? 1000 : measured.Metrics.DesignEmHeight;
+            _ascentPx = -measured.Metrics.Ascent * (size / em);
+        }
+
         _glyphs.Clear();
+        ClearRuns();
+    }
+
+    private void ClearRuns()
+    {
+        foreach (var cached in _runs.Values)
+            cached.Run.Dispose();
+        _runs.Clear();
     }
 
     private static string PlatformMonospaceStack()
@@ -257,8 +361,10 @@ public sealed class TerminalControl : Control
         if (!HasUsableSize(e.PreviousSize, _cellWidth, _cellHeight)
             && HasUsableSize(e.NewSize, _cellWidth, _cellHeight))
         {
+            // Layout is still running: the session resize waits until it has finished.
             _resizeDebounce?.Stop();
-            PushResizeToSession();
+            RecomputeGrid();
+            PostPushResize();
             return;
         }
 
@@ -289,6 +395,20 @@ public sealed class TerminalControl : Control
         PushResizeToSession();
     }
 
+    private void PostPushResize()
+    {
+        if (_resizePosted)
+            return;
+        _resizePosted = true;
+        Dispatcher.UIThread.Post(_pushResizeAction, DispatcherPriority.Background);
+    }
+
+    private void PushResizeFromPost()
+    {
+        _resizePosted = false;
+        PushResizeToSession();
+    }
+
     private void PushResizeToSession()
     {
         RecomputeGrid();
@@ -298,7 +418,16 @@ public sealed class TerminalControl : Control
         // lost. The session keeps its spawn size until the control has real bounds, and
         // OnSizeChanged delivers them.
         if (HasUsableSize(Bounds.Size, _cellWidth, _cellHeight))
-            _session?.Resize(_cols, _rows);
+        {
+            try
+            {
+                _session?.Resize(_cols, _rows);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write(AppLogLevel.Warn, "terminal", "Terminal session resize failed", ex);
+            }
+        }
 
         InvalidateVisual();
     }
@@ -308,43 +437,57 @@ public sealed class TerminalControl : Control
     public override void Render(DrawingContext dc)
     {
         var palette = HistoriaPalette.For(_themeMode);
-        var termBg = Brush(ArgbOf(palette["term-bg"]));
-        dc.FillRectangle(termBg, new Rect(Bounds.Size));
+        _frameBgArgb = ArgbOf(palette["term-bg"]);
+        dc.FillRectangle(Brush(_frameBgArgb), new Rect(Bounds.Size));
 
         if (_session is null)
             return;
 
-        var (cols, rows) = (_cols, _rows);
-        var (metMax, metValue) = (0, 0);
+        _frameDc = dc;
+        _frameCursorArgb = ArgbOf(palette["term-cursor"]);
+        (_frameCols, _frameRows) = (_cols, _rows);
+        (_frameMetMax, _frameMetValue) = (0, 0);
 
-        _session.ReadBuffer(view =>
+        try
         {
-            var total = view.TotalLines;
-            // The emulator's own viewport top (YDisp) is the authoritative bottom-anchor: it
-            // follows the emulator through scrolls and reflows instead of being re-derived from
-            // the line count.
-            var bottomTop = Math.Clamp(view.ViewportTop, 0, Math.Max(0, total - 1));
-            var top = Math.Clamp(bottomTop - (int)Math.Round(_scrollOffsetLines), 0, bottomTop);
-            (metMax, metValue) = (bottomTop, top);
+            _session.ReadBuffer(_renderBuffer);
+        }
+        finally
+        {
+            _frameDc = null;
+        }
 
-            for (var screenRow = 0; screenRow < rows; screenRow++)
-            {
-                var line = top + screenRow;
-                if (line >= total)
-                    break;
-                DrawRow(dc, view, line, screenRow, cols, palette);
-            }
-
-            DrawCursor(dc, view, top, rows, cols, palette);
-            return 0;
-        });
-
-        var metrics = new ScrollMetrics(metMax, metValue, rows);
+        var metrics = new ScrollMetrics(_frameMetMax, _frameMetValue, _frameRows);
         if (metrics != _lastMetrics)
         {
             _lastMetrics = metrics;
             Dispatcher.UIThread.Post(() => ScrollMetricsChanged?.Invoke(this, EventArgs.Empty));
         }
+    }
+
+    // Runs under the session gate, with the frame's state in the _frame* fields.
+    private int RenderBuffer(ITerminalBufferView view)
+    {
+        var dc = _frameDc!;
+        var (cols, rows) = (_frameCols, _frameRows);
+        var total = view.TotalLines;
+        // The emulator's own viewport top (YDisp) is the authoritative bottom-anchor: it
+        // follows the emulator through scrolls and reflows instead of being re-derived from
+        // the line count.
+        var bottomTop = Math.Clamp(view.ViewportTop, 0, Math.Max(0, total - 1));
+        var top = Math.Clamp(bottomTop - (int)Math.Round(_scrollOffsetLines), 0, bottomTop);
+        (_frameMetMax, _frameMetValue) = (bottomTop, top);
+
+        for (var screenRow = 0; screenRow < rows; screenRow++)
+        {
+            var line = top + screenRow;
+            if (line >= total)
+                break;
+            DrawRow(dc, view, line, screenRow, cols);
+        }
+
+        DrawCursor(dc, view, top, rows, cols);
+        return 0;
     }
 
     // ── scroll metrics (drives the dock's vertical ScrollBar) ────────────────────────────────
@@ -373,11 +516,10 @@ public sealed class TerminalControl : Control
         InvalidateVisual();
     }
 
-    private void DrawRow(DrawingContext dc, ITerminalBufferView view, int line, int screenRow, int cols,
-        IReadOnlyDictionary<string, Rgb> palette)
+    private void DrawRow(DrawingContext dc, ITerminalBufferView view, int line, int screenRow, int cols)
     {
         var y = screenRow * _cellHeight;
-        var defaultBg = ArgbOf(palette["term-bg"]);
+        var defaultBg = _frameBgArgb;
 
         // Pass A — backgrounds: merge adjacent equal-bg cells into one rect.
         var runStart = 0;
@@ -411,7 +553,7 @@ public sealed class TerminalControl : Control
 
             var (fg, flags) = ResolveFg(cell);
             var start = b;
-            var sb = new System.Text.StringBuilder();
+            _runTextLength = 0;
             while (b < cols)
             {
                 var c = view.GetCell(line, b);
@@ -419,49 +561,114 @@ public sealed class TerminalControl : Control
                 if (c.CodePoint is 0 or 32) break;
                 var (cfg, cflags) = ResolveFg(c);
                 if (cfg != fg || cflags != flags) break;
-                sb.Append(c.Content.Length > 0 ? c.Content : char.ConvertFromUtf32(c.CodePoint));
+                AppendRunText(c);
                 b += Math.Max(1, c.Width);
             }
             if (b == start) { b++; continue; }
 
-            DrawTextRun(dc, sb.ToString(), start, y, fg, flags);
+            DrawTextRun(dc, screenRow, start, y, fg, flags);
         }
     }
 
-    private void DrawTextRun(DrawingContext dc, string text, int startCol, double y, uint fgArgb, TerminalCellFlags flags)
+    // Appends the cell's text to the run buffer: its grapheme content when it has any, else its
+    // code point encoded in place (U+FFFD for a value that is not a scalar).
+    private void AppendRunText(in TerminalCellSnapshot cell)
+    {
+        var content = cell.Content;
+        if (content.Length > 0)
+        {
+            EnsureRunTextCapacity(content.Length);
+            content.CopyTo(0, _runText, _runTextLength, content.Length);
+            _runTextLength += content.Length;
+            return;
+        }
+
+        EnsureRunTextCapacity(2);
+        if (Rune.TryCreate(cell.CodePoint, out var rune))
+            _runTextLength += rune.EncodeToUtf16(_runText.AsSpan(_runTextLength));
+        else
+            _runText[_runTextLength++] = '�';
+    }
+
+    private void EnsureRunTextCapacity(int extra)
+    {
+        if (_runTextLength + extra > _runText.Length)
+            Array.Resize(ref _runText, Math.Max(_runText.Length * 2, _runTextLength + extra));
+    }
+
+    private void DrawTextRun(DrawingContext dc, int screenRow, int startCol, double y, uint fgArgb, TerminalCellFlags flags)
     {
         var brush = Brush(fgArgb);
-        var origin = new Point(startCol * _cellWidth, y);
+        var text = _runText.AsSpan(0, _runTextLength);
+        var key = new RunKey(screenRow, startCol);
 
         var gtf = _glyphTypeface;
-        var runes = text.EnumerateRunes().ToArray();
-        var allFound = gtf is not null;
-        var indices = new ushort[runes.Length];
-        for (var i = 0; i < runes.Length && allFound; i++)
+        var baseline = y + _ascentPx;
+        var drawn = false;
+        if (gtf is not null)
         {
-            var m = _glyphs.Get(runes[i].Value);
-            if (!m.Found) { allFound = false; break; }
-            indices[i] = m.Index;
+            if (_runs.TryGetValue(key, out var cached)
+                && cached.FontSize == _lastFontSize
+                && cached.Baseline == baseline
+                && text.SequenceEqual(cached.Text))
+            {
+                dc.DrawGlyphRun(brush, cached.Run);
+                drawn = true;
+            }
+            else if (CreateRun(gtf, key, text, baseline) is { } run)
+            {
+                dc.DrawGlyphRun(brush, run);
+                drawn = true;
+            }
         }
 
-        if (allFound && gtf is not null)
-        {
-            var em = gtf.Metrics.DesignEmHeight == 0 ? 1000 : gtf.Metrics.DesignEmHeight;
-            var ascentPx = -gtf.Metrics.Ascent * (_lastFontSize / em);
-            var baseline = y + ascentPx;
-            var glyphRun = new GlyphRun(gtf, _lastFontSize, text.AsMemory(), indices,
-                baselineOrigin: new Point(startCol * _cellWidth, baseline));
-            dc.DrawGlyphRun(brush, glyphRun);
-        }
-        else
+        if (!drawn)
         {
             // Fallback path (missing glyph / no glyph typeface): FormattedText, not cached.
-            var ft = new FormattedText(text, CultureInfo.CurrentUICulture, FlowDirection.LeftToRight,
+            var ft = new FormattedText(text.ToString(), CultureInfo.CurrentUICulture, FlowDirection.LeftToRight,
                 Face(flags), _lastFontSize, brush);
-            dc.DrawText(ft, origin);
+            dc.DrawText(ft, new Point(startCol * _cellWidth, y));
         }
 
         DrawTextDecorations(dc, text.Length, startCol, y, fgArgb, flags);
+    }
+
+    // Shapes the run, replaces any run cached for the cell and disposes it. Null when a glyph
+    // is missing from the typeface.
+    private GlyphRun? CreateRun(IGlyphTypeface gtf, RunKey key, ReadOnlySpan<char> text, double baseline)
+    {
+        if (_runIndices.Length < text.Length)
+            _runIndices = new ushort[Math.Max(_runIndices.Length * 2, text.Length)];
+
+        var count = 0;
+        foreach (var rune in text.EnumerateRunes())
+        {
+            var m = _glyphs.Get(rune.Value);
+            if (!m.Found)
+            {
+                DropRun(key);
+                return null;
+            }
+            _runIndices[count++] = m.Index;
+        }
+
+        _runMisses++;
+        // The glyph run keeps its character memory, so it gets a copy.
+        var chars = text.ToArray();
+        var run = new GlyphRun(gtf, _lastFontSize, chars.AsMemory(), _runIndices.AsSpan(0, count).ToArray(),
+            baselineOrigin: new Point(key.StartCol * _cellWidth, baseline));
+
+        DropRun(key);
+        if (_runs.Count >= MaxCachedRuns)
+            ClearRuns();
+        _runs[key] = new CachedRun(run, chars, _lastFontSize, baseline);
+        return run;
+    }
+
+    private void DropRun(RunKey key)
+    {
+        if (_runs.Remove(key, out var old))
+            old.Run.Dispose();
     }
 
     private void DrawTextDecorations(DrawingContext dc, int cellCount, int startCol, double y, uint fgArgb, TerminalCellFlags flags)
@@ -480,8 +687,7 @@ public sealed class TerminalControl : Control
         }
     }
 
-    private void DrawCursor(DrawingContext dc, ITerminalBufferView view, int top, int rows, int cols,
-        IReadOnlyDictionary<string, Rgb> palette)
+    private void DrawCursor(DrawingContext dc, ITerminalBufferView view, int top, int rows, int cols)
     {
         if (!view.CursorVisible)
             return;
@@ -490,14 +696,14 @@ public sealed class TerminalControl : Control
             return;
         var col = Math.Clamp(view.CursorColumn, 0, cols - 1);
         var rect = new Rect(col * _cellWidth, screenRow * _cellHeight, _cellWidth, _cellHeight);
-        var cursorBrush = Brush(ArgbOf(palette["term-cursor"]));
+        var cursorBrush = Brush(_frameCursorArgb);
 
         var style = _settings?.Current.TerminalCursorStyle ?? TerminalCursorStyle.Block;
         var focused = IsFocused;
 
         if (!focused)
         {
-            dc.DrawRectangle(null, new ImmutablePen(new ImmutableSolidColorBrush(AvColor.FromUInt32(ArgbOf(palette["term-cursor"]))), 1), rect);
+            dc.DrawRectangle(null, Pen(_frameCursorArgb, 1, UnfocusedCursorPenStyle), rect);
             return;
         }
         if (!_blinkOn)
@@ -557,6 +763,7 @@ public sealed class TerminalControl : Control
     protected override void OnGotFocus(Avalonia.Input.GotFocusEventArgs e)
     {
         base.OnGotFocus(e);
+        UpdateBlink(true, _hostWindow?.IsActive ?? true);
         InvalidateVisual();
     }
 
@@ -566,6 +773,7 @@ public sealed class TerminalControl : Control
         // Keys released elsewhere never reach OnKeyUp; no synthetic releases are sent.
         _kittyKeysDown.Clear();
         _swallowTextInput = null;
+        UpdateBlink(false, _hostWindow?.IsActive ?? true);
         InvalidateVisual();
     }
 
@@ -1105,6 +1313,20 @@ public sealed class TerminalControl : Control
     }
 
     // ── small helpers ───────────────────────────────────────────────────────────────────────
+
+    private const int UnfocusedCursorPenStyle = 2;
+
+    internal long PenMissesForTesting => _pens.Misses;
+    internal long RunMissesForTesting => _runMisses;
+    internal int CachedRunCountForTesting => _runs.Count;
+
+    internal void ResetRenderCountersForTesting()
+    {
+        _brushes.ResetCounters();
+        _pens.ResetCounters();
+        _glyphs.ResetCounters();
+        _runMisses = 0;
+    }
 
     private IBrush Brush(uint argb) => _brushes.Get(argb);
     private IPen Pen(uint argb, double thickness, int style) => _pens.Get(new PenKey(argb, thickness, style));
