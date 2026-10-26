@@ -303,7 +303,20 @@ public sealed class RepositoryContext : IAsyncDisposable
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, Lifetime);
         var holderAtWaitStart = Volatile.Read(ref _writeHolder);
         var waitStart = System.Diagnostics.Stopwatch.GetTimestamp();
-        await _writeLock.WaitAsync(linked.Token).ConfigureAwait(false);
+        try
+        {
+            await _writeLock.WaitAsync(linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            var cancelledMs = System.Diagnostics.Stopwatch.GetElapsedTime(waitStart).TotalMilliseconds;
+            if (cancelledMs > WriteLockLogThresholdMs && PerfLog.Enabled)
+            {
+                var holder = holderAtWaitStart is null ? "" : $" behind {holderAtWaitStart.Label}";
+                PerfLog.Mark($"write lock wait {cancelledMs:F1}ms ({DisplayName}){holder}, cancelled");
+            }
+            throw;
+        }
         var waitMs = System.Diagnostics.Stopwatch.GetElapsedTime(waitStart).TotalMilliseconds;
         var resolvedLabel = ResolveCallerLabel(label, callerMember, callerFile);
         var holdStart = System.Diagnostics.Stopwatch.GetTimestamp();

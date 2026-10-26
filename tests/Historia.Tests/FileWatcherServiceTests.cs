@@ -73,7 +73,9 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
     {
         await using var ctx = _host.Open(_repo.Path);
         var fakeWs = new FakeWorkspace();
-        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs);
+        // No operating-system watchers: the context's own git status rewrites .git/index, and that
+        // real event would race the injected one.
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs, watchFilesystem: false);
 
         var onRawEvent = typeof(Historia.Services.Watching.FileWatcherService)
             .GetMethod("OnRawEvent", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
@@ -194,6 +196,29 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Overflows_suppressed_after_the_last_logged_one_are_reported_on_dispose()
+    {
+        using var dir = new StateDir();
+        using var session = AppLog.StartSessionForTesting(dir.Path);
+        await using var ctx = _host.Open(_repo.Path);
+        var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace(), watchFilesystem: false);
+
+        watcher.OverflowLogWindow = TimeSpan.FromHours(1);
+        RaiseWatcherError(watcher);
+        RaiseWatcherError(watcher);
+        RaiseWatcherError(watcher);
+        await watcher.DisposeAsync();
+
+        session.Dispose();
+        var lines = File.ReadAllLines(session.SessionPath).Where(l => l.Contains("[watcher]")).ToList();
+
+        Assert.Single(lines, l => l.Contains("overflowed"));
+        var flushed = Assert.Single(lines, l => l.Contains("not logged"));
+        Assert.Contains("2 further overflow(s)", flushed);
+        Assert.Contains("WARN", flushed);
+    }
+
+    [Fact]
     public async Task Entering_degraded_mode_logs_the_reason()
     {
         // Rewrite only the header's entry count: the watcher decides from the header alone.
@@ -223,7 +248,8 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
             await using var ctx = _host.Open(_repo.Path);
             var fakeWs = new FakeWorkspace();
             // Built inside the override: the debounce timer's callback captures this flow.
-            await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs);
+            // No operating-system watchers: real .git events would add refreshes of their own.
+            await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs, watchFilesystem: false);
 
             PerfLog.Flush(TimeSpan.FromSeconds(10));
             var startLineCount = File.Exists(PerfLog.LogPath) ? File.ReadAllLines(PerfLog.LogPath).Length : 0;

@@ -447,12 +447,24 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
         }
 
         Report(repo, new GitProgress { Phase = "Waiting for auto-fetch…" });
+        var holderLabel = repo.CurrentNetworkOperation?.Label ?? "auto-fetch";
         var waitStart = Stopwatch.GetTimestamp();
-        var entered = await repo.BeginNetworkOperationAsync(info, ct);
-        var waitMs = Stopwatch.GetElapsedTime(waitStart).TotalMilliseconds;
-        if (waitMs > NetworkGateLogThresholdMs)
-            PerfLog.Mark($"network gate wait {waitMs:F0}ms ({repo.DisplayName}, {label}) behind auto-fetch");
-        return entered;
+        var cancelled = false;
+        try
+        {
+            return await repo.BeginNetworkOperationAsync(info, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            cancelled = true;
+            throw;
+        }
+        finally
+        {
+            var waitMs = Stopwatch.GetElapsedTime(waitStart).TotalMilliseconds;
+            if (waitMs > NetworkGateLogThresholdMs)
+                PerfLog.Mark($"network gate wait {waitMs:F0}ms ({repo.DisplayName}, {label}) behind {holderLabel}{(cancelled ? ", cancelled" : "")}");
+        }
     }
 
     private async Task ExecuteAsync(RepositoryContext repo, RepoNetworkAction op, string remote, RepoNetworkRequest request, CancellationToken ct)
