@@ -412,15 +412,15 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
         if (cache.PrefixRejected)
             return await ComputeLayoutAsync(context, cache.Query, existing.State.Rows.Count + additionalRows, ct).ConfigureAwait(false);
 
-        // Extend mutates existing.State in place; run it to completion (a handful of ms for
-        // <=5k rows) rather than risk a cancellation leaving that shared state half-updated.
-        // Read the consumed-row count under lock(existing.State), then
+        // Extend mutates existing.State in place, in chunks: run it to completion (a handful of
+        // ms for <=5k rows) rather than risk a cancellation leaving the snapshot behind the
+        // shared state. Read the consumed-row count under lock(existing.State), then
         // RELEASE it before the (potentially disk-IO-bound) ReadWindow call — holding the lock
         // across disk IO blocks the render thread's own lock(existing.State) in DeriveWindow for
-        // the duration of a full disk read. Re-take the lock afterwards and proceed only if
+        // the duration of a full disk read. The first chunk proceeds only if
         // State.Rows.Count is STILL `consumed`: a concurrent ExtendLayoutAsync on this layout
         // (e.g. the initial compute's phase-2 extend racing a reveal-driven one) may have advanced
-        // it while ReadWindow ran off-lock, and feeding _engine.Extend a slice read against a
+        // it while ReadWindow ran off-lock, and feeding the engine a slice read against a
         // stale `consumed` would re-place commits it already consumed — duplicate rows and a
         // corrupted RowByCommitId. The per-context extend pump is the only extender, so a mismatch
         // here means exactly that race, and returning `existing` unchanged lets the pump retry.
@@ -439,13 +439,8 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
         if (!read.Complete)
             return existing; // A short disk read — never splice; the pump retries
 
-        GraphLayoutResult result;
-        lock (existing.State)
-        {
-            if (existing.State.Rows.Count != consumed)
-                return existing; // Someone else extended this layout meanwhile
-            result = _engine.Extend(existing, read.Rows, cache.Decorations, additionalRows, CancellationToken.None);
-        }
+        if (ExtendInChunks(existing, read.Rows, cache.Decorations, consumed, additionalRows) is not { } result)
+            return existing; // Someone else extended this layout meanwhile
 
         if (!SpillEnabled(cache.Query))
             return result with { Fingerprint = cache.Fingerprint };
@@ -454,6 +449,59 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
             await RetireLiveWalkAsync(cache).ConfigureAwait(false);
         MaybeStartBackgroundSpill(context, cache, cache.Query); // resume if it stalled/hadn't started
         return swapped with { Fingerprint = cache.Fingerprint };
+    }
+
+    /// <summary>Rows placed per hold of a layout state's lock. The render thread takes the same lock
+    /// to derive each frame's lines, so no hold may last longer than the time these rows take.</summary>
+    internal const int ExtendChunkRows = 1_000;
+
+    /// <summary>
+    /// Places up to <paramref name="additionalRows"/> of <paramref name="next"/> (whose first
+    /// entry is row <paramref name="consumed"/>) into <paramref name="existing"/>'s state, taking
+    /// and releasing <c>lock (state)</c> once per <paramref name="chunkRows"/> rows, then publishes
+    /// the snapshot in a hold of its own. A chunk leaves the state consistent (the engine places
+    /// each commit completely), and a snapshot taken between chunks is bounded by its own row and
+    /// edge counts, so a render between two chunks sees a layout that was valid before the extend.
+    /// Returns null, having placed nothing, when the state has already moved past
+    /// <paramref name="consumed"/>.
+    /// </summary>
+    internal static GraphLayoutResult? ExtendInChunks(
+        GraphLayoutResult existing,
+        IReadOnlyList<RawCommit> next,
+        IReadOnlyDictionary<GitObjectId, IReadOnlyList<GraphDecorationInput>>? decorations,
+        int consumed,
+        int additionalRows,
+        int chunkRows = ExtendChunkRows)
+    {
+        var state = existing.State;
+        var take = Math.Min(additionalRows, next.Count);
+        var done = 0;
+        while (true)
+        {
+            var contended = Monitor.LockContentionCount;
+            lock (state)
+            {
+                if (state.Rows.Count != consumed + done)
+                {
+                    if (done == 0)
+                        return null;
+                    break; // another extender advanced the state mid-way; publish what it holds
+                }
+                var end = Math.Min(done + chunkRows, take);
+                DagLayoutEngine.ExtendInPlace(state, next, done, decorations, consumed + end);
+                done = end;
+            }
+            if (done >= take)
+                break;
+            // Trap: the monitor is not fair. Taking the lock straight back would let this thread
+            // win it again before a renderer queued on it has woken, leaving that renderer behind
+            // every remaining chunk. When something waited during the chunk, sleep so it can run.
+            if (Monitor.LockContentionCount != contended)
+                Thread.Sleep(1);
+        }
+
+        lock (state)
+            return DagLayoutEngine.Snapshot(state, complete: next.Count == 0);
     }
 
     public async Task<GraphLayoutResult> RecomputeAsync(
@@ -470,11 +518,23 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
 
         // Every invalidation reason recomputes the whole window: lane assignment is a
         // left-to-right dependency chain, so a change at row k can alter every later row.
-        Forget(context);
+        DropCache(context);
         return await ComputeLayoutAsync(context, query, maxRows, ct).ConfigureAwait(false);
     }
 
+    /// <inheritdoc/>
     public void Forget(RepositoryContext context)
+    {
+        DropCache(context);
+        // A closed tab is never hibernated, so without this its walk read-cache entry would stay
+        // resident for the rest of the session. A recompute keeps the entry instead: the next
+        // walk of the same repository reads it again.
+        _walkCache.Evict(context.RepositoryPath);
+    }
+
+    /// <summary>Tears down this context's in-memory cache (walk, store, token source) without
+    /// touching the shared .gz read cache, which a recompute of the same repository reuses.</summary>
+    private void DropCache(RepositoryContext context)
     {
         lock (_sync)
         {

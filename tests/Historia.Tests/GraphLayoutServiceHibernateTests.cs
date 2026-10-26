@@ -47,6 +47,70 @@ public sealed class GraphLayoutServiceHibernateTests : IAsyncDisposable
         Assert.False(HasCacheEntry(svc, ctx));
     }
 
+    private static object? WalkCacheReadEntry(GraphLayoutService svc, string repoPath)
+    {
+        var walkCache = typeof(GraphLayoutService).GetField("_walkCache", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(svc)!;
+        var readCache = walkCache.GetType().GetField("_readCache", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(walkCache)!;
+        var args = new object?[] { repoPath, null };
+        readCache.GetType().GetMethod("TryGetValue")!.Invoke(readCache, args);
+        return args[1];
+    }
+
+    /// <summary>Saves a walk file for the repository and reads it back through the service's own
+    /// walk cache, leaving a read-cache entry for it.</summary>
+    private static void PrimeWalkCacheReadEntry(GraphLayoutService svc, string repoPath, GraphQuery query)
+    {
+        var walkCache = (GraphWalkCache)typeof(GraphLayoutService).GetField("_walkCache", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(svc)!;
+        var id = GitObjectId.Parse(new string('a', 40));
+        var commit = new RawCommit(id, [], new CommitMetadata
+        {
+            Id = id,
+            MessageShort = "only",
+            AuthorName = "A",
+            AuthorEmail = "a@x",
+            AuthorWhen = DateTimeOffset.UnixEpoch,
+            CommitWhen = DateTimeOffset.UnixEpoch,
+            ParentCount = 0,
+        });
+        walkCache.Save(repoPath, query, fingerprint: 7, exhausted: true, [commit], new Dictionary<GitObjectId, IReadOnlyList<GraphDecorationInput>>());
+        Assert.NotNull(walkCache.TryLoadStale(repoPath, query));
+        Assert.NotNull(WalkCacheReadEntry(svc, repoPath));
+    }
+
+    [Fact]
+    public async Task Forget_evicts_the_walk_cache_read_entry()
+    {
+        await _host.Settings.UpdateAsync(s => s with { GraphMetadataFromDisk = false });
+        var svc = new GraphLayoutService(_host.Settings, _host.Locator);
+        await using var ctx = _host.Open(_repo.Path);
+        var query = new GraphQuery { RefScope = GraphRefScope.AllRefs };
+        await svc.ComputeLayoutAsync(ctx, query);
+        PrimeWalkCacheReadEntry(svc, ctx.RepositoryPath, query);
+
+        svc.Forget(ctx);
+
+        Assert.False(HasCacheEntry(svc, ctx));
+        Assert.Null(WalkCacheReadEntry(svc, ctx.RepositoryPath));
+    }
+
+    [Fact]
+    public async Task Recompute_keeps_the_walk_cache_read_entry_for_its_own_walk()
+    {
+        await _host.Settings.UpdateAsync(s => s with { GraphMetadataFromDisk = false });
+        var svc = new GraphLayoutService(_host.Settings, _host.Locator);
+        await using var ctx = _host.Open(_repo.Path);
+        var query = new GraphQuery { RefScope = GraphRefScope.AllRefs };
+        var previous = await svc.ComputeLayoutAsync(ctx, query);
+        PrimeWalkCacheReadEntry(svc, ctx.RepositoryPath, query);
+        var entry = WalkCacheReadEntry(svc, ctx.RepositoryPath);
+
+        await svc.RecomputeAsync(ctx, query, previous, InvalidationReason.HistoryRewritten);
+
+        // The entry is the object the primed read created: a recompute that evicted it would have
+        // replaced it with a fresh read.
+        Assert.Same(entry, WalkCacheReadEntry(svc, ctx.RepositoryPath));
+    }
+
     [Fact]
     public async Task Hibernate_on_a_context_with_no_cache_is_a_no_op()
     {
