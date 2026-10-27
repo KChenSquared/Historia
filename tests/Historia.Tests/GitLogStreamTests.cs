@@ -415,3 +415,56 @@ public sealed class GitLogStreamProcessTests : IAsyncDisposable
         Assert.Contains("git log exited", stream.FailureReason);
     }
 }
+
+/// <summary>
+/// Disposing a running <see cref="GitLogStream"/> must leave no live git process, even when the
+/// shared <see cref="ProcessKiller"/> thread is busy. Serial: the test floods that one process-wide
+/// thread with kills, which would delay every other test's kills if it ran alongside them.
+/// </summary>
+[Trait("tier", "git")]
+[Collection("serial")]
+public sealed class GitLogStreamDisposeKillTests
+{
+    [WindowsFact]
+    public async Task Dispose_of_a_running_stream_kills_git_even_when_the_killer_is_backed_up()
+    {
+        var locator = new GitExecutableLocator();
+        await locator.ResolveAsync(null);
+        if (!locator.Current.Found)
+            return;
+
+        // Enough output to fill the stdout pipe, so git is alive and blocked on it.
+        using var big = TestRepositoryBuilder.FromTemplate("git-log-stream-priority", b => b.LinearHistory(3_000));
+        var stream = GitLogStream.TryStart(locator, big.Path, [big.HeadSha]);
+        Assert.NotNull(stream);
+        Assert.True(stream.MoveNext());
+        using var git = Process.GetProcessById(stream.ProcessIdForTesting);
+        Assert.False(git.HasExited);
+
+        // Queue a pile of other kills ahead of the stream's, so its kill reaches the killer thread
+        // late — disposing the Process before that kill runs would leave git running.
+        var decoys = Enumerable.Range(0, 60).Select(_ => Process.Start(new ProcessStartInfo(
+            "ping.exe", ["-n", "120", "127.0.0.1"])
+        { CreateNoWindow = true, UseShellExecute = false })!).ToList();
+        var decoyKills = new List<Task>();
+        try
+        {
+            foreach (var decoy in decoys)
+                decoyKills.Add(ProcessKiller.KillAsync(decoy));
+
+            stream.Dispose();
+
+            Assert.True(git.WaitForExit(15_000), "git was still running after the stream was disposed");
+        }
+        finally
+        {
+            // Leave the shared killer idle for whatever test runs next.
+            await Task.WhenAll(decoyKills).WaitAsync(TimeSpan.FromSeconds(60));
+            foreach (var decoy in decoys)
+            {
+                try { if (!decoy.HasExited) decoy.Kill(); } catch { /* best effort */ }
+                decoy.Dispose();
+            }
+        }
+    }
+}

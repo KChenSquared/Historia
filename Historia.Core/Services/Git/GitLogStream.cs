@@ -219,6 +219,9 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
         catch { return null; }
     }
 
+    /// <summary>Test seam: the id of the git process, or -1 when it could not be read.</summary>
+    internal int ProcessIdForTesting => _processId;
+
     /// <summary>Test seam: streams started for <paramref name="repositoryPath"/> and not yet
     /// disposed.</summary>
     internal static int LiveCountForTesting(string repositoryPath) =>
@@ -349,16 +352,32 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
 
     public void Reset() => throw new NotSupportedException("GitLogStream is a forward-only, one-shot enumerator.");
 
+    private static void DisposeProcess(Process process)
+    {
+        try { process.Dispose(); } catch { /* best effort */ }
+    }
+
     public void Dispose()
     {
         if (_disposed)
             return;
         _disposed = true;
         Undisposed.TryRemove(_processId, out _);
-        GitCliProcessSetup.TryKill(_process);
+
+        // The kill runs on ProcessKiller's thread, and a disposed Process can no longer be killed:
+        // wait for the kill to be attempted before disposing. The wait is bounded so a backed-up
+        // killer never stalls a caller; a kill still pending after it disposes the process itself.
+        var killed = ProcessKiller.KillAsync(_process);
+        try { killed.Wait(1_000); } catch { /* best effort */ }
         try { _stderrDrain.Wait(1_000); } catch { /* best effort */ }
         try { _stdinWriter?.Join(1_000); } catch { /* best effort */ }
-        try { _process.Dispose(); } catch { /* best effort */ }
+
+        if (killed.IsCompleted)
+            DisposeProcess(_process);
+        else
+            _ = killed.ContinueWith(static (_, state) => DisposeProcess((Process)state!), _process,
+                CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+
         _reader.Dispose();
     }
 }
