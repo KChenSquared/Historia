@@ -202,10 +202,7 @@ public partial class MainWindow : Window
 
             var (left, _, right) = ResolveColumns(total);
             var scale = RenderScaling > 0 ? RenderScaling : 1;
-            left = LayoutHelper.RoundLayoutValue(left, scale);
-            right = LayoutHelper.RoundLayoutValue(right, scale);
-            if (left + right > total)
-                right = Math.Floor((total - left) * scale) / scale;
+            (left, right) = BodyColumnLayout.RoundColumns(total, left, right, scale);
 
             PinColumn(LeftCol, left);
             PinColumn(RightCol, right);

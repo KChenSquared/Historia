@@ -98,7 +98,9 @@ internal sealed partial class ShortcutsBarView : UserControl, IDisposable
             visible++;
         }
 
-        return visible > 1 ? width + group.Spacing * (visible - 1) : width;
+        if (visible > 1)
+            width += group.Spacing * (visible - 1);
+        return visible > 0 ? width + group.Margin.Left + group.Margin.Right : width;
     }
 
     private static ShortcutsBarViewModel CreateViewModel(IServiceProvider? sp) => new(

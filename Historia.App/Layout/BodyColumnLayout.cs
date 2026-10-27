@@ -66,5 +66,27 @@ public static class BodyColumnLayout
         return (left, centre, right);
     }
 
+    /// <summary>
+    /// Rounds the pinned side-column widths to the device pixel grid at <paramref name="scale"/> so
+    /// that together they never exceed <paramref name="total"/>. Rounding can push the left column
+    /// past the total and the right column over what is left; the left width is capped at the last
+    /// whole pixel inside the total and the right width is shaved to whole pixels. The shave carries
+    /// a small epsilon so float error (for example 924 * 1.25 - 667.2 * 1.25) does not cost a pixel.
+    /// Both widths are finite and non-negative.
+    /// </summary>
+    internal static (double Left, double Right) RoundColumns(double total, double left, double right, double scale)
+    {
+        total = Sanitize(total);
+        scale = double.IsFinite(scale) && scale > 0 ? scale : 1;
+
+        var roundedLeft = LayoutHelper.RoundLayoutValue(Sanitize(left), scale);
+        var roundedRight = LayoutHelper.RoundLayoutValue(Sanitize(right), scale);
+        roundedLeft = Math.Min(roundedLeft, Math.Floor(total * scale + 1e-9) / scale);
+        if (roundedLeft + roundedRight > total)
+            roundedRight = Math.Floor((total - roundedLeft) * scale + 1e-6) / scale;
+
+        return (Math.Max(0, roundedLeft), Math.Max(0, roundedRight));
+    }
+
     private static double Sanitize(double value) => double.IsFinite(value) && value > 0 ? value : 0;
 }

@@ -145,7 +145,8 @@ public class LayoutRecoveryTests
             rig.Pump();
         }
 
-        Assert.True(rig.RecoveryPasses <= LayoutRecovery.MaxRecoveriesPerWindow);
+        Assert.Equal(1, rig.RecoveryPasses);
+        Assert.Equal(1, rig.Unhandled);
     }
 
     [AvaloniaFact]
@@ -167,7 +168,7 @@ public class LayoutRecoveryTests
 
         Assert.Equal(before + LayoutRecovery.MaxRecoveriesPerWindow, rig.RecoveryPasses);
 
-        rig.Now = LayoutRecovery.Window;
+        rig.Now = LayoutRecovery.CapWindow;
         recovery.OnDispatcherException();
         rig.Pump();
 
