@@ -55,6 +55,13 @@ public interface IGitGateway
     Task DiscardAsync(IReadOnlyList<string> paths, CancellationToken ct = default);
     Task<GitObjectId> CommitAsync(CommitRequest request, CancellationToken ct = default);
 
+    /// <summary>Refreshes the index's cached stat data (<c>update-index --refresh</c>) so a later
+    /// status does not re-hash files whose timestamps changed but whose content did not. Never
+    /// changes staged content, unmerged entries or the reported modifications. Skipped while
+    /// <c>index.lock</c> exists or a merge, rebase, cherry-pick, revert or bisect is in progress. The default
+    /// does nothing.</summary>
+    Task RefreshIndexStatAsync(CancellationToken ct = default) => Task.CompletedTask;
+
     /// <summary>Merges <paramref name="refish"/> into the current branch (CLI-routed). Conflicts surface as <see cref="Models.GitErrorKind.MergeConflict"/>.</summary>
     Task MergeAsync(string refish, bool noFastForward, CancellationToken ct = default);
 

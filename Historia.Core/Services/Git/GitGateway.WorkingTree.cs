@@ -420,6 +420,51 @@ public sealed partial class GitGateway
     }
 
     /// <summary>
+    /// Rewrites the index's cached stat data for files whose timestamps changed but whose content
+    /// did not, so the next status stops re-hashing them. <c>update-index --refresh</c> only
+    /// re-stats and re-hashes: an entry whose content differs from its blob is left as it is, and
+    /// an unmerged entry is skipped. It still writes <c>index</c>, so it runs as one of
+    /// Historia's own operations inside the write lock, at background priority, and is never
+    /// killed once started. It does nothing while another process holds <c>index.lock</c> or while
+    /// a merge, rebase, cherry-pick, revert or bisect is under way.
+    /// </summary>
+    public async Task RefreshIndexStatAsync(CancellationToken ct = default)
+    {
+        if (context.IsBare || !IsIndexStatRefreshSafe())
+            return;
+
+        using var _ = context.BeginSelfOperation();
+
+        await context.WithWriteLockAsync(async innerCt =>
+        {
+            if (!IsIndexStatRefreshSafe())
+                return;
+
+            var result = await cli.RunAsync(new GitCliRequest
+            {
+                Arguments = ["update-index", "-q", "--refresh"],
+                WorkingDirectory = context.RepositoryPath,
+                Priority = GitCliPriority.Background,
+                // No wall clock: a writer killed mid-way leaves index.lock behind.
+                Timeout = Timeout.InfiniteTimeSpan,
+                CancelPolicy = GitCliCancelPolicy.NeverAfterStart,
+            }, innerCt).ConfigureAwait(false);
+
+            // Exit 1 reports unmerged entries ("needs merge"), which refresh leaves as they are.
+            if (result.IsSuccess || result.ExitCode == 1 || result.ErrorKind == GitErrorKind.LockedIndex)
+                return;
+            if (result.ErrorKind == GitErrorKind.Cancelled)
+                innerCt.ThrowIfCancellationRequested();
+
+            throw HistoriaGitException.FromCli(result, "Refresh index");
+        }, ct).ConfigureAwait(false);
+    }
+
+    private bool IsIndexStatRefreshSafe() =>
+        !File.Exists(Path.Combine(context.GitDirectory, "index.lock"))
+        && Historia.Services.State.RepositoryStateService.DetectOperationState(context.GitDirectory) == OperationState.None;
+
+    /// <summary>
     /// Runs an idempotent index writer, retrying while another git process holds
     /// <c>index.lock</c>: the lock is usually a status refresh or a fetch that finishes within a
     /// second. The lock file is never removed here; when the retries run out the locked result is

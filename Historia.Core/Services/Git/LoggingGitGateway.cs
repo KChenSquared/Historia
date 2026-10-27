@@ -105,6 +105,9 @@ public sealed class LoggingGitGateway(IGitGateway inner, string repositoryPath) 
     public Task UnstageAsync(IReadOnlyList<string> paths, CancellationToken ct = default)
         => Run($"UnstageAsync({paths.Count} path(s))", () => inner.UnstageAsync(paths, ct));
 
+    public Task RefreshIndexStatAsync(CancellationToken ct = default)
+        => Run("RefreshIndexStatAsync()", () => inner.RefreshIndexStatAsync(ct));
+
     public Task DiscardAsync(IReadOnlyList<string> paths, CancellationToken ct = default)
         => Run($"DiscardAsync({paths.Count} path(s))", () => inner.DiscardAsync(paths, ct));
 

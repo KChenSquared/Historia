@@ -32,6 +32,13 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
     private TimeSpan _lastStatusDuration;
     private DateTimeOffset? _lastStatusCompletedAt;
 
+    // A status slower than this means many index entries carry stale stat data; refreshing them
+    // lets the next status skip the hashing. At most one refresh per interval, none while one runs.
+    private static readonly TimeSpan SlowStatusThreshold = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan IndexStatRefreshInterval = TimeSpan.FromSeconds(60);
+    private long? _lastIndexStatRefreshAt;
+    private Task _indexStatRefresh = Task.CompletedTask;
+
     private RepositoryInfo _repository;
     private RepositoryStatus _status = RepositoryStatus.Empty;
     private IReadOnlyList<BranchInfo> _branches = [];
@@ -344,6 +351,7 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
         }
 
         QueueStatusRaise(status, info, operation);
+        RefreshIndexStatIfSlow(statusDuration);
 
         if (conflictSessionFlipped)
             HandleConflictSessionFlipped(nowActive, closedCleared);
@@ -355,6 +363,43 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
 
         if (operationChanged)
             Raise(() => OperationStateChanged?.Invoke(this, new OperationStateChangedEventArgs(operation)));
+    }
+
+    /// <summary>The most recent index stat refresh this service started; completed when none is running.</summary>
+    internal Task IndexStatRefreshTask { get { lock (_sync) return _indexStatRefresh; } }
+
+    private void RefreshIndexStatIfSlow(TimeSpan statusDuration)
+    {
+        if (statusDuration <= SlowStatusThreshold || _disposed)
+            return;
+
+        lock (_sync)
+        {
+            var now = _time.GetTimestamp();
+            if (!_indexStatRefresh.IsCompleted ||
+                (_lastIndexStatRefreshAt is { } last && _time.GetElapsedTime(last, now) < IndexStatRefreshInterval))
+                return;
+
+            _lastIndexStatRefreshAt = now;
+            _indexStatRefresh = Task.Run(RunIndexStatRefreshAsync);
+        }
+    }
+
+    // Best effort: the refresh only speeds up later statuses, so a failure is logged and nothing else.
+    private async Task RunIndexStatRefreshAsync()
+    {
+        try
+        {
+            await _gateway.RefreshIndexStatAsync(_context.Lifetime).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Tab closed before the refresh started.
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write(AppLogLevel.Warn, "git", $"{_context.DisplayName}: index stat refresh failed: {ex.Message}");
+        }
     }
 
     /// <summary>
