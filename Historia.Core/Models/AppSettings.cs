@@ -146,6 +146,10 @@ public sealed record AppSettings
     public bool PruneOnFetch { get; init; } = true;
     public bool PullWithRebase { get; init; }
 
+    /// <summary>When on (the default), a pull is followed by a fetch of every branch and tag so the
+    /// remote-tracking refs match the remote. A settings file without the field reads as on.</summary>
+    public bool FetchAfterPull { get; init; } = true;
+
     /// <summary>When on, the "Stash all" buttons (staging panel + shortcuts bar) prompt
     /// for a stash message instead of using the default <c>Stash of &lt;branch&gt;</c>.</summary>
     public bool UseCustomStashNames { get; init; }

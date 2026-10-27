@@ -55,6 +55,39 @@ public class SettingsServiceTests : IDisposable
     }
 
     [Fact]
+    public void Fetch_after_pull_defaults_to_on()
+    {
+        Assert.True(new AppSettings().FetchAfterPull);
+        Assert.True(SettingsService.Load().Current.FetchAfterPull);
+    }
+
+    [Fact]
+    public void A_settings_file_without_fetchAfterPull_reads_it_as_on()
+    {
+        File.WriteAllText(AppPaths.SettingsFile, "{ \"schemaVersion\": 24, \"pullWithRebase\": true }");
+
+        var settings = SettingsService.Load().Current;
+
+        Assert.True(settings.PullWithRebase);
+        Assert.True(settings.FetchAfterPull);
+    }
+
+    [Fact]
+    public async Task Fetch_after_pull_round_trips()
+    {
+        var svc = SettingsService.Load();
+        await svc.UpdateAsync(s => s with { FetchAfterPull = false });
+        await svc.FlushAsync();
+
+        Assert.False(SettingsService.Load().Current.FetchAfterPull);
+
+        await svc.UpdateAsync(s => s with { FetchAfterPull = true });
+        await svc.FlushAsync();
+
+        Assert.True(SettingsService.Load().Current.FetchAfterPull);
+    }
+
+    [Fact]
     public async Task Load_ignores_removed_commitDetailFontSize_key()
     {
         File.WriteAllText(AppPaths.SettingsFile, "{ \"schemaVersion\": 18, \"appTheme\": \"dark\", \"commitDetailFontSize\": 20, \"diffContextLines\": 8 }");

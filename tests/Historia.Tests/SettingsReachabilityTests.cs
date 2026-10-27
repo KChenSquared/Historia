@@ -60,6 +60,20 @@ public class SettingsReachabilityTests
         }
     }
 
+    [Fact]
+    public void Fetch_after_pull_is_a_toggle_in_the_Git_section_of_the_settings_page()
+    {
+        var markup = File.ReadAllText(Path.Combine(RepoRoot(), "Historia.App", "Views", "SettingsView.axaml"));
+        var start = markup.IndexOf("<!-- Git -->", StringComparison.Ordinal);
+        var end = markup.IndexOf("<!-- Terminal -->", StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start, "The Git and Terminal section markers moved.");
+
+        var gitSection = markup[start..end];
+
+        Assert.Contains("IsChecked=\"{Binding FetchAfterPull}\"", gitSection);
+        Assert.Contains("IsChecked=\"{Binding PruneOnFetch}\"", gitSection);
+    }
+
     [Theory]
     [InlineData("private const double TabWidth = 186;", "TabWidth", false)]
     [InlineData("public enum TerminalBellStyle { None, Visual }", "TerminalBellStyle", false)]

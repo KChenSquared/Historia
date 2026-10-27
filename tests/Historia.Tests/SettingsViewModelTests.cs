@@ -163,6 +163,7 @@ public class SettingsViewModelTests
         nameof(AppSettings.DiffWordWrap),
         nameof(AppSettings.PruneOnFetch),
         nameof(AppSettings.PullWithRebase),
+        nameof(AppSettings.FetchAfterPull),
         nameof(AppSettings.RestoreSessionTabs),
         nameof(AppSettings.UseCustomStashNames),
         nameof(AppSettings.TerminalKittyKeyboard),
@@ -335,6 +336,17 @@ public class SettingsViewModelTests
         ui.DrainPosted();
         Assert.Equal(rig.Settings.Current.LoggingEnabled, rig.Vm.LoggingEnabled);
         Assert.Equal(12, rig.Vm.DiffContextLines.Value);
+    }
+
+    [Fact]
+    public void Fetch_after_pull_starts_on_and_follows_the_setting()
+    {
+        using var rig = new Rig();
+        Assert.True(rig.Vm.FetchAfterPull);
+
+        rig.Settings.UpdateAsync(s => s with { FetchAfterPull = false });
+
+        Assert.False(rig.Vm.FetchAfterPull);
     }
 
     [Fact]
