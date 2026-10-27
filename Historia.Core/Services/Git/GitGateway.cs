@@ -321,6 +321,8 @@ public sealed partial class GitGateway(
 
     public async Task FetchAsync(string remote, GitFetchOptions options, IProgress<GitProgress>? progress, CancellationToken ct = default)
     {
+        await LeaveUiThreadAsync().ConfigureAwait(false);
+
         if (options.All)
         {
             // Fetch every remote individually rather than a single untargeted "git fetch --all":
@@ -444,7 +446,30 @@ public sealed partial class GitGateway(
 
     // SSH connect timeout for a routing attempt so an SSH-unreachable host (port 22
     // blocked) fails fast instead of stalling on the OS TCP timeout before the fallback.
-    private const int SshConnectTimeoutSeconds = 10;
+    private const int SshConnectTimeoutSeconds = 20;
+
+    // Appended to the ssh command of a background fetch: no prompt of any kind (an unknown host
+    // key fails rather than being asked about or accepted), and a dead connection is dropped
+    // after 4 missed 15 s keepalives.
+    private const string BackgroundSshOptions = " -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4";
+
+    // Prefixed to a background fetch: no housekeeping repack or maintenance run from a fetch
+    // nobody is watching, and an HTTP transfer below 1000 B/s for 60 s is abandoned.
+    private static readonly string[] BackgroundGitConfig =
+    [
+        "-c", "gc.auto=0",
+        "-c", "maintenance.auto=false",
+        "-c", "http.lowSpeedLimit=1000",
+        "-c", "http.lowSpeedTime=60",
+    ];
+
+    /// <summary>Moves the rest of a method off a UI thread. Task.Yield would post straight back
+    /// to the UI context's queue; ForceYielding schedules the continuation on the thread pool.</summary>
+    private static async ValueTask LeaveUiThreadAsync()
+    {
+        if (SynchronizationContext.Current is not null)
+            await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+    }
 
     /// <summary>One failed transport attempt, kept so the surfaced error can name every
     /// attempt in its Details.</summary>
@@ -458,7 +483,10 @@ public sealed partial class GitGateway(
     /// surfaced error is the one from an attempt that reached the remote, else the primary
     /// attempt's; its Details carry each attempt's text under a transport-and-URL header.
     /// An HTTPS fallback from an SSH URL whose host is an <c>~/.ssh/config</c> alias retries
-    /// against the alias's real host name — except on a background fetch, which stops after SSH.
+    /// against the alias's real host name.
+    /// A <paramref name="background"/> fetch tries only the configured transport — no fallback in
+    /// either direction — never prompts (<c>GCM_INTERACTIVE=never</c>, SSH <c>BatchMode</c>),
+    /// gives up on a stalled connection, skips housekeeping and runs at background priority.
     /// When git's own URL configuration sends that fallback to an SSH URL, it runs with the SSH
     /// environment, or not at all when that URL is the one the SSH attempt already tried.
     /// </summary>
@@ -466,6 +494,8 @@ public sealed partial class GitGateway(
         IReadOnlyList<string> args, string operation, string? remote,
         IProgress<GitProgress>? progress, CancellationToken ct, bool background = false)
     {
+        await LeaveUiThreadAsync().ConfigureAwait(false);
+
         string? remoteUrl = null;
         if (remote is not null)
         {
@@ -476,6 +506,11 @@ public sealed partial class GitGateway(
         var urlKind = remoteUrl is null ? RemoteUrlKind.LocalOrOther : RemoteUrlConverter.Classify(remoteUrl);
         var sshOnly = repoLayout.Get(context.RepositoryPath).SshOnly;
         var plan = GitTransportRouting.Plan(urlKind, sshOnly);
+        if (background)
+        {
+            plan = plan.Take(1).ToList();
+            args = [.. BackgroundGitConfig, .. args];
+        }
 
         using var _ = context.BeginSelfOperation();
 
@@ -505,15 +540,6 @@ public sealed partial class GitGateway(
                 var alias = await ResolveSshAliasAsync(effectiveUrl!, ct).ConfigureAwait(false);
                 if (alias is { } a)
                 {
-                    // Git Credential Manager may open a sign-in window for the real host, and a
-                    // background fetch has nobody at the keyboard to answer it.
-                    if (background)
-                    {
-                        AppLog.Write(AppLogLevel.Info, "network",
-                            $"HTTPS fallback skipped for SSH alias '{a.Alias}' on a background fetch");
-                        continue;
-                    }
-
                     effectiveUrl = a.HttpsUrl;
                     note = $"Retried over HTTPS as {a.HostName} using the profile token or Git's credential helper — "
                         + "this may be a different account than the SSH alias selects. Turn on SSH Only to prevent this.";
@@ -559,9 +585,17 @@ public sealed partial class GitGateway(
             var env = envTransport switch
             {
                 RouteTransport.Https => await BuildCredentialEnvAsync(displayUrl ?? effectiveUrl, ct).ConfigureAwait(false),
-                RouteTransport.Ssh => SshEnv(),
+                RouteTransport.Ssh => SshEnv(background),
                 _ => null, // AsIs — defer entirely to Git's own transport / credential resolution.
             };
+            if (background)
+            {
+                // Stored credentials still work; only the interactive sign-in window is off.
+                env = new Dictionary<string, string>(env ?? ReadOnlyDictionary<string, string>.Empty)
+                {
+                    ["GCM_INTERACTIVE"] = "never",
+                };
+            }
 
             var result = await cli.RunAsync(new GitCliRequest
             {
@@ -570,6 +604,7 @@ public sealed partial class GitGateway(
                 Timeout = Timeout.InfiniteTimeSpan, // Network ops are user-cancellable, not wall-clocked.
                 StreamOutput = true,
                 ExtraEnvironment = env,
+                Priority = background ? GitCliPriority.BackgroundNetwork : GitCliPriority.Normal,
             }, progress, onStdoutLine: null, ct).ConfigureAwait(false);
 
             if (result.ErrorKind == GitErrorKind.Cancelled)
@@ -676,7 +711,7 @@ public sealed partial class GitGateway(
         return expanded.Length == 0 ? null : expanded;
     }
 
-    private IReadOnlyDictionary<string, string> SshEnv()
+    private IReadOnlyDictionary<string, string> SshEnv(bool background)
     {
         var cmd = $"ssh -o ConnectTimeout={SshConnectTimeoutSeconds}";
         var env = new Dictionary<string, string>();
@@ -685,7 +720,7 @@ public sealed partial class GitGateway(
             env["HISTORIA_SSH_KEY"] = key;
             cmd = $"ssh -i \"$HISTORIA_SSH_KEY\" -o IdentitiesOnly=yes -o ConnectTimeout={SshConnectTimeoutSeconds}";
         }
-        env["GIT_SSH_COMMAND"] = cmd;
+        env["GIT_SSH_COMMAND"] = background ? cmd + BackgroundSshOptions : cmd;
         return env;
     }
 

@@ -54,6 +54,33 @@ public sealed class SshHostResolverTests : IDisposable
         Assert.Equal(1, resolver.ProcessLaunches);
     }
 
+    [Fact]
+    public async Task A_timed_out_lookup_is_asked_again_on_the_next_call()
+    {
+        var calls = 0;
+        var resolver = new SshHostResolver((_, _) =>
+            Task.FromResult(++calls == 1 ? new SshHostResolver.Lookup(null, false) : new SshHostResolver.Lookup("example.invalid", true)));
+
+        Assert.Null(await resolver.ResolveHostNameAsync("alias-x", CancellationToken.None));
+        Assert.Equal("example.invalid", await resolver.ResolveHostNameAsync("alias-x", CancellationToken.None));
+        Assert.Equal(2, calls);
+    }
+
+    [Fact]
+    public async Task A_definite_lookup_is_cached_even_when_it_found_nothing()
+    {
+        var calls = 0;
+        var resolver = new SshHostResolver((_, _) =>
+        {
+            calls++;
+            return Task.FromResult(new SshHostResolver.Lookup(null, true));
+        });
+
+        Assert.Null(await resolver.ResolveHostNameAsync("alias-x", CancellationToken.None));
+        Assert.Null(await resolver.ResolveHostNameAsync("alias-x", CancellationToken.None));
+        Assert.Equal(1, calls);
+    }
+
     [Theory]
     [InlineData("-oProxyCommand=calc")]
     [InlineData("")]
