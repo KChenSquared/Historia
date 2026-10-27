@@ -45,6 +45,8 @@ public sealed partial class DiffViewModel : ViewModelBase
     private readonly INotificationService? _notifications;
     private readonly IUiDispatcher _ui;
     private readonly CancellationTokenSource _loadingCts = new();
+    private readonly CancellationTokenSource _readCts;
+    private readonly CancellationToken _readToken;
     private bool _patchInFlight;
     private bool _focusLinePending;
     private int _focusLineAttempts;
@@ -70,6 +72,8 @@ public sealed partial class DiffViewModel : ViewModelBase
         IsSideBySide = settings?.Current.DefaultDiffView == DiffViewMode.SideBySide;
         WordWrap = settings?.Current.DiffWordWrap ?? false;
         _focusLinePending = request.FocusLine is > 0;
+        _readCts = CancellationTokenSource.CreateLinkedTokenSource(ctx.Lifetime);
+        _readToken = _readCts.Token;
 
         _ = LoadAsync();
     }
@@ -168,7 +172,9 @@ public sealed partial class DiffViewModel : ViewModelBase
     }
 
     // Reads the diff, builds the display model off the UI thread, and publishes. "Loading diff..."
-    // appears only when the read outlasts LoadingDelay.
+    // appears only when the read outlasts LoadingDelay. The read stops when the view model is
+    // disposed; the staging steps below keep running on the repository's lifetime so a git write is
+    // never cut short.
     private async Task LoadAsync()
     {
         var token = _loadingCts.Token;
@@ -188,7 +194,7 @@ public sealed partial class DiffViewModel : ViewModelBase
 
         try
         {
-            var diff = await _ctx.Gateway.GetFileDiffAsync(Request, _ctx.Lifetime);
+            var diff = await _ctx.Gateway.GetFileDiffAsync(Request, _readToken);
             if (IsDisposed)
                 return;
 
@@ -344,7 +350,7 @@ public sealed partial class DiffViewModel : ViewModelBase
             if (IsDisposed)
                 return;
 
-            var diff = await _ctx.Gateway.GetFileDiffAsync(Request, _ctx.Lifetime);
+            var diff = await _ctx.Gateway.GetFileDiffAsync(Request, _readToken);
             if (IsDisposed)
                 return;
 
@@ -376,5 +382,7 @@ public sealed partial class DiffViewModel : ViewModelBase
     {
         _loadingCts.Cancel();
         _loadingCts.Dispose();
+        _readCts.Cancel();
+        _readCts.Dispose();
     }
 }

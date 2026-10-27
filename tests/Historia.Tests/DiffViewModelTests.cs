@@ -13,6 +13,7 @@ public sealed class DiffViewModelTests : IAsyncDisposable
     private readonly FakePatchService _patches = new();
     private readonly FakeNotificationService _notifications = new();
     private readonly List<DiffViewModel> _created = [];
+    private DiffViewModel? _probe;
     private readonly List<(MiniHost Host, RepositoryContext Ctx)> _gated = [];
 
     public DiffViewModelTests()
@@ -540,6 +541,80 @@ public sealed class DiffViewModelTests : IAsyncDisposable
         cli.Release.SetResult();
     }
 
+    [Fact]
+    public async Task Disposing_during_a_blocked_read_cancels_the_git_read()
+    {
+        var (ctx, cli) = OpenGated();
+        var vm = new DiffViewModel(ctx, Unstaged, new ImmediateUiDispatcher(), new FakeSettingsService(), _patches, _notifications);
+        await cli.Entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.False(cli.CancelObserved.Task.IsCompleted);
+
+        vm.Dispose();
+
+        await cli.CancelObserved.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.True(vm.IsDisposed);
+        Assert.Null(vm.Diff);
+        Assert.Null(vm.Message);
+    }
+
+    [Fact]
+    public async Task A_disposed_view_model_is_collectable_once_its_read_is_cancelled()
+    {
+        var (ctx, cli) = OpenGated();
+        var weak = StartProbe(ctx);
+        await cli.Entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        DisposeProbe();
+
+        // A loaded machine can delay finalization, so poll with a generous deadline.
+        var deadline = DateTime.UtcNow.AddSeconds(60);
+        while (weak.IsAlive && DateTime.UtcNow < deadline)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            await Task.Delay(50);
+        }
+
+        Assert.False(weak.IsAlive, "the disposed diff view model is still reachable");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private WeakReference StartProbe(RepositoryContext ctx)
+    {
+        _probe = new DiffViewModel(ctx, Unstaged, new ImmediateUiDispatcher(), new FakeSettingsService(), _patches, _notifications);
+        return new WeakReference(_probe);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void DisposeProbe()
+    {
+        _probe!.Dispose();
+        _probe = null;
+    }
+
+    [Fact]
+    public async Task Staging_runs_on_the_repository_lifetime_and_dispose_does_not_cancel_it()
+    {
+        var vm = await Loaded(Create());
+        var gate = new TaskCompletionSource<bool>();
+        _patches.CheckGate = gate;
+
+        var apply = vm.ApplyHunkAsync(0);
+        vm.Dispose();
+
+        Assert.Equal(_ctx.Lifetime, _patches.LastCheckToken);
+        Assert.False(_patches.LastCheckToken.IsCancellationRequested);
+        gate.SetResult(true);
+        await apply;
+
+        _patches.CheckGate = null;
+        var second = await Loaded(Create());
+        await second.ApplyHunkAsync(0);
+
+        Assert.Equal(_ctx.Lifetime, _patches.LastApplyToken);
+        Assert.False(_patches.LastApplyToken.IsCancellationRequested);
+    }
+
     private sealed class FakePatchService : IPatchService
     {
         public PatchScope LastScope { get; private set; }
@@ -553,6 +628,8 @@ public sealed class DiffViewModelTests : IAsyncDisposable
         public Exception? ThrowOnApply { get; set; }
         public PatchCheckResult CheckResult { get; set; } = new(true, null);
         public TaskCompletionSource<bool>? CheckGate { get; set; }
+        public CancellationToken LastCheckToken { get; private set; }
+        public CancellationToken LastApplyToken { get; private set; }
 
         public string GeneratePatch(FileDiff source, PatchScope scope, IReadOnlySet<DiffLineRef>? selectedLines = null, bool reverse = false)
         {
@@ -568,6 +645,7 @@ public sealed class DiffViewModelTests : IAsyncDisposable
 
         public async Task<PatchCheckResult> CheckAsync(RepositoryContext context, string patch, PatchTarget target, bool reverse, CancellationToken ct = default)
         {
+            LastCheckToken = ct;
             if (CheckGate is { } gate)
                 await gate.Task;
             return CheckResult;
@@ -575,6 +653,7 @@ public sealed class DiffViewModelTests : IAsyncDisposable
 
         public Task ApplyPatchAsync(RepositoryContext context, string patch, PatchTarget target, bool reverse, CancellationToken ct = default)
         {
+            LastApplyToken = ct;
             if (ThrowOnApply is not null)
                 throw ThrowOnApply;
 
