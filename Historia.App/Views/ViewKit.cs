@@ -37,6 +37,14 @@ internal static class ViewKit
         }
     }
 
+    // Each emblem is decoded once and shared by every image that shows it (a bitmap is immutable
+    // and not tied to a theme variant, so the cache is keyed by the variant the file belongs to).
+    private static readonly Lazy<Avalonia.Media.Imaging.Bitmap?> LightMark = new(() => LoadMark("light"));
+    private static readonly Lazy<Avalonia.Media.Imaging.Bitmap?> DarkMark = new(() => LoadMark("dark"));
+
+    private static Avalonia.Media.Imaging.Bitmap? LoadMark(string variant)
+        => Asset($"historia-mark-{variant}@2x.png") ?? Asset($"historia-mark-{variant}.png");
+
     /// <summary>
     /// Points <paramref name="img"/> at the Historia ship emblem for the current theme — the
     /// maroon <c>historia-mark-light</c> in Light mode, the copper <c>historia-mark-dark</c> in Dark
@@ -48,8 +56,7 @@ internal static class ViewKit
         void Apply()
         {
             var light = theme.Effective == Historia.Models.EffectiveTheme.Light;
-            img.Source = (light ? Asset("historia-mark-light@2x.png") : Asset("historia-mark-dark@2x.png"))
-                         ?? (light ? Asset("historia-mark-light.png") : Asset("historia-mark-dark.png"));
+            img.Source = light ? LightMark.Value : DarkMark.Value;
         }
 
         EventHandler<Historia.Services.Theming.ThemeChangedEventArgs> onChanged =
@@ -63,8 +70,7 @@ internal static class ViewKit
         };
         img.DetachedFromVisualTree += (_, _) => theme.ThemeChanged -= onChanged;
 
-        theme.ThemeChanged += onChanged;       // covers the window's first paint before the attach event
-        Apply();
+        Apply();                               // the first paint; the attach event re-applies and subscribes
         return img;
     }
 

@@ -71,6 +71,7 @@ public sealed class SshKeyService : ISshKeyService
                 "or generate the key yourself and point the profile at it.");
         }
 
+        using var owned = proc;
         await proc.WaitForExitAsync(ct).ConfigureAwait(false);
         if (proc.ExitCode != 0)
         {

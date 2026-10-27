@@ -452,7 +452,15 @@ public sealed class App : Application
     private void OnShutdownRequested(object? sender, ShutdownRequestedEventArgs e)
     {
         using var _ = Historia.Diagnostics.PerfLog.Scope("OnShutdownRequested settings flush");
-        try { _settings?.FlushAsync().GetAwaiter().GetResult(); } catch { /* best effort */ }
+        try
+        {
+            // The flush only does file I/O on thread-pool continuations, so waiting for it here
+            // cannot deadlock; the bound keeps a stuck disk or network share from freezing
+            // shutdown, and the flush carries on in the background.
+            if (_settings?.FlushAsync().Wait(TimeSpan.FromSeconds(2)) == false)
+                AppLog.Write(AppLogLevel.Warn, "app", "settings flush timed out during shutdown; continuing");
+        }
+        catch { /* best effort */ }
     }
 
     private void RegisterGlobalExceptionHandlers()
