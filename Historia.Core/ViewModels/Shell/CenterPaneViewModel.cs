@@ -168,7 +168,13 @@ public sealed partial class CenterPaneViewModel : ViewModelBase
 
     private void OnAiPanelChanged(object? sender, EventArgs e) => _ui.Post(Refresh);
 
-    private void OnStatusChanged(object? sender, StatusChangedEventArgs e) => _ui.Post(Refresh);
+    private void OnStatusChanged(object? sender, StatusChangedEventArgs e)
+    {
+        if (_ui.CheckAccess())
+            Refresh();
+        else
+            _ui.Post(Refresh);
+    }
 
     private void OnConflictSessionChanged(object? sender, EventArgs e) => _ui.Post(Refresh);
 
