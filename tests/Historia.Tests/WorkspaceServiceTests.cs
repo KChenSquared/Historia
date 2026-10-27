@@ -971,6 +971,47 @@ public class WorkspaceSubmoduleTabTests : WorkspaceServiceTestBase
         await ws.DisposeAsync();
     }
 
+    [Fact(Timeout = 60000)]
+    public async Task CloseAsync_updates_the_strip_and_focus_before_a_running_write_ends()
+    {
+        var ws = NewWorkspace();
+        using var r1 = Repo("a.txt");
+        using var r2 = Repo("b.txt");
+        var a = await ws.OpenAsync(r1.Path);
+        var b = await ws.OpenAsync(r2.Path);
+        ws.Focus(b);
+
+        var acquired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var write = Task.Run(() => b.WithWriteLockAsync(async _ =>
+        {
+            acquired.SetResult();
+            await release.Task;
+            return 1;
+        }));
+        await acquired.Task;
+
+        var stripUpdated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var focusMoved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        ws.OpenRepositoriesChanged += (_, _) => stripUpdated.TrySetResult();
+        ws.FocusedRepositoryChanged += (_, e) =>
+        {
+            if (ReferenceEquals(e.New, a))
+                focusMoved.TrySetResult();
+        };
+
+        var close = ws.CloseAsync(b);
+        await stripUpdated.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await focusMoved.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.False(close.IsCompleted, "close finished while a write still held the lock");
+        Assert.DoesNotContain(b, ws.OpenRepositories);
+
+        release.SetResult();
+        Assert.Equal(1, await write);
+        await close.WaitAsync(TimeSpan.FromSeconds(10));
+        await ws.DisposeAsync();
+    }
+
     [Fact(Timeout = 30000)]
     public async Task RestoreSessionAsync_reestablishes_link_groups_from_a_schemaVersion_3_file()
     {
