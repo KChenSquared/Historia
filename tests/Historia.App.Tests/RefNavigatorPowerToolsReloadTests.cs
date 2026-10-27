@@ -184,6 +184,27 @@ public sealed class RefNavigatorPowerToolsReloadTests
         return texts;
     }
 
+    private static async Task PumpUntilAsync(Func<bool> condition, string what)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+        while (!condition() && DateTime.UtcNow < deadline)
+        {
+            Dispatcher.UIThread.RunJobs();
+            await Task.Delay(20);
+        }
+        Dispatcher.UIThread.RunJobs();
+        Assert.True(condition(), $"Timed out waiting for {what}.");
+    }
+
+    private static async Task PumpBrieflyAsync()
+    {
+        for (var i = 0; i < 10; i++)
+        {
+            Dispatcher.UIThread.RunJobs();
+            await Task.Delay(20);
+        }
+    }
+
     [AvaloniaFact]
     public async Task First_load_waits_for_the_graph_first_paint()
     {
@@ -199,11 +220,7 @@ public sealed class RefNavigatorPowerToolsReloadTests
 
             setup.Context.MarkFirstGraphPaintDone();
 
-            for (var i = 0; i < 50 && setup.Counter.ListCount == 0; i++)
-            {
-                Dispatcher.UIThread.RunJobs();
-                await Task.Delay(20);
-            }
+            await PumpUntilAsync(() => setup.Counter.ListCount > 0, "the stash list");
             Assert.Equal(1, setup.Counter.ListCount);
         }
         finally
@@ -218,11 +235,7 @@ public sealed class RefNavigatorPowerToolsReloadTests
         var setup = CreateView(markPaintDone: true);
         try
         {
-            for (var i = 0; i < 50 && setup.Counter.ListCount == 0; i++)
-            {
-                Dispatcher.UIThread.RunJobs();
-                await Task.Delay(20);
-            }
+            await PumpUntilAsync(() => setup.Counter.ListCount > 0, "the stash list");
             Assert.Equal(1, setup.Counter.ListCount);
 
             var headers = GetSectionHeaders(setup.View);
@@ -231,15 +244,10 @@ public sealed class RefNavigatorPowerToolsReloadTests
             setup.Fixture.RunGit("tag", "v9");
             await setup.Context.State.RefreshRefsAsync();
 
-            for (var i = 0; i < 10; i++)
-            {
-                Dispatcher.UIThread.RunJobs();
-                await Task.Delay(20);
-            }
+            await PumpUntilAsync(() => GetRowTexts(GetSectionBody(setup.View, 2)).Any(t => t.Contains("v9")), "the new tag row");
+            await PumpBrieflyAsync();
 
             Assert.Equal(1, setup.Counter.ListCount);
-            var tagTexts = GetRowTexts(GetSectionBody(setup.View, 2));
-            Assert.Contains(tagTexts, t => t.Contains("v9"));
         }
         finally
         {
@@ -253,22 +261,15 @@ public sealed class RefNavigatorPowerToolsReloadTests
         var setup = CreateView(markPaintDone: true);
         try
         {
-            for (var i = 0; i < 50 && setup.Counter.ListCount == 0; i++)
-            {
-                Dispatcher.UIThread.RunJobs();
-                await Task.Delay(20);
-            }
+            await PumpUntilAsync(() => setup.Counter.ListCount > 0, "the stash list");
             Assert.Equal(1, setup.Counter.ListCount);
 
             setup.Fixture.RunGit("branch", "new-b");
             setup.Fixture.RunGit("tag", "v9");
             await setup.Context.State.RefreshRefsAsync();
 
-            for (var i = 0; i < 10; i++)
-            {
-                Dispatcher.UIThread.RunJobs();
-                await Task.Delay(20);
-            }
+            await PumpUntilAsync(() => GetRowTexts(GetSectionBody(setup.View, 0)).Any(t => t.Contains("new-b")), "the new branch row");
+            await PumpBrieflyAsync();
 
             Assert.Equal(1, setup.Counter.ListCount);
         }
@@ -284,11 +285,7 @@ public sealed class RefNavigatorPowerToolsReloadTests
         var setup = CreateView(markPaintDone: true);
         try
         {
-            for (var i = 0; i < 50 && setup.Counter.ListCount == 0; i++)
-            {
-                Dispatcher.UIThread.RunJobs();
-                await Task.Delay(20);
-            }
+            await PumpUntilAsync(() => setup.Counter.ListCount > 0, "the stash list");
             Assert.Equal(1, setup.Counter.ListCount);
 
             var headers = GetSectionHeaders(setup.View);
@@ -298,14 +295,9 @@ public sealed class RefNavigatorPowerToolsReloadTests
             setup.Fixture.RunGit("stash", "push", "-m", "ext-entry");
             await setup.Context.State.RefreshRefsAsync();
 
-            for (var i = 0; i < 100; i++)
-            {
-                Dispatcher.UIThread.RunJobs();
-                var currentRows = GetRowTexts(GetSectionBody(setup.View, 3));
-                if (setup.Counter.ListCount == 2 && currentRows.Any(t => t.Contains("ext-entry")))
-                    break;
-                await Task.Delay(20);
-            }
+            await PumpUntilAsync(
+                () => setup.Counter.ListCount == 2 && GetRowTexts(GetSectionBody(setup.View, 3)).Any(t => t.Contains("ext-entry")),
+                "the relisted stashes");
 
             Assert.Equal(2, setup.Counter.ListCount);
             var stashTexts = GetRowTexts(GetSectionBody(setup.View, 3));
@@ -324,11 +316,7 @@ public sealed class RefNavigatorPowerToolsReloadTests
         using var fixture2 = new TestRepoFixture();
         try
         {
-            for (var i = 0; i < 50 && setup.Counter.ListCount == 0; i++)
-            {
-                Dispatcher.UIThread.RunJobs();
-                await Task.Delay(20);
-            }
+            await PumpUntilAsync(() => setup.Counter.ListCount > 0, "the stash list");
             Assert.Equal(1, setup.Counter.ListCount);
 
             var ws = setup.Sp.GetRequiredService<IWorkspaceService>();
@@ -337,20 +325,12 @@ public sealed class RefNavigatorPowerToolsReloadTests
             ws.Focus(ctx2);
 
             // The counter sees every repo's lists: let the second repo's bind list land first.
-            for (var i = 0; i < 50 && setup.Counter.ListCount == 1; i++)
-            {
-                Dispatcher.UIThread.RunJobs();
-                await Task.Delay(20);
-            }
+            await PumpUntilAsync(() => setup.Counter.ListCount > 1, "the stash list");
             Assert.Equal(2, setup.Counter.ListCount);
 
             ws.Focus(setup.Context);
 
-            for (var i = 0; i < 50 && setup.Counter.ListCount == 2; i++)
-            {
-                Dispatcher.UIThread.RunJobs();
-                await Task.Delay(20);
-            }
+            await PumpUntilAsync(() => setup.Counter.ListCount > 2, "the stash list");
 
             Assert.Equal(3, setup.Counter.ListCount);
             await ctx2.DisposeAsync();
@@ -371,31 +351,19 @@ public sealed class RefNavigatorPowerToolsReloadTests
         using var fixture2 = new TestRepoFixture();
         try
         {
-            for (var i = 0; i < 50 && setup.Counter.ListCount == 0; i++)
-            {
-                Dispatcher.UIThread.RunJobs();
-                await Task.Delay(20);
-            }
+            await PumpUntilAsync(() => setup.Counter.ListCount > 0, "the stash list");
             Assert.Equal(1, setup.Counter.ListCount);
 
             var ws = setup.Sp.GetRequiredService<IWorkspaceService>();
             var ctx2 = await ws.OpenAsync(fixture2.Path);
             ctx2.MarkFirstGraphPaintDone();
             ws.Focus(ctx2);
-            for (var i = 0; i < 50 && setup.Counter.ListCount == 1; i++)
-            {
-                Dispatcher.UIThread.RunJobs();
-                await Task.Delay(20);
-            }
+            await PumpUntilAsync(() => setup.Counter.ListCount > 1, "the stash list");
             Assert.Equal(2, setup.Counter.ListCount);
 
             var stale = new RefsChangedEventArgs([], [], []) { StashStamp = ctx2.State.StashStamp + 1 };
             setup.View.ViewModel.OnRefsChanged(setup.Context.State, stale);
-            for (var i = 0; i < 10; i++)
-            {
-                Dispatcher.UIThread.RunJobs();
-                await Task.Delay(20);
-            }
+            await PumpBrieflyAsync();
 
             Assert.Equal(2, setup.Counter.ListCount);
             Assert.Equal(ctx2.State.StashStamp, setup.View.ViewModel.LoadedStashStamp);
@@ -429,14 +397,9 @@ public sealed class RefNavigatorPowerToolsReloadTests
 
             setup.Context.MarkFirstGraphPaintDone();
 
-            for (var i = 0; i < 50; i++)
-            {
-                Dispatcher.UIThread.RunJobs();
-                var stashTexts = GetRowTexts(GetSectionBody(setup.View, 3));
-                if (stashTexts.Any(t => t.Contains("mid-paint-stash")))
-                    break;
-                await Task.Delay(20);
-            }
+            await PumpUntilAsync(
+                () => GetRowTexts(GetSectionBody(setup.View, 3)).Any(t => t.Contains("mid-paint-stash")),
+                "the mid-paint stash");
 
             var finalStashTexts = GetRowTexts(GetSectionBody(setup.View, 3));
             Assert.Contains(finalStashTexts, t => t.Contains("mid-paint-stash"));
