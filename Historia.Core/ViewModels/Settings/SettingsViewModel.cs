@@ -287,6 +287,11 @@ public sealed partial class SettingsViewModel : ViewModelBase
     partial void OnPullWithRebaseChanged(bool value) => Save(s => s with { PullWithRebase = value });
 
     [ObservableProperty]
+    public partial bool FetchAfterPull { get; set; }
+
+    partial void OnFetchAfterPullChanged(bool value) => Save(s => s with { FetchAfterPull = value });
+
+    [ObservableProperty]
     public partial bool RestoreSessionTabs { get; set; }
 
     partial void OnRestoreSessionTabsChanged(bool value) => Save(s => s with { RestoreSessionTabs = value });
@@ -669,6 +674,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
             PruneOnFetch = c.PruneOnFetch;
             PullWithRebase = c.PullWithRebase;
+            FetchAfterPull = c.FetchAfterPull;
             RestoreSessionTabs = c.RestoreSessionTabs;
             UseCustomStashNames = c.UseCustomStashNames;
 
