@@ -26,7 +26,7 @@ public class GitCliServicePoolTests
     {
         var git = await ResolveGitAsync();
         var cli = new GitCliService(new FixedLocator(git));
-        var dir = Path.GetTempPath();
+        var dir = TestScratch.NewDirectory("git-pool-");
 
         // The monitor runs on its own thread: it has to keep sampling while the pool is struggling.
         var pending = new List<long>();
@@ -55,6 +55,7 @@ public class GitCliServicePoolTests
         })).ToArray();
         var results = await Task.WhenAll(calls);
         total.Stop();
+        TestScratch.Delete(dir);
 
         stop.Cancel();
         monitor.Join();
@@ -83,6 +84,7 @@ public class GitCliServicePoolTests
         var git = await ResolveGitAsync();
         var locator = new ThreadRecordingLocator(git);
         var cli = new GitCliService(locator);
+        var dir = TestScratch.NewDirectory("git-pool-");
 
         Task<GitCliResult>? call = null;
         var callerThread = 0;
@@ -92,12 +94,13 @@ public class GitCliServicePoolTests
             // that resumes on the captured context would hang instead of completing.
             SynchronizationContext.SetSynchronizationContext(new DiscardingContext());
             callerThread = Environment.CurrentManagedThreadId;
-            call = cli.RunAsync(new GitCliRequest { Arguments = ["version"], WorkingDirectory = Path.GetTempPath() });
+            call = cli.RunAsync(new GitCliRequest { Arguments = ["version"], WorkingDirectory = dir });
         });
         caller.Start();
         caller.Join();
 
         var result = await call!.WaitAsync(TimeSpan.FromSeconds(60));
+        TestScratch.Delete(dir);
 
         Assert.True(result.IsSuccess, result.StandardError);
         Assert.NotEmpty(locator.Threads);

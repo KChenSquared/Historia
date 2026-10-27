@@ -1,6 +1,9 @@
 namespace Historia.Tests;
 
+/// <summary>Serial: the memory-retention checks read the process-wide GC total, which tests running
+/// alongside would inflate.</summary>
 [Trait("tier", "unit")]
+[Collection("serial")]
 public sealed class QueuedLineWriterTests : IDisposable
 {
     private readonly string _dir = TestScratch.NewDirectory("queued-writer-");
