@@ -68,10 +68,10 @@ public sealed class AutoFetchHost(
             if (_warned.TryGetValue(context, out var kinds))
                 kinds.Clear();
         }
-
-        // Land the new remote-tracking refs / ahead-behind in the UI, same as a manual fetch.
-        await context.State.RefreshAllAsync(ct).ConfigureAwait(false);
     }
+
+    public Task RefreshAfterFetchAsync(RepositoryContext context, CancellationToken ct)
+        => context.State.Remotes.Count == 0 ? Task.CompletedTask : context.State.RefreshAllAsync(ct);
 
     /// <summary>Failures the user can act on locally. Transport failures (offline, sign-in,
     /// timeout, host key) and unclassified ones are expected on a laptop off the network.</summary>
