@@ -261,4 +261,46 @@ public class GitStatusParserTests
         Assert.Equal(1001, parsed.Untracked.Count);
         Assert.False(GitStatusParser.ShouldHashUntracked(parsed));
     }
+
+    [Theory]
+    [InlineData("­? weird.txt ")]
+    [InlineData("​? weird.txt ")]
+    [InlineData("­1 .M N... 100644 100644 100644 2222222222222222222222222222222222222222 2222222222222222222222222222222222222222 weird.txt ")]
+    [InlineData("​# branch.ab +3 -5 ")]
+    public void Record_prefixes_are_matched_ordinally(string input)
+    {
+        // Culture-sensitive comparison skips ignorable characters (soft hyphen, zero-width space),
+        // so a culture-based prefix check would accept these records.
+        var parsed = GitStatusParser.Parse(input);
+
+        Assert.Empty(parsed.Staged);
+        Assert.Empty(parsed.Unstaged);
+        Assert.Empty(parsed.Untracked);
+        Assert.Equal(0, parsed.AheadBy);
+        Assert.Equal(0, parsed.BehindBy);
+    }
+
+    [Fact]
+    public void A_large_payload_parses_completely()
+    {
+        var sb = new StringBuilder();
+        sb.Append("# branch.oid 1111111111111111111111111111111111111111 # branch.head main # branch.ab +1 -2 ");
+        for (var i = 0; i < 20_000; i++)
+        {
+            sb.Append((i % 3) switch
+            {
+                0 => $"1 .M N... 100644 100644 100644 2222222222222222222222222222222222222222 2222222222222222222222222222222222222222 src/dir{i % 50}/file{i}.cs ",
+                1 => $"? build/out{i}/artifact{i}.bin ",
+                _ => $"1 M. N... 100644 100644 100644 2222222222222222222222222222222222222222 3333333333333333333333333333333333333333 docs/page{i}.md ",
+            });
+        }
+
+        var parsed = GitStatusParser.Parse(sb.ToString());
+
+        Assert.Equal(6_667, parsed.Unstaged.Count);
+        Assert.Equal(6_667, parsed.Untracked.Count);
+        Assert.Equal(6_666, parsed.Staged.Count);
+        Assert.Equal(1, parsed.AheadBy);
+        Assert.Equal(2, parsed.BehindBy);
+    }
 }

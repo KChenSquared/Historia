@@ -6,11 +6,18 @@ internal readonly record struct CaseTwin(string Path, string Mode, string BlobId
 /// <summary>
 /// Detects index paths that differ only in letter case and share a single on-disk file on
 /// case-insensitive filesystems, caching collision groups and worktree hashes against index and
-/// config timestamps, and remembering which name last held the disk content.
+/// config timestamps, and remembering which name last held the disk content. Staging lists the
+/// whole index under its own gate; status asks only about the paths it is showing, and hashes
+/// worktree files under a gate of its own, so neither waits on the other.
 /// </summary>
 internal sealed class IndexCaseCollisions(IGitCliService cli, string gitDirectory, string workingDirectory)
 {
+    // Above this many candidates the targeted query (cost grows with candidates times index size)
+    // is slower than one whole-index listing, which is also cached against the index timestamp.
+    internal const int MaxTargetedCandidates = 100;
+
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly SemaphoreSlim _hashGate = new(1, 1);
     private readonly string _cwd = string.IsNullOrWhiteSpace(workingDirectory) ? gitDirectory : workingDirectory;
 
     private sealed record IgnoreCaseCache(((long Mtime, long Length) Config, (long Mtime, long Length) Worktree) Stamp, bool Value);
@@ -24,6 +31,12 @@ internal sealed class IndexCaseCollisions(IGitCliService cli, string gitDirector
         (long Mtime, long Length) Stamp,
         IReadOnlyDictionary<string, IReadOnlyList<CaseTwin>> Groups);
     private GroupsCache? _groupsCache;
+
+    private sealed record CandidateCache(
+        (long Mtime, long Length) Stamp,
+        string Key,
+        IReadOnlyDictionary<string, IReadOnlyList<CaseTwin>> Groups);
+    private CandidateCache? _candidateCache;
 
     private readonly Dictionary<string, (long Length, long Mtime, string Hash)> _worktreeHashCache = new(StringComparer.Ordinal);
 
@@ -158,6 +171,78 @@ internal sealed class IndexCaseCollisions(IGitCliService cli, string gitDirector
         }
     }
 
+    /// <summary>The pathspec that matches <paramref name="path"/> and any case-twin of it.</summary>
+    internal static string IcaseLiteralPathspec(string path) => ":(literal,icase)" + path;
+
+    /// <summary>
+    /// Collision groups among <paramref name="paths"/> only: each path and every index entry that
+    /// differs from it only in letter case, found with literal case-insensitive pathspecs
+    /// (<paramref name="chunk"/> splits the pathspecs to fit a command line). Cached against the
+    /// index timestamp and the path list. Falls back to the whole-index listing when there are too
+    /// many paths for the targeted query to pay off or when the query fails.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, IReadOnlyList<CaseTwin>>> GroupsForCandidatesAsync(
+        IReadOnlyList<string> paths,
+        Func<IReadOnlyList<string>, IEnumerable<IReadOnlyList<string>>> chunk,
+        CancellationToken ct = default)
+    {
+        if (paths.Count == 0)
+            return ImmutableDictionary<string, IReadOnlyList<CaseTwin>>.Empty;
+        if (paths.Count > MaxTargetedCandidates)
+            return await GroupsAsync(ct).ConfigureAwait(false);
+
+        // The stamp is read before the query, so an index write during it invalidates the entry.
+        var stamp = GetIndexStamp();
+        if (stamp == (0L, 0L))
+            return ImmutableDictionary<string, IReadOnlyList<CaseTwin>>.Empty;
+
+        var key = string.Join(' ', paths);
+        var cached = Volatile.Read(ref _candidateCache);
+        if (cached is not null && cached.Stamp == stamp && cached.Key == key)
+            return cached.Groups;
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var merged = new StringBuilder();
+        foreach (var specs in chunk(paths.Select(IcaseLiteralPathspec).ToList()))
+        {
+            var arguments = new List<string>(specs.Count + 4) { "ls-files", "-s", "-z", "--" };
+            arguments.AddRange(specs);
+
+            var result = await cli.RunAsync(new GitCliRequest
+            {
+                Arguments = arguments,
+                WorkingDirectory = _cwd,
+                RawStandardOutput = true,
+                Timeout = Timeout.InfiniteTimeSpan,
+            }, ct).ConfigureAwait(false);
+
+            if (!result.IsSuccess)
+            {
+                ct.ThrowIfCancellationRequested();
+                AppLog.Write(AppLogLevel.Warn, "git",
+                    $"Case collision candidate query failed (exit {result.ExitCode}, {result.ErrorKind}); listing the whole index.");
+                return await GroupsAsync(ct).ConfigureAwait(false);
+            }
+
+            // A twin pair split across chunks is reported by both; keep each entry once.
+            foreach (var entry in result.StandardOutput.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (seen.Add(entry))
+                    merged.Append(entry).Append(' ');
+            }
+        }
+
+        var groups = ParseGroups(merged.ToString());
+        Volatile.Write(ref _candidateCache, new CandidateCache(stamp, key, groups));
+
+        // A staging listing that found no collisions is reused without a stamp check; a twin seen
+        // here makes it stale.
+        if (groups.Count > 0 && Volatile.Read(ref _groupsCache) is { Groups.Count: 0 })
+            Volatile.Write(ref _groupsCache, null);
+
+        return groups;
+    }
+
     internal static IReadOnlyDictionary<string, IReadOnlyList<CaseTwin>> ParseGroups(string lsFilesStageOutput)
         => ParseGroups(lsFilesStageOutput, out _, out _);
 
@@ -240,7 +325,7 @@ internal sealed class IndexCaseCollisions(IGitCliService cli, string gitDirector
         if (paths.Count == 0)
             return ImmutableDictionary<string, string>.Empty;
 
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        await _hashGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             var candidateSet = new HashSet<string>(paths, StringComparer.Ordinal);
@@ -318,7 +403,7 @@ internal sealed class IndexCaseCollisions(IGitCliService cli, string gitDirector
         }
         finally
         {
-            _gate.Release();
+            _hashGate.Release();
         }
     }
 
