@@ -754,6 +754,34 @@ public class RepositoryStateServiceTests : IAsyncDisposable
         Assert.Equal(11, raised[1].Status.Unstaged[0].SizeBytes);
     }
 
+    [Fact(Timeout = 10000)]
+    public async Task An_operation_state_change_raises_even_when_the_status_is_unchanged()
+    {
+        var (state, gateway, _, time, raised) = NewRaiseState(onUiThread: true);
+        var mergeHead = Path.Combine(_repo.Path, ".git", "MERGE_HEAD");
+
+        gateway.StatusToReturn = StatusOf(Entry("a.txt", 10));
+        await state.RefreshStatusAsync();
+        time.Advance(1000);
+
+        await File.WriteAllTextAsync(mergeHead, "1234567890123456789012345678901234567890\n");
+        try
+        {
+            gateway.StatusToReturn = StatusOf(Entry("a.txt", 10));
+            await state.RefreshStatusAsync();
+            time.Advance(1000);
+        }
+        finally
+        {
+            File.Delete(mergeHead);
+        }
+
+        gateway.StatusToReturn = StatusOf(Entry("a.txt", 10));
+        await state.RefreshStatusAsync();
+
+        Assert.Equal(3, raised.Count);
+    }
+
     [Fact]
     public void Equivalence_compares_sizes_kinds_sections_and_counts()
     {

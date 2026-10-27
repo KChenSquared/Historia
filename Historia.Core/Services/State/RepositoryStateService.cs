@@ -18,16 +18,16 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
 
     // Touched only on the UI thread when there is a dispatcher.
     private readonly IUiTimer? _statusCoalesceTimer;
-    private (RepositoryStatus Status, RepositoryInfo Info)? _pendingStatusRaise;
+    private (RepositoryStatus Status, RepositoryInfo Info, OperationState Operation)? _pendingStatusRaise;
     private bool _statusTimerRunning;
     private long _pendingStatusSince;
     private long _lastStatusRaiseAt;
     private bool _statusRaisedOnce;
     private volatile bool _disposed;
 
-    // The status and info of the last raise; guarded by _raiseSync.
+    // The status, info and operation state of the last raise; guarded by _raiseSync.
     private readonly object _raiseSync = new();
-    private (RepositoryStatus Status, RepositoryInfo Info)? _lastRaised;
+    private (RepositoryStatus Status, RepositoryInfo Info, OperationState Operation)? _lastRaised;
 
     private TimeSpan _lastStatusDuration;
     private DateTimeOffset? _lastStatusCompletedAt;
@@ -343,7 +343,7 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
                 _openDiff = null;
         }
 
-        QueueStatusRaise(status, info);
+        QueueStatusRaise(status, info, operation);
 
         if (conflictSessionFlipped)
             HandleConflictSessionFlipped(nowActive, closedCleared);
@@ -479,27 +479,27 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
 
     // ── Status raise: leading edge, trailing coalescing, no raise for an unchanged status ──
 
-    private void QueueStatusRaise(RepositoryStatus status, RepositoryInfo info)
+    private void QueueStatusRaise(RepositoryStatus status, RepositoryInfo info, OperationState operation)
     {
         if (_ui is null || _statusCoalesceTimer is null)
         {
-            RaiseStatus(status, info);
+            RaiseStatus(status, info, operation);
             return;
         }
 
         if (_ui.CheckAccess())
-            OfferStatus(status, info);
+            OfferStatus(status, info, operation);
         else
-            _ui.Post(() => OfferStatus(status, info), UiPriority.Normal);
+            _ui.Post(() => OfferStatus(status, info, operation), UiPriority.Normal);
     }
 
-    private void OfferStatus(RepositoryStatus status, RepositoryInfo info)
+    private void OfferStatus(RepositoryStatus status, RepositoryInfo info, OperationState operation)
     {
         if (_disposed)
             return;
 
         var now = _time.GetTimestamp();
-        _pendingStatusRaise = (status, info);
+        _pendingStatusRaise = (status, info, operation);
 
         if (_statusTimerRunning)
         {
@@ -517,7 +517,7 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
         if (!_statusRaisedOnce || _time.GetElapsedTime(_lastStatusRaiseAt, now) >= StatusRaiseWindow)
         {
             _pendingStatusRaise = null;
-            if (RaiseStatus(status, info))
+            if (RaiseStatus(status, info, operation))
             {
                 _statusRaisedOnce = true;
                 _lastStatusRaiseAt = now;
@@ -539,23 +539,24 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
         if (_disposed || pending is not { } p)
             return;
 
-        if (RaiseStatus(p.Status, p.Info))
+        if (RaiseStatus(p.Status, p.Info, p.Operation))
         {
             _statusRaisedOnce = true;
             _lastStatusRaiseAt = _time.GetTimestamp();
         }
     }
 
-    /// <summary>Raises <see cref="StatusChanged"/> unless the status matches the last one raised.
+    /// <summary>Raises <see cref="StatusChanged"/> unless the status and operation state match the last raise.
     /// Returns whether it raised.</summary>
-    private bool RaiseStatus(RepositoryStatus status, RepositoryInfo info)
+    private bool RaiseStatus(RepositoryStatus status, RepositoryInfo info, OperationState operation)
     {
         lock (_raiseSync)
         {
             if (_lastRaised is { } last
+                && last.Operation == operation
                 && RepositoryStatusEquivalence.Equivalent(last.Status, last.Info, status, info))
                 return false;
-            _lastRaised = (status, info);
+            _lastRaised = (status, info, operation);
         }
 
         StatusChanged?.Invoke(this, new StatusChangedEventArgs(status));
