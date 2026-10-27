@@ -12,6 +12,7 @@ public sealed class FileWatcherService : IAsyncDisposable
     private const int MaxWaitMs = 1000;
     private const int LargeTreeFileThreshold = 50_000;
     private const int MaxInternalBuffer = 64 * 1024;
+    private const int StackPathChars = 512;
 
     private readonly RepositoryContext _context;
     private readonly IRepositoryStateService _state;
@@ -35,6 +36,8 @@ public sealed class FileWatcherService : IAsyncDisposable
     private int _suppressedOverflowLogs;
     private Timer? _overflowFlushTimer;
     private readonly bool _watchFilesystem;
+    private readonly string _gitDirRoot;
+    private readonly string _workDirRoot;
     private volatile bool _disposed;
 
     /// <summary>Minimum gap between two logged watcher overflows; overflows inside it are counted
@@ -78,6 +81,8 @@ public sealed class FileWatcherService : IAsyncDisposable
         _settings = settings;
         _workspace = workspace ?? context.Workspace;
         _watchFilesystem = watchFilesystem;
+        _gitDirRoot = NormalizePath(context.GitDirectory);
+        _workDirRoot = NormalizePath(context.RepositoryPath);
 
         try
         {
@@ -100,7 +105,7 @@ public sealed class FileWatcherService : IAsyncDisposable
     {
         _debounceTimer = new Timer(OnDebounceElapsed, null, Timeout.Infinite, Timeout.Infinite);
 
-        var gitDir = NormalizePath(_context.GitDirectory);
+        var gitDir = _gitDirRoot;
         if (Directory.Exists(gitDir))
         {
             AddWatcher(gitDir, includeSubdirectories: false, isGitDir: true);
@@ -115,7 +120,7 @@ public sealed class FileWatcherService : IAsyncDisposable
             return;
         }
 
-        var workDir = NormalizePath(_context.RepositoryPath);
+        var workDir = _workDirRoot;
         if (Directory.Exists(workDir) && TrackedFileCount(gitDir) >= LargeTreeFileThreshold)
         {
             IsLargeWorkingTree = true;
@@ -247,47 +252,92 @@ public sealed class FileWatcherService : IAsyncDisposable
         if (_context.IsSelfOperationInProgress)
             return;
 
-        var normalizedFullPath = NormalizePath(fullPath);
-        var gitDir = NormalizePath(_context.GitDirectory);
-        var isUnderGit = isGitDir || IsSameOrUnder(normalizedFullPath, gitDir);
-
-        if (isUnderGit)
+        var path = NormalizePath(fullPath);
+        if (IsSameOrUnder(path, _gitDirRoot))
         {
-            var rel = Path.GetRelativePath(gitDir, normalizedFullPath).Replace('\\', '/');
-            // Only a few .git entries matter; everything else (objects/**, logs/**) is noise.
-            var meaningful = rel is "HEAD" or "index" or "packed-refs" or "MERGE_HEAD" or "REBASE_HEAD"
-                                 or "CHERRY_PICK_HEAD" or "REVERT_HEAD" or "ORIG_HEAD" or "config"
-                             || rel.StartsWith("refs/", StringComparison.Ordinal)
-                             || rel.StartsWith("rebase-merge", StringComparison.Ordinal)
-                             || rel.StartsWith("rebase-apply", StringComparison.Ordinal);
-            if (!meaningful)
+            QueueEvent(path.AsSpan(_gitDirRoot.Length), underGit: true);
+            return;
+        }
+
+        // A path the git-directory watcher reports outside the git directory is not one to act on.
+        if (isGitDir || !IsSameOrUnder(path, _workDirRoot))
+            return;
+
+        QueueEvent(path.AsSpan(_workDirRoot.Length), underGit: false);
+    }
+
+    /// <summary>Classifies one event by its path relative to the git directory or the working tree
+    /// and queues it for the debounce. The path is normalized into a stack buffer and the string a
+    /// queued event needs is allocated only after the event is known to matter, so ignored paths —
+    /// the bulk of a build — allocate nothing.</summary>
+    private void QueueEvent(ReadOnlySpan<char> relative, bool underGit)
+    {
+        while (relative.Length > 0 && relative[0] is '/' or '\\')
+            relative = relative[1..];
+
+        char[]? rented = null;
+        Span<char> buffer = stackalloc char[StackPathChars];
+        if (relative.Length > StackPathChars)
+        {
+            rented = System.Buffers.ArrayPool<char>.Shared.Rent(relative.Length);
+            buffer = rented;
+        }
+
+        try
+        {
+            var rel = buffer[..relative.Length];
+            relative.CopyTo(rel);
+            rel.Replace('\\', '/');
+
+            if (underGit)
+            {
+                // Only a few .git entries matter; everything else (objects/**, logs/**) is noise.
+                if (!IsMeaningfulGitPath(rel))
+                    return;
+
+                // The index changes on every stage, unstage and stat refresh and says nothing about
+                // refs or the graph; it is a status change like a working-tree edit.
+                var statusOnly = rel is "index";
+                var gitPath = new string(rel);
+                lock (_sync)
+                {
+                    if (!statusOnly)
+                    {
+                        _refsTouched = true;
+                        _firstRefPath ??= gitPath;
+                    }
+                    _pendingPaths.Add(gitPath);
+                    ScheduleLocked();
+                }
+                return;
+            }
+
+            // Working-tree path: drop ignored paths before the debounce fires.
+            if (IsLikelyIgnored(rel))
                 return;
 
+            var workPath = rel.Length == 0 ? "." : new string(rel);
             lock (_sync)
             {
-                _refsTouched = true;
-                _firstRefPath ??= rel;
-                _pendingPaths.Add(rel);
+                _pendingPaths.Add(workPath);
                 ScheduleLocked();
             }
-            return;
         }
-
-        // Working-tree path: drop ignored paths before the debounce fires.
-        var workDir = NormalizePath(_context.RepositoryPath);
-        var relPath = Path.GetRelativePath(workDir, normalizedFullPath).Replace('\\', '/');
-        if (relPath.StartsWith("../", StringComparison.Ordinal) || relPath == "..")
-            return;
-
-        if (IsLikelyIgnored(relPath))
-            return;
-
-        lock (_sync)
+        finally
         {
-            _pendingPaths.Add(relPath);
-            ScheduleLocked();
+            if (rented is not null)
+                System.Buffers.ArrayPool<char>.Shared.Return(rented);
         }
     }
+
+    /// <summary>True for the git-directory entries whose change affects Historia: refs and the
+    /// files that move or describe them (full refresh), and the index (status only).</summary>
+    private static bool IsMeaningfulGitPath(ReadOnlySpan<char> rel)
+        => rel is "HEAD" or "index" or "packed-refs" or "MERGE_HEAD" or "REBASE_HEAD"
+               or "CHERRY_PICK_HEAD" or "REVERT_HEAD" or "ORIG_HEAD" or "config"
+           || rel.StartsWith("refs/", StringComparison.Ordinal)
+           || rel.StartsWith("rebase-merge", StringComparison.Ordinal)
+           || rel.StartsWith("rebase-apply", StringComparison.Ordinal);
 
     /// <summary>True when <paramref name="path"/> is <paramref name="dir"/> or inside it. A sibling
     /// that merely shares the prefix (<c>.gitignore</c>, <c>.github/</c> beside <c>.git</c>) is not.</summary>
@@ -385,8 +435,8 @@ public sealed class FileWatcherService : IAsyncDisposable
 
 
     /// <summary>Internal for a direct test seam (Historia.Tests) — otherwise only called from
-    /// <see cref="OnRawEvent"/>.</summary>
-    internal bool IsLikelyIgnored(string relPath)
+    /// <see cref="QueueEvent"/>. <paramref name="relPath"/> uses <c>/</c> separators.</summary>
+    internal bool IsLikelyIgnored(ReadOnlySpan<char> relPath)
     {
         // Cheap synchronous pre-filter for the common build-output offenders only. The
         // authoritative .gitignore check is handled lazily during the status scan — never here:
@@ -397,38 +447,49 @@ public sealed class FileWatcherService : IAsyncDisposable
         // are also skipped, but only where they actually look like build output — beside a
         // project file — so a repo that tracks a top-level bin/ of scripts (a common layout)
         // still gets its Changes panel updated when one of those tracked files is edited.
-        var segments = relPath.Split('/');
-        for (var i = 0; i < segments.Length; i++)
+        var start = 0;
+        while (true)
         {
-            var seg = segments[i];
-            if (seg is "node_modules" or ".vs" or ".git")
+            var rest = relPath[start..];
+            var length = rest.IndexOf('/');
+            var segment = length < 0 ? rest : rest[..length];
+            if (segment is "node_modules" or ".vs" or ".git")
                 return true;
-            if (seg is "bin" or "obj" && IsBesideAProjectFile(segments, i))
+            if (segment is "bin" or "obj" && IsBesideAProjectFile(relPath[..Math.Max(0, start - 1)]))
                 return true;
+            if (length < 0)
+                return false;
+            start += length + 1;
         }
-        return false;
     }
 
-    /// <summary>True when the directory containing <c>segments[binOrObjIndex]</c> holds a
-    /// project file (<c>*.*proj</c> — csproj/fsproj/vbproj/…), i.e. <c>bin</c>/<c>obj</c> there
-    /// really is that project's build output. Memoized per directory so a build storm — the
-    /// exact case this pre-filter exists for — pays the one filesystem probe once, not once
-    /// per event.</summary>
-    private bool IsBesideAProjectFile(string[] segments, int binOrObjIndex)
+    /// <summary>True when <paramref name="relDir"/> (a directory relative to the working tree,
+    /// <c>/</c>-separated) holds a project file (<c>*.*proj</c> — csproj/fsproj/vbproj/…), i.e. a
+    /// <c>bin</c>/<c>obj</c> beside it really is that project's build output. Memoized per directory
+    /// so a build storm — the exact case this pre-filter exists for — pays the one filesystem probe
+    /// once, not once per event.</summary>
+    private bool IsBesideAProjectFile(ReadOnlySpan<char> relDir)
     {
-        var relDir = string.Join('/', segments.Take(binOrObjIndex));
-        return _buildOutputParents.GetOrAdd(relDir, static (dir, workDir) =>
+        var cache = _buildOutputParents.GetAlternateLookup<ReadOnlySpan<char>>();
+        if (cache.TryGetValue(relDir, out var cached))
+            return cached;
+
+        var result = ProbeForProjectFile(relDir.ToString(), _workDirRoot);
+        cache[relDir] = result;
+        return result;
+    }
+
+    private static bool ProbeForProjectFile(string dir, string workDir)
+    {
+        try
         {
-            try
-            {
-                var full = string.IsNullOrEmpty(dir) ? workDir : Path.Combine(workDir, dir.Replace('/', Path.DirectorySeparatorChar));
-                return Directory.Exists(full) && Directory.EnumerateFiles(full, "*.*proj").Any();
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                return false;
-            }
-        }, NormalizePath(_context.RepositoryPath));
+            var full = dir.Length == 0 ? workDir : Path.Combine(workDir, dir.Replace('/', Path.DirectorySeparatorChar));
+            return Directory.Exists(full) && Directory.EnumerateFiles(full, "*.*proj").Any();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     /// <summary>

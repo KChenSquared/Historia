@@ -89,6 +89,105 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
         Assert.False(fakeWs.LastFull);
     }
 
+    private static void RaiseRawEvent(Historia.Services.Watching.FileWatcherService watcher, string fullPath, bool isGitDir)
+        => typeof(Historia.Services.Watching.FileWatcherService)
+            .GetMethod("OnRawEvent", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .Invoke(watcher, [fullPath, isGitDir]);
+
+    [Fact]
+    public async Task An_index_change_publishes_a_status_refresh_and_no_full_refresh()
+    {
+        await using var ctx = _host.Open(_repo.Path);
+        var fakeWs = new FakeWorkspace();
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs, watchFilesystem: false);
+
+        RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "index"), isGitDir: true);
+        await WaitForRefreshesAsync(fakeWs, 1);
+        await Task.Delay(400);
+
+        Assert.Equal(1, fakeWs.RefreshCalls);
+        Assert.False(fakeWs.LastFull);
+    }
+
+    [Theory]
+    [InlineData("HEAD")]
+    [InlineData("ORIG_HEAD")]
+    [InlineData("packed-refs")]
+    [InlineData("config")]
+    [InlineData("MERGE_HEAD")]
+    [InlineData("rebase-merge/head-name")]
+    [InlineData("refs/heads/topic")]
+    public async Task Ref_and_sequencer_changes_in_the_git_directory_publish_a_full_refresh(string relPath)
+    {
+        await using var ctx = _host.Open(_repo.Path);
+        var fakeWs = new FakeWorkspace();
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs, watchFilesystem: false);
+
+        RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, relPath.Replace('/', Path.DirectorySeparatorChar)), isGitDir: true);
+        await WaitForRefreshesAsync(fakeWs, 1);
+
+        Assert.True(fakeWs.LastFull);
+    }
+
+    [Fact]
+    public async Task An_index_change_beside_a_ref_change_still_publishes_one_full_refresh()
+    {
+        await using var ctx = _host.Open(_repo.Path);
+        var fakeWs = new FakeWorkspace();
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs, watchFilesystem: false);
+
+        RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "index"), isGitDir: true);
+        RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "refs", "heads", "topic"), isGitDir: true);
+        await WaitForRefreshesAsync(fakeWs, 1);
+        await Task.Delay(400);
+
+        Assert.Equal(1, fakeWs.RefreshCalls);
+        Assert.True(fakeWs.LastFull);
+    }
+
+    [Fact]
+    public async Task The_index_lock_file_and_other_git_directory_noise_queue_nothing()
+    {
+        await using var ctx = _host.Open(_repo.Path);
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace(), watchFilesystem: false);
+
+        RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "index.lock"), isGitDir: true);
+        RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "sharedindex.abc"), isGitDir: true);
+        RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "logs", "HEAD"), isGitDir: true);
+        RaiseRawEvent(watcher, Path.Combine(_repo.Path, ".git", "objects", "ab", "cdef"), isGitDir: false);
+        RaiseRawEvent(watcher, Path.Combine(Path.GetDirectoryName(_repo.Path)!, "elsewhere", "file.txt"), isGitDir: false);
+
+        Assert.Equal(0, PendingPaths(watcher));
+    }
+
+    [Fact]
+    public async Task Build_output_beside_a_project_file_queues_nothing_for_any_separator()
+    {
+        Directory.CreateDirectory(Path.Combine(_repo.Path, "src", "App", "bin", "Debug"));
+        File.WriteAllText(Path.Combine(_repo.Path, "src", "App", "App.csproj"), "<Project />");
+        await using var ctx = _host.Open(_repo.Path);
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace(), watchFilesystem: false);
+
+        RaiseRawEvent(watcher, Path.Combine(_repo.Path, "src", "App", "bin", "Debug", "App.dll"), isGitDir: false);
+        RaiseRawEvent(watcher, Path.Combine(_repo.Path, "src", "App", "bin", "Debug", "App.dll"), isGitDir: false);
+        RaiseRawEvent(watcher, _repo.Path + "/src/App/obj/Debug/App.dll", isGitDir: false);
+
+        Assert.Equal(0, PendingPaths(watcher));
+    }
+
+    [Fact]
+    public async Task A_path_longer_than_the_stack_buffer_still_publishes_a_status_refresh()
+    {
+        await using var ctx = _host.Open(_repo.Path);
+        var fakeWs = new FakeWorkspace();
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs, watchFilesystem: false);
+
+        RaiseRawEvent(watcher, Path.Combine(_repo.Path, new string('a', 300), new string('b', 300) + ".txt"), isGitDir: false);
+        await WaitForRefreshesAsync(fakeWs, 1);
+
+        Assert.False(fakeWs.LastFull);
+    }
+
     private static int PendingPaths(Historia.Services.Watching.FileWatcherService watcher)
         => ((HashSet<string>)typeof(Historia.Services.Watching.FileWatcherService)
             .GetField("_pendingPaths", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
