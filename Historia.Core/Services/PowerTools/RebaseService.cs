@@ -100,7 +100,8 @@ public sealed class RebaseService(IGitCliService cli) : IRebaseService
                 WorkingDirectory = context.RepositoryPath,
                 ExtraEnvironment = env,
                 // No wall clock: hooks and large tree updates run long, and a kill midway leaves a
-                // half-applied tree or sequencer and a stale index.lock. The caller's token still cancels it.
+                // half-applied tree or sequencer and a stale index.lock.
+                // Cancelling stops it only before git starts; once running it is never killed.
                 Timeout = Timeout.InfiniteTimeSpan,
             }, innerCt), ct).ConfigureAwait(false);
 

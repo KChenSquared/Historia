@@ -310,7 +310,7 @@ public sealed partial class GitGateway
                 StandardInput = request.Message ?? "",
                 ExtraEnvironment = env,
                 // No wall clock: hooks (lint, tests) and a signing passphrase prompt can take
-                // minutes. The caller's token still cancels it.
+                // minutes. Cancelling stops it only before git starts; once running it is never killed.
                 Timeout = Timeout.InfiniteTimeSpan,
             }, innerCt).ConfigureAwait(false);
 
