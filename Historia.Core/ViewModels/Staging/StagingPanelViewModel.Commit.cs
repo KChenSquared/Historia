@@ -84,6 +84,14 @@ public sealed partial class StagingPanelViewModel
 
     private async Task CommitCoreAsync(bool push)
     {
+        // A stage or unstage still running, or its status refresh, decides what is staged; the
+        // checks below must see its result.
+        if (!_pendingStage.IsCompleted)
+        {
+            await _pendingStage;
+            AdoptCurrentStatus();
+        }
+
         // While a generated message is on its way, Ctrl+Enter must not commit the old draft just
         // before the generated text replaces it.
         if (_committing || _generateCts is not null || _status.Conflicted.Count > 0) return;

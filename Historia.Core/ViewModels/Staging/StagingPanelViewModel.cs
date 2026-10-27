@@ -35,10 +35,22 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
     private readonly Dictionary<string, FileRowViewModel> _stagedCache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ConflictRowViewModel> _conflictCache = new(StringComparer.Ordinal);
 
+    private static readonly Comparison<FileStatusEntry> ByPathOrdinal = (a, b) => string.CompareOrdinal(a.Path, b.Path);
+
     private RepositoryStatus _status;
     private RepositoryStatus? _lastRenderedStatus;
     private bool _stashing;
     private bool _aborting;
+
+    // Stage, unstage and discard operations in flight; the busy state lasts while any is.
+    private int _busyOperations;
+    private IUiTimer? _busyTimer;
+    private (string Label, TimeSpan Held)? _holderAtBusyStart;
+    private string _busyBaseText = "";
+
+    // Completes when every stage or unstage operation started so far, including its status
+    // refresh, has finished.
+    private Task _pendingStage = Task.CompletedTask;
 
     /// <param name="ctx">The repository tab this panel belongs to.</param>
     public StagingPanelViewModel(
@@ -132,10 +144,90 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
 
     private bool CanAbort => !_aborting;
 
+    // ── Busy state ──
+
+    /// <summary>How long a stage, unstage or discard runs before the busy indicator shows.</summary>
+    public static readonly TimeSpan BusyIndicatorDelay = TimeSpan.FromMilliseconds(200);
+
+    /// <summary>True from the start of a stage, unstage or discard until git has finished the change; the status refresh that follows is not part of it.</summary>
+    [ObservableProperty]
+    public partial bool IsStagingBusy { get; private set; }
+
+    /// <summary>True once the busy state has lasted <see cref="BusyIndicatorDelay"/>; the spinner and <see cref="BusyText"/> show then.</summary>
+    [ObservableProperty]
+    public partial bool ShowBusyIndicator { get; private set; }
+
+    /// <summary>What the busy operation is doing, such as <c>Staging 12 files…</c>, or the operation it waits for while another one holds the repository's write lock.</summary>
+    [ObservableProperty]
+    public partial string BusyText { get; private set; } = "";
+
+    private void BeginBusy(string text)
+    {
+        _busyBaseText = text;
+        if (_busyOperations++ > 0)
+        {
+            BusyText = ComposeBusyText();
+            return;
+        }
+
+        _holderAtBusyStart = _ctx.CurrentWriteHolder;
+        BusyText = ComposeBusyText();
+        IsStagingBusy = true;
+        _busyTimer = _ui.CreateTimer(BusyIndicatorDelay, OnBusyTick);
+        _busyTimer.Start();
+    }
+
+    private void EndBusy()
+    {
+        if (--_busyOperations > 0)
+            return;
+
+        _busyTimer?.Stop();
+        _busyTimer?.Dispose();
+        _busyTimer = null;
+        _holderAtBusyStart = null;
+        IsStagingBusy = false;
+        ShowBusyIndicator = false;
+        BusyText = "";
+    }
+
+    private void SetBusyText(string text)
+    {
+        _busyBaseText = text;
+        BusyText = ComposeBusyText();
+    }
+
+    // Repeats until the busy state ends, so the text follows the write lock's holder.
+    private void OnBusyTick()
+    {
+        if (_busyOperations == 0 || IsDisposed)
+            return;
+        ShowBusyIndicator = true;
+        BusyText = ComposeBusyText();
+    }
+
+    // The write lock's holder counts as another operation when it was already holding the lock as
+    // the busy state began and still is: the same label, held for at least as long.
+    private string ComposeBusyText()
+        => _holderAtBusyStart is { } started
+           && _ctx.CurrentWriteHolder is { } now
+           && string.Equals(now.Label, started.Label, StringComparison.Ordinal)
+           && now.Held >= started.Held
+            ? $"Waiting for {now.Label}…"
+            : _busyBaseText;
+
+    private static string DescribeBusy(string verb, int count)
+        => count switch
+        {
+            0 => $"{verb} changes…",
+            1 => $"{verb} 1 file…",
+            _ => $"{verb} {count} files…",
+        };
+
     // ── Status events ──
 
     private void OnStatusChanged(object? sender, StatusChangedEventArgs e)
-        => _ui.Post(() =>
+        => OnUi(() =>
         {
             if (IsDisposed)
                 return;
@@ -146,11 +238,29 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
         });
 
     private void OnSelectedConflictPathChanged(object? sender, SelectedConflictPathChangedEventArgs e)
-        => _ui.Post(() =>
+        => OnUi(() =>
         {
             if (!IsDisposed)
                 UpdateConflictedRowHighlights();
         });
+
+    private void OnUi(Action action)
+    {
+        if (_ui.CheckAccess())
+            action();
+        else
+            _ui.Post(action);
+    }
+
+    /// <summary>Takes the repository's latest status into the lists when it differs from the one shown.</summary>
+    private void AdoptCurrentStatus()
+    {
+        var current = _ctx.State.Status;
+        if (IsDisposed || (_lastRenderedStatus is not null && StatusEquivalent(_lastRenderedStatus, current)))
+            return;
+        _status = current;
+        RenderLists();
+    }
 
     /// <summary>True when two statuses list the same paths with the same kinds, so the lists need no change.</summary>
     public static bool StatusEquivalent(RepositoryStatus a, RepositoryStatus b)
@@ -182,9 +292,14 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
 
     private void RenderLists()
     {
-        var changes = _status.Unstaged.Concat(_status.Untracked).OrderBy(f => f.Path, StringComparer.Ordinal).ToList();
-        var staged = _status.Staged.OrderBy(f => f.Path, StringComparer.Ordinal).ToList();
-        var conflicted = _status.Conflicted.OrderBy(f => f.Path, StringComparer.Ordinal).ToList();
+        var changes = new List<FileStatusEntry>(_status.Unstaged.Count + _status.Untracked.Count);
+        changes.AddRange(_status.Unstaged);
+        changes.AddRange(_status.Untracked);
+        changes.Sort(ByPathOrdinal);
+        var staged = new List<FileStatusEntry>(_status.Staged);
+        staged.Sort(ByPathOrdinal);
+        var conflicted = new List<FileStatusEntry>(_status.Conflicted);
+        conflicted.Sort(ByPathOrdinal);
 
         // Drop checks for paths that no longer exist in the section.
         _checkedChanges.IntersectWith(changes.Select(f => f.Path));
@@ -403,6 +518,7 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
 
     private async Task MoveCheckedAsync(bool stage)
     {
+        if (IsStagingBusy) return;
         var checkedPaths = (stage ? _checkedChanges : _checkedStaged).ToList();
         if (checkedPaths.Count == 0) return;
         (stage ? _checkedChanges : _checkedStaged).Clear();
@@ -417,32 +533,57 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
             : _status.Staged;
         var paths = StagePathExpansion.ForStaging(pool, checkedPaths);
 
-        await Run(() => stage
-            ? _ctx.Gateway.StageAsync(paths, _ctx.Lifetime)
-            : _ctx.Gateway.UnstageAsync(paths, _ctx.Lifetime));
+        await Run(DescribeBusy(stage ? "Staging" : "Unstaging", checkedPaths.Count), async () =>
+        {
+            await (stage
+                ? _ctx.Gateway.StageAsync(paths, _ctx.Lifetime)
+                : _ctx.Gateway.UnstageAsync(paths, _ctx.Lifetime));
+            return true;
+        });
     }
 
     /// <summary>Stages every unstaged and untracked file except the case-collision rows that cannot be attributed to one name.</summary>
     [RelayCommand]
-    private Task StageAllChangesAsync()
-    {
-        // Ambiguous case-collision rows are one disk file under several names; staging them together
-        // would write the edit into every entry, so only an explicit row stage takes one of them.
-        var ambiguous = new HashSet<string>(_status.AmbiguousCaseCollisions, StringComparer.Ordinal);
-        return BulkAsync(_status.Unstaged.Where(u => !ambiguous.Contains(u.Path)).Concat(_status.Untracked).ToList(), staged: false);
-    }
+    private Task StageAllChangesAsync() => BulkAsync(unstage: false);
 
     /// <summary>Unstages everything in the Staged list.</summary>
     [RelayCommand]
-    private Task UnstageAllAsync() => BulkAsync(_status.Staged, staged: true);
+    private Task UnstageAllAsync() => BulkAsync(unstage: true);
 
-    private async Task BulkAsync(IReadOnlyList<FileStatusEntry> files, bool staged)
+    private static IReadOnlyList<FileStatusEntry> BulkFiles(RepositoryStatus status, bool unstage)
     {
-        if (files.Count == 0) return;
-        // Same expansion as MoveCheckedAsync — a bulk stage/unstage must move both halves of
-        // any rename in the list, not just the new path.
-        var paths = StagePathExpansion.ForStaging(files, files.Select(f => f.Path));
-        await Run(() => staged ? _ctx.Gateway.UnstageAsync(paths, _ctx.Lifetime) : _ctx.Gateway.StageAsync(paths, _ctx.Lifetime));
+        if (unstage)
+            return status.Staged;
+
+        // Ambiguous case-collision rows are one disk file under several names; staging them together
+        // would write the edit into every entry, so only an explicit row stage takes one of them.
+        var ambiguous = new HashSet<string>(status.AmbiguousCaseCollisions, StringComparer.Ordinal);
+        return status.Unstaged.Where(u => !ambiguous.Contains(u.Path)).Concat(status.Untracked).ToList();
+    }
+
+    private async Task BulkAsync(bool unstage)
+    {
+        if (IsStagingBusy) return;
+        var verb = unstage ? "Unstaging" : "Staging";
+        await Run(DescribeBusy(verb, BulkFiles(_status, unstage).Count), async () =>
+        {
+            // The click acts on the repository as it is now: a status run already under way, or one
+            // the click queues behind it, finishes first, so the list is no older than the click.
+            await _ctx.State.RefreshStatusAsync(_ctx.Lifetime);
+            var files = BulkFiles(_ctx.State.Status, unstage);
+            if (files.Count == 0)
+            {
+                _notifications.Publish(NotificationSeverity.Info, unstage ? "Nothing to unstage" : "Nothing to stage");
+                return false;
+            }
+
+            SetBusyText(DescribeBusy(verb, files.Count));
+            // Same expansion as MoveCheckedAsync — a bulk stage/unstage must move both halves of
+            // any rename in the list, not just the new path.
+            var paths = StagePathExpansion.ForStaging(files, files.Select(f => f.Path));
+            await (unstage ? _ctx.Gateway.UnstageAsync(paths, _ctx.Lifetime) : _ctx.Gateway.StageAsync(paths, _ctx.Lifetime));
+            return true;
+        });
     }
 
     /// <summary>Discards one file's unstaged changes after the user confirms; staged changes stay.</summary>
@@ -471,7 +612,11 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
                 _ctx.State.SetOpenDiff(null);
 
             var paths = f.OldPath is not null ? new[] { f.Path, f.OldPath } : new[] { f.Path };
-            await Run(() => _ctx.Gateway.DiscardAsync(paths, _ctx.Lifetime));
+            await Run(DescribeBusy("Discarding", paths.Length), async () =>
+            {
+                await _ctx.Gateway.DiscardAsync(paths, _ctx.Lifetime);
+                return true;
+            });
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -508,7 +653,11 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
             RefreshSelectionState();
             if (_ctx.State.OpenDiff is { } diff && (diff.Source == DiffSource.UnstagedChanges || (diff.Path is not null && seen.Contains(diff.Path))))
                 _ctx.State.SetOpenDiff(null);
-            await Run(() => _ctx.Gateway.DiscardAsync(paths, _ctx.Lifetime));
+            await Run(DescribeBusy("Discarding", paths.Count), async () =>
+            {
+                await _ctx.Gateway.DiscardAsync(paths, _ctx.Lifetime);
+                return true;
+            });
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -517,10 +666,42 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
         }
     }
 
-    private async Task Run(Func<Task> op)
+    /// <summary>
+    /// Runs one index or working-tree change with the busy state shown. The command ends when
+    /// <paramref name="op"/> returns; when it answers true the status refresh continues in the
+    /// background, and a commit waits for it.
+    /// </summary>
+    private async Task Run(string busyText, Func<Task<bool>> op)
     {
-        try { await op(); await _ctx.State.RefreshStatusAsync(_ctx.Lifetime); }
-        catch (Exception ex) { _notifications.Publish(NotificationSeverity.Error, ex.Message, ex.NotificationDetails()); }
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pendingStage = _pendingStage.IsCompleted ? done.Task : Task.WhenAll(_pendingStage, done.Task);
+        var refresh = false;
+        BeginBusy(busyText);
+        try { refresh = await op(); }
+        catch (Exception ex) { PublishFailure(ex); }
+        finally { EndBusy(); }
+
+        if (refresh)
+            _ = RefreshInBackgroundAsync(done);
+        else
+            done.TrySetResult();
+    }
+
+    // Not awaited by the command, so every outcome ends here: a failure reaches the user and the
+    // task never faults.
+    private async Task RefreshInBackgroundAsync(TaskCompletionSource done)
+    {
+        try { await _ctx.State.RefreshStatusAsync(_ctx.Lifetime); }
+        catch (Exception ex) { PublishFailure(ex); }
+        finally { done.TrySetResult(); }
+    }
+
+    private void PublishFailure(Exception ex)
+    {
+        // A tab closing mid-operation cancels the refresh; there is no one left to tell.
+        if (ex is OperationCanceledException && _ctx.Lifetime.IsCancellationRequested)
+            return;
+        _notifications.Publish(NotificationSeverity.Error, ex.Message, ex.NotificationDetails());
     }
 
     // ── Abort and stash ──
