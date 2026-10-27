@@ -63,17 +63,17 @@ public class GitCliServicePoolTests
 
         // Each call sleeps three seconds. Starting 40 processes is serialised by the OS, so the
         // wall clock gets generous slack; the pool measurements are what tell starvation apart.
-        Assert.True(total.Elapsed < AliasSleep + TimeSpan.FromSeconds(15), $"40 calls took {total.Elapsed}");
+        Assert.True(total.Elapsed < AliasSleep + TimeSpan.FromSeconds(8), $"40 calls took {total.Elapsed}");
 
         Assert.NotEmpty(probes);
         var busySamples = pending.Count(p => p > 0);
-        Assert.True(busySamples <= pending.Count * 0.3,
+        Assert.True(busySamples <= pending.Count * 0.1,
             $"work items were queued in {busySamples} of {pending.Count} samples (max {pending.Max()})");
 
         probes.Sort();
         var median = probes[probes.Count / 2];
         var p95 = probes[(int)(probes.Count * 0.95)];
-        Assert.True(median < 400, $"median pool probe latency {median:F0} ms");
+        Assert.True(median < 100, $"median pool probe latency {median:F0} ms");
         Assert.True(p95 < 3_000, $"p95 pool probe latency {p95:F0} ms");
     }
 

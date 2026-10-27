@@ -41,6 +41,51 @@ public sealed record GitCliResult(
     /// <summary>True when stdout exceeded <see cref="GitCliRequest.MaxStandardOutputBytes"/>,
     /// stopping the read and terminating the process tree early.</summary>
     public bool OutputTruncated { get; init; }
+
+    // Value equality that does not depend on whether StandardOutput has been decoded yet: a raw
+    // result compares its bytes, a text result compares its text. The compiler-generated version
+    // would compare the lazy decode cache and the byte array by reference.
+    public bool Equals(GitCliResult? other)
+    {
+        if (other is null)
+            return false;
+        if (ReferenceEquals(this, other))
+            return true;
+        if (ExitCode != other.ExitCode || ErrorKind != other.ErrorKind || Duration != other.Duration
+            || OutputTruncated != other.OutputTruncated || StandardError != other.StandardError)
+            return false;
+
+        var bytes = StandardOutputBytes;
+        var otherBytes = other.StandardOutputBytes;
+        if (bytes is null || otherBytes is null)
+            return bytes is null && otherBytes is null && StandardOutput == other.StandardOutput;
+        return bytes.AsSpan().SequenceEqual(otherBytes);
+    }
+
+    public override int GetHashCode()
+    {
+        var hash = new HashCode();
+        hash.Add(ExitCode);
+        hash.Add(StandardError);
+        hash.Add(ErrorKind);
+        hash.Add(Duration);
+        hash.Add(OutputTruncated);
+        if (StandardOutputBytes is { } bytes)
+            hash.Add(bytes.Length);
+        else
+            hash.Add(StandardOutput);
+        return hash.ToHashCode();
+    }
+
+    // Reports the size of stdout instead of its text, so printing a result never decodes it.
+    private bool PrintMembers(StringBuilder builder)
+    {
+        builder.Append($"ExitCode = {ExitCode}, ErrorKind = {ErrorKind}, Duration = {Duration}, ");
+        builder.Append($"StandardOutput = {(StandardOutputBytes?.Length ?? _standardOutput?.Length ?? 0)} ");
+        builder.Append(StandardOutputBytes is null ? "chars" : "bytes");
+        builder.Append($", StandardError = {StandardError}, OutputTruncated = {OutputTruncated}");
+        return true;
+    }
 }
 
 /// <summary>How a git invocation competes with the rest of the app.</summary>

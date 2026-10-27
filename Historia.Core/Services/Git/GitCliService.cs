@@ -22,6 +22,8 @@ public sealed class GitCliService : IGitCliService
     /// the whole app, whatever the number of repositories or <see cref="GitCliService"/> instances.</summary>
     private const int MaxBackgroundProcesses = 2;
 
+    private static readonly TimeSpan BackgroundSlotWarning = TimeSpan.FromSeconds(60);
+
     private static readonly SemaphoreSlim BackgroundSlots = new(MaxBackgroundProcesses, MaxBackgroundProcesses);
 
     private readonly IGitExecutableLocator _locator;
@@ -126,6 +128,12 @@ public sealed class GitCliService : IGitCliService
             return new GitCliResult(-1, string.Empty, string.Empty, GitErrorKind.Cancelled, TimeSpan.Zero);
         }
 
+        // A hung background process would hold its slot for good and silently stall all background
+        // git work; the log says which command it is.
+        using var slotWatchdog = new Timer(
+            static state => AppLog.Write(AppLogLevel.Warn, "git-cli",
+                $"A background git slot has been held for over {BackgroundSlotWarning.TotalSeconds:0} s by: {state}"),
+            $"git {string.Join(' ', request.Arguments)}", BackgroundSlotWarning, Timeout.InfiniteTimeSpan);
         try
         {
             return await StartAndRunAsync(request, git.Path, inWriteScope, progress, onStdoutLine, ct).ConfigureAwait(false);
@@ -254,8 +262,12 @@ public sealed class GitCliService : IGitCliService
                         }
                     }
 
+                    // A started write is never killed: it keeps draining instead.
                     if (overflow)
-                        GitCliProcessSetup.TryKill(process);
+                    {
+                        if (!neverKill)
+                            GitCliProcessSetup.TryKill(process);
+                    }
                     else
                         onStdoutLine?.Invoke(line);
                 }
@@ -287,7 +299,7 @@ public sealed class GitCliService : IGitCliService
                         rawStdout!.Write(buffer, 0, toWrite);
                     }
 
-                    if (overflow)
+                    if (overflow && !neverKill)
                         GitCliProcessSetup.TryKill(process);
                 }
             }
@@ -313,19 +325,19 @@ public sealed class GitCliService : IGitCliService
             var stdoutPipe = new BlockTrackingStream(process.StandardOutput.BaseStream);
             if (raw)
             {
-                pipes.Add(PipeThread.Start("git-stdout", process, stdoutPipe, ReaderStartDelay,
+                pipes.Add(PipeThread.Start("git-stdout", process, neverKill, stdoutPipe, ReaderStartDelay,
                     () => ReadStdoutRaw(stdoutPipe)));
             }
             else
             {
                 var reader = new StreamReader(stdoutPipe, Utf8NoBom, detectEncodingFromByteOrderMarks: true, bufferSize: 16 * 1024);
-                pipes.Add(PipeThread.Start("git-stdout", process, stdoutPipe, ReaderStartDelay,
+                pipes.Add(PipeThread.Start("git-stdout", process, neverKill, stdoutPipe, ReaderStartDelay,
                     () => ReadStdoutLines(reader)));
             }
 
             var stderrPipe = new BlockTrackingStream(process.StandardError.BaseStream);
             var stderrReader = new StreamReader(stderrPipe, Utf8NoBom, detectEncodingFromByteOrderMarks: true, bufferSize: 16 * 1024);
-            pipes.Add(PipeThread.Start("git-stderr", process, stderrPipe, ReaderStartDelay,
+            pipes.Add(PipeThread.Start("git-stderr", process, neverKill, stderrPipe, ReaderStartDelay,
                 () => ReadStderr(stderrReader)));
 
             if (request.StandardInput is { } stdin)
@@ -337,7 +349,7 @@ public sealed class GitCliService : IGitCliService
                 if (stdin.Length <= InlineStdinMaxChars)
                     WriteStdin(writer, stdin);
                 else
-                    pipes.Add(PipeThread.Start("git-stdin", process, tracked: null, TimeSpan.Zero,
+                    pipes.Add(PipeThread.Start("git-stdin", process, neverKill, tracked: null, TimeSpan.Zero,
                         () => WriteStdin(writer, stdin)));
             }
 
@@ -469,7 +481,7 @@ public sealed class GitCliService : IGitCliService
         }
 
         public static PipeThread Start(
-            string name, Process process, BlockTrackingStream? tracked, TimeSpan startDelay, Action body)
+            string name, Process process, bool neverKill, BlockTrackingStream? tracked, TimeSpan startDelay, Action body)
         {
             var pipe = new PipeThread(tracked);
             new Thread(() =>
@@ -488,7 +500,10 @@ public sealed class GitCliService : IGitCliService
                 }
                 catch (Exception ex)
                 {
-                    GitCliProcessSetup.TryKill(process);
+                    // A reader that died leaves the pipe undrained and git blocked on it — except
+                    // for a started write, which is never killed; its exception still surfaces.
+                    if (!neverKill)
+                        GitCliProcessSetup.TryKill(process);
                     pipe._done.TrySetException(ex);
                 }
             }, PipeThreadStackBytes)

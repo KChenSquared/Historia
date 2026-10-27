@@ -246,8 +246,19 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
         if (record is null)
         {
             // EOF on stdout. A clean exit means the walk is exhausted; anything else is a
-            // failure.
-            try { _process.WaitForExit(1_000); } catch { /* best effort */ }
+            // failure. A walk that was running at low priority may need a while to be scheduled
+            // for its exit under CPU saturation, so it is restored to normal first and given up
+            // to five seconds; a process that still has not exited has produced every record,
+            // so its unknown exit code is not a failure.
+            SetLowPriority(false);
+            var exited = false;
+            try { exited = _process.WaitForExit(1_000) || _process.WaitForExit(4_000); } catch { /* best effort */ }
+            if (!exited)
+            {
+                Diagnostics.PerfLog.Mark("GitLogStream: git did not exit within 5 s of the end of its output; treating the walk as exhausted");
+                return false;
+            }
+
             var exitCode = SafeExitCode();
             if (exitCode != 0)
                 Fail($"git log exited {exitCode}: {StderrTail()}");
@@ -364,21 +375,34 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
         _disposed = true;
         Undisposed.TryRemove(_processId, out _);
 
-        // The kill runs on ProcessKiller's thread, and a disposed Process can no longer be killed:
-        // wait for the kill to be attempted before disposing. The wait is bounded so a backed-up
-        // killer never stalls a caller; a kill still pending after it disposes the process itself.
-        var killed = ProcessKiller.KillAsync(_process);
-        try { killed.Wait(1_000); } catch { /* best effort */ }
-        try { _stderrDrain.Wait(1_000); } catch { /* best effort */ }
-        try { _stdinWriter?.Join(1_000); } catch { /* best effort */ }
-
-        if (killed.IsCompleted)
-            DisposeProcess(_process);
-        else
-            _ = killed.ContinueWith(static (_, state) => DisposeProcess((Process)state!), _process,
-                CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        // A process that already exited needs no kill and no wait in the killer's queue. A running
+        // one is killed on the killer's threads; a disposed Process can no longer be killed, so the
+        // bookkeeping that ends in disposing it runs as a continuation of the kill and Dispose
+        // itself never waits for the killer.
+        var exited = true;
+        try { exited = _process.HasExited; } catch { /* treat an unreadable process as gone */ }
+        var killed = exited ? Task.CompletedTask : ProcessKiller.KillAsync(_process);
+        _ = FinishAfterKillAsync(killed, _stderrDrain, _stdinWriter, _process);
 
         _reader.Dispose();
+    }
+
+    private static async Task FinishAfterKillAsync(Task killed, Task stderrDrain, Thread? stdinWriter, Process process)
+    {
+        try
+        {
+            await killed.ConfigureAwait(false);
+            // Killing closes git's pipes, so both helpers end at once; the bounds cover a leftover
+            // child that keeps a pipe open.
+            await stderrDrain.WaitAsync(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+            stdinWriter?.Join(1_000);
+        }
+        catch
+        {
+            // Best effort.
+        }
+
+        DisposeProcess(process);
     }
 }
 

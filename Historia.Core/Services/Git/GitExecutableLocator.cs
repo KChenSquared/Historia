@@ -276,6 +276,7 @@ public sealed partial class GitExecutableLocator : IGitExecutableLocator
                 RedirectStandardError = true,
             };
             psi.ArgumentList.Add(argument);
+            GitCliProcessSetup.ComposeEnvironment(psi, null, null);
 
             process = Process.Start(psi);
             if (process is null)
@@ -291,13 +292,13 @@ public sealed partial class GitExecutableLocator : IGitExecutableLocator
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            KillQuietly(process);
+            await KillBeforeDisposeAsync(process).ConfigureAwait(false);
             AppLog.Write(AppLogLevel.Warn, "git", $"'{gitPath} {argument}' did not finish within {timeout.TotalSeconds:0.#} s and was stopped.");
             return null;
         }
         catch (OperationCanceledException)
         {
-            KillQuietly(process);
+            await KillBeforeDisposeAsync(process).ConfigureAwait(false);
             throw;
         }
         catch (Exception ex) when (ex is IOException or InvalidOperationException or System.ComponentModel.Win32Exception)
@@ -310,17 +311,9 @@ public sealed partial class GitExecutableLocator : IGitExecutableLocator
         }
     }
 
-    private static void KillQuietly(Process? process)
-    {
-        try
-        {
-            process?.Kill(entireProcessTree: true);
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
-        {
-            // Already exited, or the OS refused; a probe has nothing more to clean up.
-        }
-    }
+    // A disposed Process can no longer be killed, so the kill is attempted first.
+    private static Task KillBeforeDisposeAsync(Process? process) =>
+        process is null ? Task.CompletedTask : ProcessKiller.KillAsync(process);
 
     internal static Version? ParseVersion(string output)
     {

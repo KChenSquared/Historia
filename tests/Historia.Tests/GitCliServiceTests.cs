@@ -476,6 +476,41 @@ public class GitCliServiceTests
         Assert.Equal(GitErrorKind.None, result.ErrorKind);
     }
 
+    [Fact]
+    public async Task Output_budget_does_not_kill_a_process_that_must_never_be_killed()
+    {
+        var cli = await MakeAsync();
+        using var repo = TestRepositoryBuilder.FromTemplate("linear-3000", b => b.LinearHistory(3_000));
+
+        var result = await cli.RunAsync(new GitCliRequest
+        {
+            Arguments = ["log", "--all", "-p"],
+            WorkingDirectory = repo.Path,
+            MaxStandardOutputBytes = 1_000,
+            CancelPolicy = GitCliCancelPolicy.NeverAfterStart,
+        });
+
+        // The overflow is flagged and the rest is drained, but git is left to finish on its own.
+        Assert.True(result.OutputTruncated);
+        Assert.True(result.StandardOutput.Length <= 5_000);
+        Assert.Equal(0, result.ExitCode);
+    }
+
+    [Fact]
+    public void Results_with_the_same_content_are_equal_whether_or_not_stdout_was_decoded()
+    {
+        byte[] bytes = [(byte)'h', (byte)'i'];
+        var decoded = new GitCliResult(0, bytes, "", GitErrorKind.None, TimeSpan.Zero);
+        var undecoded = new GitCliResult(0, (byte[])bytes.Clone(), "", GitErrorKind.None, TimeSpan.Zero);
+        Assert.Equal("hi", decoded.StandardOutput);
+
+        Assert.Equal(decoded, undecoded);
+        Assert.Equal(decoded.GetHashCode(), undecoded.GetHashCode());
+        Assert.NotEqual(decoded, new GitCliResult(0, "hi", "", GitErrorKind.None, TimeSpan.Zero));
+        Assert.NotEqual(decoded, undecoded with { OutputTruncated = true });
+        Assert.DoesNotContain("hi", undecoded.ToString());
+    }
+
     private sealed class DelayedLocator : IGitExecutableLocator
     {
         private readonly TaskCompletionSource<GitExecutableInfo> _tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
