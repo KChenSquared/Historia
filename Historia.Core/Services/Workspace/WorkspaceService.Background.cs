@@ -191,9 +191,21 @@ public sealed partial class WorkspaceService
     /// <inheritdoc/>
     public void SetAppActive(bool active)
     {
-        Volatile.Write(ref _appActive, active ? 1 : 0);
+        bool collect = false;
+        lock (_idleGcSync)
+        {
+            Volatile.Write(ref _appActive, active ? 1 : 0);
+            if (!active && _idleGcPending)
+            {
+                _idleGcPending = false;
+                collect = true;
+            }
+        }
+
         if (active)
             _ = Task.Run(RefreshFocusedOnActivationAsync);
+        if (collect)
+            IdleCollectTask = Task.Run(CollectGarbageNow);
     }
 
     /// <summary>The focused tab's status right away, ignoring pacing — and a full refresh when its
@@ -560,28 +572,76 @@ public sealed partial class WorkspaceService
             _ = QueueInitialInactiveTabPipelineAsync(context);
     }
 
-    // An aggressive, blocking, compacting GC.Collect after every tab switch pays a
-    // full-heap pause and (LargeObjectHeapCompactionMode.CompactOnce) a LOH compaction even when
-    // the outgoing tab held only a few MB, and Aggressive also decommits, so the next tab pays to
-    // re-commit. Only worth it once the heap has actually grown enough to matter.
+    // Trap: an aggressive, blocking, compacting GC.Collect after every tab switch paid a full-heap
+    // pause and a large-object-heap compaction even when the outgoing tab held only a few MB, and
+    // Aggressive also decommits, so the next tab paid to re-commit. The collection is now a
+    // non-blocking request, made only once the heap has grown enough to matter and only while the
+    // window is inactive, so it never lands while the user is interacting.
     private const long CompactHeapThresholdBytes = 1L * 1024 * 1024 * 1024; // 1 GiB
     private const long CompactLohThresholdBytes = 256L * 1024 * 1024; // 256 MiB
 
+    private readonly object _idleGcSync = new();
+    private bool _idleGcPending;
+
+    /// <summary>The collection the idle reclaim requests; tests substitute a recording one so no
+    /// real collection runs.</summary>
+    internal Action<int, GCCollectionMode, bool> CollectGarbage { get; set; } = GC.Collect;
+
+    /// <summary>Test seam: the collection started by the last deactivation that found a request
+    /// pending.</summary>
+    internal Task IdleCollectTask { get; private set; } = Task.CompletedTask;
+
     /// <summary>Whether the managed heap (or the large-object heap alone) is big
-    /// enough to justify the blocking, compacting GC in <see cref="HibernateAndReclaimAsync"/>.
-    /// A small heap gains nothing from the pause and just pays the decommit-then-recommit cost on
+    /// enough to justify the full collection requested by <see cref="ReclaimIfHeapGrown"/>.
+    /// A small heap gains nothing from it and just pays the decommit-then-recommit cost on
     /// the next tab switch.</summary>
     internal static bool ShouldCompactAfterHibernate(long heapBytes, long lohBytes) =>
         heapBytes >= CompactHeapThresholdBytes || lohBytes >= CompactLohThresholdBytes;
+
+    /// <summary>Requests the idle collection when the heap is big enough. While the window is
+    /// active the request is only recorded (one at most) and runs when the window next becomes
+    /// inactive; a reactivation before then leaves it pending. While inactive it runs now.</summary>
+    internal void ReclaimIfHeapGrown(long heapBytes, long lohBytes)
+    {
+        static long Mb(long bytes) => bytes / (1024 * 1024);
+        if (!ShouldCompactAfterHibernate(heapBytes, lohBytes))
+        {
+            Historia.Diagnostics.PerfLog.Mark(
+                $"tab-switch GC skipped (heap={Mb(heapBytes)}MB, loh={Mb(lohBytes)}MB)");
+            return;
+        }
+
+        bool collectNow;
+        lock (_idleGcSync)
+        {
+            collectNow = !IsAppActive;
+            _idleGcPending = !collectNow;
+        }
+
+        if (collectNow)
+            CollectGarbageNow();
+        else
+            Historia.Diagnostics.PerfLog.Mark(
+                $"tab-switch GC deferred until inactive (heap={Mb(heapBytes)}MB, loh={Mb(lohBytes)}MB)");
+    }
+
+    /// <summary>A full, non-blocking collection in <see cref="GCCollectionMode.Optimized"/> mode:
+    /// the runtime requests a background collection and decides whether the moment is right, so
+    /// this never forces a compacting pause.</summary>
+    private void CollectGarbageNow()
+    {
+        Historia.Diagnostics.PerfLog.Memory("before tab-switch GC");
+        CollectGarbage(GC.MaxGeneration, GCCollectionMode.Optimized, false);
+        Historia.Diagnostics.PerfLog.Memory("after tab-switch GC request");
+    }
 
     /// <summary>Releases everything the outgoing tab's graph held in memory (cancels its
     /// background spill, disposes its live walk, drops its resident commit list). Once
     /// the newly focused tab's background-write gate opens (so the pause never lands inside its
     /// own first paint) and focus has been stable for 2s (so a burst of switches triggers one
-    /// collection, not several), runs a compacting GC to actually shrink the working set — below
-    /// ~90% memory load the GC prefers background collections that free live objects without
-    /// returning the heap size to the OS. Skipped when neither the managed heap nor
-    /// the LOH has grown past its threshold — see <see cref="ShouldCompactAfterHibernate"/>.</summary>
+    /// collection, not several), requests an idle collection to shrink the working set — see
+    /// <see cref="ReclaimIfHeapGrown"/>, which skips it unless the managed heap or the LOH has
+    /// grown past its threshold.</summary>
     private async Task HibernateAndReclaimAsync(RepositoryContext old, RepositoryContext newContext)
     {
         if (_services.GetService(typeof(Historia.Services.Graph.IGraphLayoutService))
@@ -606,31 +666,14 @@ public sealed partial class WorkspaceService
                 return; // focus moved again right at the debounce boundary
         }
 
-        // Gate the blocking, compacting collection on actual heap growth. Verified
-        // against this repo's own PerfLog.Memory (Historia.Core/Diagnostics/PerfLog.cs): .NET's
-        // GCMemoryInfo.GenerationInfo is a GCGenerationInfo[] indexed by generation, where index 3
-        // is the large object heap (index 4 is the pinned object heap; absent on runtimes too old
-        // to report it, hence the length check) and HeapSizeBytes is the managed heap's total size
-        // as of the end of the last GC.
+        // Gate the collection on actual heap growth. .NET's GCMemoryInfo.GenerationInfo is a
+        // GCGenerationInfo[] indexed by generation, where index 3 is the large object heap (index 4
+        // is the pinned object heap; absent on runtimes too old to report it, hence the length
+        // check) and HeapSizeBytes is the managed heap's total size as of the end of the last GC.
         var info = GC.GetGCMemoryInfo();
         var gen = info.GenerationInfo;
         var lohBytes = gen.Length > 3 ? gen[3].SizeAfterBytes : 0L;
-        if (!ShouldCompactAfterHibernate(info.HeapSizeBytes, lohBytes))
-        {
-            static long Mb(long bytes) => bytes / (1024 * 1024);
-            Historia.Diagnostics.PerfLog.Mark(
-                $"tab-switch GC compaction skipped (heap={Mb(info.HeapSizeBytes)}MB, loh={Mb(lohBytes)}MB)");
-        }
-        else
-        {
-            Historia.Diagnostics.PerfLog.Memory("before tab-switch GC compaction");
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true, compacting: true);
-            sw.Stop();
-            Historia.Diagnostics.PerfLog.Memory("after tab-switch GC compaction");
-            Historia.Diagnostics.PerfLog.Mark($"tab-switch GC compaction: {sw.Elapsed.TotalMilliseconds:F1}ms");
-        }
+        ReclaimIfHeapGrown(info.HeapSizeBytes, lohBytes);
 
         // Once the active tab is settled (gate open, focus stable, its own reclaim done),
         // queue every OTHER open tab for the headless commit-graph + disk-cache pipeline.

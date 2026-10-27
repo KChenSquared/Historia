@@ -258,6 +258,9 @@ public sealed partial class WorkspaceService
     {
         try
         {
+            // The local identity read does not depend on the root-commit walk, so it runs beside
+            // it; it is only used if the resolved profile needs the repo's identity filled in.
+            var configRead = context.IsBare ? null : ReadLocalIdentityAsync(context, ct);
             var key = await _identity.ResolveAsync(context, ct).ConfigureAwait(false);
 
             // Keep the binding's last-known path fresh — the rename case working as intended.
@@ -276,8 +279,8 @@ public sealed partial class WorkspaceService
                 // non-blocking banner rather than being overwritten here.
                 if (!context.IsBare)
                 {
-                    var (name, email) = await context.Gateway.GetConfiguredIdentityAsync(ct).ConfigureAwait(false);
-                    if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(email))
+                    var configured = await configRead!.ConfigureAwait(false);
+                    if (configured is { } local && string.IsNullOrWhiteSpace(local.Name) && string.IsNullOrWhiteSpace(local.Email))
                     {
                         // Check the attempt token before starting the git-config write, then run
                         // the write itself with CancellationToken.None to prevent a focus switch
@@ -298,6 +301,15 @@ public sealed partial class WorkspaceService
         {
             // Identity/profile resolution failure must not stop the repo from opening.
         }
+    }
+
+    /// <summary>The repo's local user.name/user.email, or null when the read failed. Never
+    /// throws, so a read nobody awaits (the walk failed or no profile applies) leaves nothing
+    /// unobserved.</summary>
+    private static async Task<(string? Name, string? Email)?> ReadLocalIdentityAsync(RepositoryContext context, CancellationToken ct)
+    {
+        try { return await context.Gateway.GetConfiguredIdentityAsync(ct).ConfigureAwait(false); }
+        catch { return null; }
     }
 
     public async Task<RepositoryContext> InitAsync(string path, string? initialBranch, CancellationToken ct = default)

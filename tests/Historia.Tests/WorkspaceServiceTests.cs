@@ -298,6 +298,103 @@ public class WorkspaceServiceTests : WorkspaceServiceTestBase
         await ws.DisposeAsync();
     }
 
+    [Fact(Timeout = 60000)]
+    public async Task Session_restore_opens_the_focused_tab_first_and_never_more_than_two_others_at_once()
+    {
+        var repos = Enumerable.Range(0, 6).Select(i => Repo($"r{i}.txt")).ToList();
+        try
+        {
+            var focusIndex = 3;
+            var focusPath = repos[focusIndex].Path;
+            File.WriteAllText(AppPaths.SessionFile, new JsonObject
+            {
+                ["schemaVersion"] = 2,
+                ["paths"] = new JsonArray(repos.Select(r => (JsonNode)r.Path).ToArray()),
+                ["focusedPath"] = focusPath,
+            }.ToJsonString());
+
+            var ws = NewWorkspace();
+            var sync = new object();
+            var started = new List<string>();
+            var gates = new Dictionary<string, TaskCompletionSource>(StringComparer.OrdinalIgnoreCase);
+            var inFlightOthers = 0;
+            var maxInFlightOthers = 0;
+            foreach (var r in repos)
+                gates[r.Path] = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            ws.OpenContext = async (path, services, ct) =>
+            {
+                var isFocus = string.Equals(path, focusPath, StringComparison.OrdinalIgnoreCase);
+                lock (sync)
+                {
+                    started.Add(path);
+                    if (!isFocus)
+                        maxInFlightOthers = Math.Max(maxInFlightOthers, ++inFlightOthers);
+                }
+
+                try
+                {
+                    await gates[path].Task.WaitAsync(ct);
+                    return await RepositoryContext.OpenAsync(path, services, ct);
+                }
+                finally
+                {
+                    if (!isFocus)
+                        lock (sync) inFlightOthers--;
+                }
+            };
+
+            List<string> Started() { lock (sync) return [.. started]; }
+            async Task WaitForStartedAsync(int count)
+            {
+                var sw = Stopwatch.StartNew();
+                while (Started().Count < count)
+                {
+                    Assert.True(sw.Elapsed < TimeSpan.FromSeconds(20), $"expected {count} opens to have started");
+                    await Task.Delay(5);
+                }
+            }
+
+            var restore = ws.RestoreSessionAsync();
+
+            // Only the focused tab's open starts; the others wait for it.
+            await WaitForStartedAsync(1);
+            await Task.Delay(150);
+            Assert.Equal([focusPath], Started());
+
+            // Once it finishes, exactly two others start.
+            gates[focusPath].SetResult();
+            await WaitForStartedAsync(3);
+            await Task.Delay(150);
+            Assert.Equal(3, Started().Count);
+
+            // Each finished open lets exactly one more start, until all have.
+            for (var startedCount = 3; startedCount < repos.Count; startedCount++)
+            {
+                var running = Started().First(p => p != focusPath && !gates[p].Task.IsCompleted);
+                gates[running].SetResult();
+                await WaitForStartedAsync(startedCount + 1);
+            }
+
+            foreach (var g in gates.Values)
+                g.TrySetResult();
+            await restore.WaitAsync(TimeSpan.FromSeconds(30));
+
+            Assert.Equal(2, maxInFlightOthers);
+            Assert.Equal(repos.Count, ws.OpenRepositories.Count);
+            Assert.Equal(Norm(focusPath), Norm(ws.Focused!.RepositoryPath));
+            Assert.Equal(
+                repos.Select(r => Norm(r.Path)),
+                ws.OpenRepositories.Select(c => Norm(c.RepositoryPath)));
+            await ws.DisposeAsync();
+        }
+        finally
+        {
+            foreach (var r in repos)
+                r.Dispose();
+        }
+    }
+
     /// <summary>
     /// Verifies that restored repositories from session are not touched in the recent list.
     /// Also guards the dispose path: the restored background tab is still queued when the
@@ -629,6 +726,206 @@ public class WorkspaceFocusPriorityTests : WorkspaceServiceTestBase
     public void ShouldCompactAfterHibernate_uses_named_heap_and_LOH_thresholds(long heapBytes, long lohBytes, bool expected)
     {
         Assert.Equal(expected, WorkspaceService.ShouldCompactAfterHibernate(heapBytes, lohBytes));
+    }
+
+    // ── The idle collection never runs while the window is active ──
+
+    private const long BigHeap = 2L * 1024 * 1024 * 1024;
+
+    private sealed class CollectRecorder
+    {
+        private readonly ConcurrentQueue<(int Generation, GCCollectionMode Mode, bool Blocking)> _calls = new();
+        public List<(int Generation, GCCollectionMode Mode, bool Blocking)> Calls => _calls.ToList();
+        public void Collect(int generation, GCCollectionMode mode, bool blocking) => _calls.Enqueue((generation, mode, blocking));
+    }
+
+    private WorkspaceService NewWorkspaceWithRecorder(CollectRecorder recorder)
+    {
+        var ws = NewWorkspace();
+        ws.CollectGarbage = recorder.Collect;
+        return ws;
+    }
+
+    [Fact]
+    public async Task Idle_collection_is_not_requested_while_the_window_is_active()
+    {
+        var recorder = new CollectRecorder();
+        var ws = NewWorkspaceWithRecorder(recorder);
+        Assert.True(ws.IsAppActive);
+
+        ws.ReclaimIfHeapGrown(BigHeap, 0);
+
+        Assert.Empty(recorder.Calls);
+        await ws.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Pending_request_runs_one_gentle_collection_when_the_window_deactivates()
+    {
+        var recorder = new CollectRecorder();
+        var ws = NewWorkspaceWithRecorder(recorder);
+        ws.ReclaimIfHeapGrown(BigHeap, 0);
+        ws.ReclaimIfHeapGrown(0, BigHeap); // a second request while active joins the first
+
+        ws.SetAppActive(false);
+        await ws.IdleCollectTask;
+
+        var call = Assert.Single(recorder.Calls);
+        Assert.Equal(GC.MaxGeneration, call.Generation);
+        Assert.Equal(GCCollectionMode.Optimized, call.Mode);
+        Assert.False(call.Blocking);
+
+        // The request was consumed: later activations and deactivations collect nothing more.
+        ws.SetAppActive(true);
+        ws.SetAppActive(false);
+        await ws.IdleCollectTask;
+        Assert.Single(recorder.Calls);
+        await ws.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Reactivation_before_deactivation_leaves_the_request_pending()
+    {
+        var recorder = new CollectRecorder();
+        var ws = NewWorkspaceWithRecorder(recorder);
+        ws.ReclaimIfHeapGrown(BigHeap, 0);
+
+        ws.SetAppActive(true);
+        Assert.Empty(recorder.Calls);
+
+        ws.SetAppActive(false);
+        await ws.IdleCollectTask;
+        Assert.Single(recorder.Calls);
+        await ws.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Deactivation_without_a_pending_request_collects_nothing()
+    {
+        var recorder = new CollectRecorder();
+        var ws = NewWorkspaceWithRecorder(recorder);
+
+        ws.SetAppActive(false);
+        await ws.IdleCollectTask;
+
+        Assert.Empty(recorder.Calls);
+        await ws.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Request_while_the_window_is_inactive_collects_at_once_and_leaves_nothing_pending()
+    {
+        var recorder = new CollectRecorder();
+        var ws = NewWorkspaceWithRecorder(recorder);
+        ws.SetAppActive(false);
+
+        ws.ReclaimIfHeapGrown(BigHeap, 0);
+        Assert.Single(recorder.Calls);
+
+        ws.SetAppActive(true);
+        ws.SetAppActive(false);
+        await ws.IdleCollectTask;
+        Assert.Single(recorder.Calls);
+        await ws.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Small_heap_requests_no_collection_even_while_inactive()
+    {
+        var recorder = new CollectRecorder();
+        var ws = NewWorkspaceWithRecorder(recorder);
+        ws.SetAppActive(false);
+
+        ws.ReclaimIfHeapGrown(1024, 1024);
+        ws.SetAppActive(true);
+        ws.SetAppActive(false);
+        await ws.IdleCollectTask;
+
+        Assert.Empty(recorder.Calls);
+        await ws.DisposeAsync();
+    }
+
+    // ── Identity: the config read runs beside the root-commit walk ──
+
+    /// <summary>Signals when a git invocation whose first argument is <c>config</c> starts.</summary>
+    private sealed class ConfigReadObservingCli(IGitCliService inner) : IGitCliService
+    {
+        public bool IsGitAvailable => inner.IsGitAvailable;
+        public TaskCompletionSource ConfigReadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<GitCliResult> RunAsync(GitCliRequest request, CancellationToken ct = default)
+        {
+            if (request.Arguments.Count > 0 && request.Arguments[0] == "config")
+                ConfigReadStarted.TrySetResult();
+            return inner.RunAsync(request, ct);
+        }
+
+        public Task<GitCliResult> RunAsync(
+            GitCliRequest request, IProgress<GitProgress>? progress, Action<string>? onStdoutLine, CancellationToken ct = default)
+            => inner.RunAsync(request, progress, onStdoutLine, ct);
+    }
+
+    /// <summary>An identity service whose walk finishes only after the config read has started, so
+    /// a sequential resolve (walk, then read) can never complete.</summary>
+    private sealed class WaitsForConfigReadIdentityService(Task configReadStarted) : IRepoIdentityService
+    {
+        public bool ConfigReadWasStartedFirst { get; private set; }
+
+        public async Task<RepoIdentityKey> ResolveAsync(RepositoryContext context, CancellationToken ct = default)
+        {
+            await configReadStarted.WaitAsync(TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
+            ConfigReadWasStartedFirst = true;
+            return RepoIdentityKey.FromRootCommit("0123456789abcdef0123456789abcdef01234567");
+        }
+    }
+
+    private static GitProfile NewProfile() => new()
+    {
+        Id = Guid.NewGuid(),
+        DisplayName = "Test Profile",
+        GitUserName = "Profile Name",
+        GitUserEmail = "profile@example.com",
+        CreatedAt = DateTimeOffset.Now,
+    };
+
+    [Fact(Timeout = 30000)]
+    public async Task Identity_resolution_starts_the_config_read_while_the_walk_is_running()
+    {
+        var realCli = _host.Provider.GetRequiredService<IGitCliService>();
+        var cli = new ConfigReadObservingCli(realCli);
+        var provider = new OverrideServiceProvider(_host.Provider, typeof(IGitCliService), cli);
+        var identity = new WaitsForConfigReadIdentityService(cli.ConfigReadStarted.Task);
+        var profiles = new ConfigWriteProfileService(NewProfile());
+        var recents = _recents = new RecentRepositoryService(_host.Settings);
+        var ws = new WorkspaceService(provider, cli, recents, profiles, identity);
+
+        using var r = RepoWithoutLocalIdentity();
+        var ctx = await ws.OpenAsync(r.Path);
+        ctx.MarkFirstGraphPaintDone();
+
+        // The repo has no local identity, so the profile is written once both reads finished.
+        await profiles.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.True(identity.ConfigReadWasStartedFirst);
+
+        profiles.Release.TrySetResult();
+        await ws.DisposeAsync();
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Profile_is_not_written_when_the_repo_already_has_a_local_identity()
+    {
+        var cli = _host.Provider.GetRequiredService<IGitCliService>();
+        var profiles = new ConfigWriteProfileService(NewProfile());
+        var recents = _recents = new RecentRepositoryService(_host.Settings);
+        var ws = new WorkspaceService(_host.Provider, cli, recents, profiles, new RepoIdentityService(cli));
+
+        using var r = Repo("has-identity.txt"); // the builder sets user.name and user.email locally
+        var ctx = await ws.OpenAsync(r.Path);
+        ctx.MarkFirstGraphPaintDone();
+        await ctx.FirstFullLoad.WaitAsync(TimeSpan.FromSeconds(20));
+
+        Assert.False(profiles.Started.Task.IsCompleted);
+        await ws.DisposeAsync();
     }
 
     // ── A focus switch mid-git-config-write must not cancel the write ──
