@@ -2,6 +2,14 @@ namespace Historia.Services.Workspace;
 
 public sealed partial class WorkspaceService
 {
+    /// <summary>How many non-focused tabs of a session restore open at the same time.</summary>
+    private const int RestoreOpenConcurrency = 2;
+
+    /// <summary>Opens one repository's context during a session restore; tests substitute a
+    /// gated one to control when each open starts and finishes.</summary>
+    internal Func<string, IServiceProvider, CancellationToken, Task<RepositoryContext>> OpenContext { get; set; } =
+        (path, services, ct) => RepositoryContext.OpenAsync(path, services, ct);
+
     public async Task RestoreSessionAsync(CancellationToken ct = default)
     {
         Historia.Diagnostics.PerfLog.Mark("RestoreSessionAsync start");
@@ -48,20 +56,38 @@ public sealed partial class WorkspaceService
             : System.IO.Path.GetFileName(focusTarget.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar));
         Historia.Diagnostics.PerfLog.Mark($"RestoreSessionAsync focusTarget resolved ({paths.Count} paths, focus={focusTargetName})");
 
-        // Kick off every existing path's RepositoryContext.Open concurrently right away.
-        // The loop adds tabs to _open (and focuses/initializes the right one) strictly in
-        // saved-session order. Once the focused tab is open, the loop pauses briefly before
-        // opening the rest — each remaining tab only needs RepositoryContext.Open (no graph
-        // work — InitializeContextAsync is deferred until it is actually focused),
-        // giving the focused tab's graph walk first claim on the CPU/disk it needs to paint as fast
-        // as possible.
+        // The focused tab's RepositoryContext.Open starts right away. Every other tab's open waits
+        // for it to finish and then runs through a gate of RestoreOpenConcurrency, so a restore of
+        // many tabs never launches git for all of them at once and the focused tab's open and
+        // graph walk have the CPU and disk to themselves. The loop below adds tabs to _open (and
+        // focuses/initializes the right one) strictly in saved-session order; each non-focused tab
+        // only needs RepositoryContext.Open (no graph work -- InitializeContextAsync is deferred
+        // until it is actually focused).
+        var openGate = new SemaphoreSlim(RestoreOpenConcurrency);
+        Task<RepositoryContext>? focusPrefetch = null;
         var prefetches = new Dictionary<string, Task<RepositoryContext>>(StringComparer.OrdinalIgnoreCase);
+        if (focusTarget is not null && !prefetches.ContainsKey(focusTarget))
+            // Task.Run only so the open's synchronous start (launching git) is off the caller;
+            // no thread waits on git.
+            prefetches[focusTarget] = focusPrefetch = Task.Run(() => OpenContext(focusTarget, _contextServices, ct), ct);
+
+        async Task<RepositoryContext> OpenAfterFocusAsync(string p)
+        {
+            if (focusPrefetch is not null)
+            {
+                try { await focusPrefetch.ConfigureAwait(false); }
+                catch { /* the focused tab failing to open must not hold the others back */ }
+            }
+
+            await openGate.WaitAsync(ct).ConfigureAwait(false);
+            try { return await OpenContext(p, _contextServices, ct).ConfigureAwait(false); }
+            finally { openGate.Release(); }
+        }
+
         foreach (var p in paths)
         {
             if (System.IO.Directory.Exists(p) && !prefetches.ContainsKey(p))
-                // Task.Run only so each open's synchronous start (launching git) runs in parallel
-                // with the others; no thread waits on git.
-                prefetches[p] = Task.Run(() => RepositoryContext.OpenAsync(p, _contextServices, ct), ct);
+                prefetches[p] = Task.Run(() => OpenAfterFocusAsync(p), ct);
         }
 
         try
