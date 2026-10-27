@@ -28,6 +28,7 @@ public sealed partial class GitGateway(
             Arguments = ["status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all", "--renames"],
             WorkingDirectory = context.RepositoryPath,
             Timeout = Timeout.InfiniteTimeSpan,
+            RawStandardOutput = true,
         }, ct).ConfigureAwait(false);
 
         if (!result.IsSuccess)
@@ -89,13 +90,19 @@ public sealed partial class GitGateway(
             if (!await _caseCollisions.IgnoreCaseAsync(ct).ConfigureAwait(false))
                 return status;
 
-            var groups = await _caseCollisions.GroupsAsync(ct).ConfigureAwait(false);
+            var modifiedPaths = status.Unstaged
+                .Where(u => u.Kind == FileChangeKind.Modified)
+                .Select(u => u.Path)
+                .ToList();
+
+            var groups = await _caseCollisions
+                .GroupsForCandidatesAsync(modifiedPaths, specs => ChunkPathsByCommandLineLength(specs), ct)
+                .ConfigureAwait(false);
             if (groups.Count == 0)
                 return status;
 
-            var candidatePaths = status.Unstaged
-                .Where(u => u.Kind == FileChangeKind.Modified && groups.ContainsKey(u.Path))
-                .Select(u => u.Path)
+            var candidatePaths = modifiedPaths
+                .Where(groups.ContainsKey)
                 .ToList();
 
             if (candidatePaths.Count == 0)

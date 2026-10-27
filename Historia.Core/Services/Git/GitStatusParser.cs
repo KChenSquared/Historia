@@ -80,20 +80,20 @@ internal static class GitStatusParser
 
             if (token.StartsWith('#'))
             {
-                if (token.StartsWith("# branch.oid "))
+                if (token.StartsWith("# branch.oid ", StringComparison.Ordinal))
                 {
                     var oidPart = token["# branch.oid ".Length..].Trim();
                     if (!oidPart.Equals("(initial)", StringComparison.OrdinalIgnoreCase))
                         headCommitId = ParseId(oidPart);
                 }
-                else if (token.StartsWith("# branch.ab "))
+                else if (token.StartsWith("# branch.ab ", StringComparison.Ordinal))
                 {
                     ParseAheadBehind(token.AsSpan("# branch.ab ".Length), out aheadBy, out behindBy);
                 }
                 continue;
             }
 
-            if (token.StartsWith("1 "))
+            if (token.StartsWith("1 ", StringComparison.Ordinal))
             {
                 // Format: 1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
                 var parts = token.Split(' ', 9);
@@ -110,7 +110,7 @@ internal static class GitStatusParser
                 continue;
             }
 
-            if (token.StartsWith("2 "))
+            if (token.StartsWith("2 ", StringComparison.Ordinal))
             {
                 // Format: 2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path>
                 // Followed by <origPath> as the next NUL-separated token.
@@ -134,7 +134,7 @@ internal static class GitStatusParser
                 continue;
             }
 
-            if (token.StartsWith("u "))
+            if (token.StartsWith("u ", StringComparison.Ordinal))
             {
                 // Format: u <xy> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>
                 var parts = token.Split(' ', 11);
@@ -157,7 +157,7 @@ internal static class GitStatusParser
                 continue;
             }
 
-            if (token.StartsWith("? "))
+            if (token.StartsWith("? ", StringComparison.Ordinal))
             {
                 var path = token.Substring(2);
                 untracked.Add(new FileStatusEntry
@@ -289,9 +289,9 @@ internal static class GitStatusParser
         var aheadPart = span[..spaceIndex].Trim();
         var behindPart = span[(spaceIndex + 1)..].Trim();
 
-        if (aheadPart.StartsWith("+") && int.TryParse(aheadPart[1..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var a))
+        if (aheadPart.StartsWith("+", StringComparison.Ordinal) && int.TryParse(aheadPart[1..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var a))
             aheadBy = a;
-        if (behindPart.StartsWith("-") && int.TryParse(behindPart[1..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var b))
+        if (behindPart.StartsWith("-", StringComparison.Ordinal) && int.TryParse(behindPart[1..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var b))
             behindBy = b;
     }
 
