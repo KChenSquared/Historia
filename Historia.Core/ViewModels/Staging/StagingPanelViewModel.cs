@@ -134,9 +134,11 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
 
     private int ChangesCount => _status.Unstaged.Count + _status.Untracked.Count;
 
-    private bool HasCheckedChanges => _checkedChanges.Count > 0;
+    private bool CanStageChecked => !IsStagingBusy && _checkedChanges.Count > 0;
 
-    private bool HasCheckedStaged => _checkedStaged.Count > 0;
+    private bool CanUnstageChecked => !IsStagingBusy && _checkedStaged.Count > 0;
+
+    private bool IsNotStagingBusy => !IsStagingBusy;
 
     private bool HasChanges => ChangesCount > 0;
 
@@ -151,6 +153,10 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
 
     /// <summary>True from the start of a stage, unstage or discard until git has finished the change; the status refresh that follows is not part of it.</summary>
     [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(StageAllChangesCommand))]
+    [NotifyCanExecuteChangedFor(nameof(UnstageAllCommand))]
+    [NotifyCanExecuteChangedFor(nameof(StageCheckedCommand))]
+    [NotifyCanExecuteChangedFor(nameof(UnstageCheckedCommand))]
     public partial bool IsStagingBusy { get; private set; }
 
     /// <summary>True once the busy state has lasted <see cref="BusyIndicatorDelay"/>; the spinner and <see cref="BusyText"/> show then.</summary>
@@ -173,7 +179,7 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
         _holderAtBusyStart = _ctx.CurrentWriteHolder;
         BusyText = ComposeBusyText();
         IsStagingBusy = true;
-        _busyTimer = _ui.CreateTimer(BusyIndicatorDelay, OnBusyTick);
+        _busyTimer = _ui.CreateTimer(BusyIndicatorDelay, OnBusyTick, UiPriority.Normal);
         _busyTimer.Start();
     }
 
@@ -213,8 +219,47 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
            && _ctx.CurrentWriteHolder is { } now
            && string.Equals(now.Label, started.Label, StringComparison.Ordinal)
            && now.Held >= started.Held
-            ? $"Waiting for {now.Label}…"
+            ? $"Waiting for {DescribeHolder(now.Label)}…"
             : _busyBaseText;
+
+    /// <summary>
+    /// Turns a write-lock holder label into words for the user. A label is an explicit name such as
+    /// <c>Refresh index</c> or a call-site name such as <c>GitGateway.WorkingTree.CommitAsync</c>; the
+    /// text after the last dot loses its <c>Async</c> suffix and its PascalCase words are separated
+    /// (<c>Commit</c>, <c>Stage all</c>).
+    /// </summary>
+    public static string DescribeHolder(string label)
+    {
+        var name = label.AsSpan();
+        var dot = name.LastIndexOf('.');
+        if (dot >= 0 && dot < name.Length - 1)
+            name = name[(dot + 1)..];
+        if (name.Length > "Async".Length && name.EndsWith("Async", StringComparison.Ordinal))
+            name = name[..^"Async".Length];
+        name = name.Trim();
+        if (name.IsEmpty)
+            return label;
+
+        var text = new System.Text.StringBuilder(name.Length + 4);
+        for (int i = 0; i < name.Length; i++)
+        {
+            var c = name[i];
+            var startsWord = i > 0 && char.IsUpper(c) && char.IsLower(name[i - 1]);
+            if (startsWord)
+            {
+                text.Append(' ');
+                // Later words are lower case unless they are an acronym (the next letter is upper too).
+                var acronym = i + 1 < name.Length && char.IsUpper(name[i + 1]);
+                text.Append(acronym ? c : char.ToLowerInvariant(c));
+            }
+            else
+            {
+                text.Append(c);
+            }
+        }
+
+        return text.ToString();
+    }
 
     private static string DescribeBusy(string verb, int count)
         => count switch
@@ -509,11 +554,11 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
     // ── Stage, unstage, discard ──
 
     /// <summary>Stages the checked rows of the Changes list.</summary>
-    [RelayCommand(CanExecute = nameof(HasCheckedChanges))]
+    [RelayCommand(CanExecute = nameof(CanStageChecked))]
     private Task StageCheckedAsync() => MoveCheckedAsync(stage: true);
 
     /// <summary>Unstages the checked rows of the Staged list.</summary>
-    [RelayCommand(CanExecute = nameof(HasCheckedStaged))]
+    [RelayCommand(CanExecute = nameof(CanUnstageChecked))]
     private Task UnstageCheckedAsync() => MoveCheckedAsync(stage: false);
 
     private async Task MoveCheckedAsync(bool stage)
@@ -543,11 +588,11 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
     }
 
     /// <summary>Stages every unstaged and untracked file except the case-collision rows that cannot be attributed to one name.</summary>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(IsNotStagingBusy))]
     private Task StageAllChangesAsync() => BulkAsync(unstage: false);
 
     /// <summary>Unstages everything in the Staged list.</summary>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(IsNotStagingBusy))]
     private Task UnstageAllAsync() => BulkAsync(unstage: true);
 
     private static IReadOnlyList<FileStatusEntry> BulkFiles(RepositoryStatus status, bool unstage)

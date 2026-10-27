@@ -743,6 +743,29 @@ public sealed class ConflictResolverViewModelTests : IAsyncDisposable
     }
 
     [Fact(Timeout = 60000)]
+    public async Task A_same_size_edit_of_a_conflicted_file_reaches_the_resolver_through_an_unchanged_status()
+    {
+        var rig = Create(attach: false);
+        var home = rig.Repo.Git("rev-parse", "--abbrev-ref", "HEAD").Trim();
+        rig.Repo.Git("checkout", "-b", "feature");
+        rig.Repo.WriteFile("a.txt", "two\n").Stage().Commit("feature");
+        rig.Repo.Git("checkout", home);
+        rig.Repo.WriteFile("a.txt", "six\n").Stage().Commit("main");
+        try { rig.Repo.Git("merge", "feature"); } catch { /* expected to conflict */ }
+        await rig.Context.State.RefreshStatusAsync();
+        Assert.Single(rig.Context.State.Status.Conflicted);
+        rig.Vm.Attach(rig.Surface);
+        await LoadedAsync(rig);
+        rig.Vm.RegisterUnsavedWork();
+        Assert.False(rig.Vm.IsChangedOnDiskBannerVisible);
+
+        rig.Service.DiskHash = "edited-outside-with-the-same-size";
+        await rig.Context.State.RefreshStatusAsync();
+
+        await WaitUntilAsync(() => rig.Vm.IsChangedOnDiskBannerVisible);
+    }
+
+    [Fact(Timeout = 60000)]
     public async Task A_stop_change_with_unsaved_edits_keeps_them_and_shows_the_banner()
     {
         var rig = await LoadedAsync(Create());

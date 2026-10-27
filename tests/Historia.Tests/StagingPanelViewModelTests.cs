@@ -599,8 +599,11 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
         Assert.Equal("", vm.BusyText);
     }
 
-    [Fact]
-    public async Task The_indicator_waits_for_its_delay_and_names_the_operation_holding_the_write_lock()
+    [Theory]
+    [InlineData("Commit", "Commit")]
+    [InlineData("GitGateway.WorkingTree.CommitAsync", "Commit")]
+    [InlineData("Refresh index", "Refresh index")]
+    public async Task The_indicator_waits_for_its_delay_and_names_the_operation_holding_the_write_lock(string holderLabel, string shownName)
     {
         if (GitMissing) return;
         var (_, ctx, _) = await ModifiedAsync();
@@ -612,7 +615,7 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
         {
             entered.SetResult();
             await release.Task.WaitAsync(ct);
-        }, label: "Commit");
+        }, label: holderLabel);
         await entered.Task;
 
         var stage = vm.StageAllChangesCommand.ExecuteAsync(null);
@@ -623,7 +626,7 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
         Assert.Equal(1, ui.FireTimers(StagingPanelViewModel.BusyIndicatorDelay));
 
         Assert.True(vm.ShowBusyIndicator);
-        Assert.Equal("Waiting for Commit…", vm.BusyText);
+        Assert.Equal($"Waiting for {shownName}…", vm.BusyText);
 
         release.SetResult();
         await holder;
@@ -634,6 +637,95 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
         Assert.Equal("", vm.BusyText);
         Assert.Equal(0, ui.FireTimers(StagingPanelViewModel.BusyIndicatorDelay));
         await WaitUntilAsync(() => Rows(vm.Staged).Count == 2, "both staged rows");
+    }
+
+    [Theory]
+    [InlineData("GitGateway.WorkingTree.CommitAsync", "Commit")]
+    [InlineData("GitGateway.WorkingTree.StageAsync", "Stage")]
+    [InlineData("GitGateway.WorkingTree.RefreshIndexStatAsync", "Refresh index stat")]
+    [InlineData("Refresh index", "Refresh index")]
+    [InlineData("Commit", "Commit")]
+    [InlineData("StageAllChangesAsync", "Stage all changes")]
+    [InlineData("GPGSignAsync", "GPGSign")]
+    [InlineData("Async", "Async")]
+    [InlineData("unknown", "unknown")]
+    public void A_write_lock_holder_label_reads_as_words(string label, string expected)
+        => Assert.Equal(expected, StagingPanelViewModel.DescribeHolder(label));
+
+    [Fact]
+    public async Task The_waiting_text_names_a_holder_that_took_its_label_from_the_call_site()
+    {
+        if (GitMissing) return;
+        var (_, ctx, _) = await ModifiedAsync();
+        var ui = new ScriptedUiDispatcher();
+        var vm = NewViewModel(ctx, ui);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holder = HoldWithCallSiteLabelAsync(ctx, entered, release);
+        await entered.Task;
+        Assert.Contains(".", ctx.CurrentWriteHolder!.Value.Label);
+
+        var stage = vm.StageAllChangesCommand.ExecuteAsync(null);
+        ui.FireTimers(StagingPanelViewModel.BusyIndicatorDelay);
+
+        Assert.Equal("Waiting for Hold with call site label…", vm.BusyText);
+
+        release.SetResult();
+        await holder;
+        await stage;
+    }
+
+    private static Task HoldWithCallSiteLabelAsync(RepositoryContext ctx, TaskCompletionSource entered, TaskCompletionSource release)
+        => ctx.WithWriteLockAsync(async ct =>
+        {
+            entered.SetResult();
+            await release.Task.WaitAsync(ct);
+        });
+
+    [Fact]
+    public async Task The_staging_commands_are_disabled_while_a_stage_is_busy_and_enabled_afterwards()
+    {
+        if (GitMissing) return;
+        var (_, ctx, vm) = await ModifiedAsync();
+        await ctx.Gateway.StageAsync(["a.txt"]);
+        await RefreshUntilAsync(ctx, () => ctx.State.Status.Staged.Count == 1);
+        vm.SelectAllChangesCommand.Execute(true);
+        Row(vm.Staged, "a.txt").IsChecked = true;
+        Assert.True(vm.StageAllChangesCommand.CanExecute(null));
+        Assert.True(vm.UnstageAllCommand.CanExecute(null));
+        Assert.True(vm.StageCheckedCommand.CanExecute(null));
+        Assert.True(vm.UnstageCheckedCommand.CanExecute(null));
+        var raised = new List<System.Windows.Input.ICommand>();
+        foreach (var command in new System.Windows.Input.ICommand[] { vm.StageAllChangesCommand, vm.UnstageAllCommand, vm.StageCheckedCommand, vm.UnstageCheckedCommand })
+            command.CanExecuteChanged += (_, _) => raised.Add(command);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holder = ctx.WithWriteLockAsync(async ct =>
+        {
+            entered.SetResult();
+            await release.Task.WaitAsync(ct);
+        }, label: "Commit");
+        await entered.Task;
+
+        var stage = vm.StageCheckedCommand.ExecuteAsync(null);
+
+        Assert.True(vm.IsStagingBusy);
+        Assert.False(vm.StageAllChangesCommand.CanExecute(null));
+        Assert.False(vm.UnstageAllCommand.CanExecute(null));
+        Assert.False(vm.StageCheckedCommand.CanExecute(null));
+        Assert.False(vm.UnstageCheckedCommand.CanExecute(null));
+        Assert.Equal(4, raised.Distinct().Count());
+
+        release.SetResult();
+        await holder;
+        await stage;
+
+        Assert.False(vm.IsStagingBusy);
+        Assert.True(vm.StageAllChangesCommand.CanExecute(null));
+        Assert.True(vm.UnstageAllCommand.CanExecute(null));
+        await WaitUntilAsync(() => Rows(vm.Staged).Count == 2, "both staged rows");
+        Row(vm.Staged, "a.txt").IsChecked = true;
+        Assert.True(vm.UnstageCheckedCommand.CanExecute(null));
     }
 
     [Fact]

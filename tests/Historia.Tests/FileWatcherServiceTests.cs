@@ -197,7 +197,7 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
     public async Task Ignored_and_uninteresting_git_paths_queue_no_refresh()
     {
         await using var ctx = _host.Open(_repo.Path);
-        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace());
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace(), watchFilesystem: false);
         var onRawEvent = typeof(Historia.Services.Watching.FileWatcherService)
             .GetMethod("OnRawEvent", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
 

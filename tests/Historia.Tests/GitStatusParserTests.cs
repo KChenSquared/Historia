@@ -263,10 +263,10 @@ public class GitStatusParserTests
     }
 
     [Theory]
-    [InlineData("­? weird.txt ")]
-    [InlineData("​? weird.txt ")]
-    [InlineData("­1 .M N... 100644 100644 100644 2222222222222222222222222222222222222222 2222222222222222222222222222222222222222 weird.txt ")]
-    [InlineData("​# branch.ab +3 -5 ")]
+    [InlineData("­? weird.txt\0")]
+    [InlineData("​? weird.txt\0")]
+    [InlineData("­1 .M N... 100644 100644 100644 2222222222222222222222222222222222222222 2222222222222222222222222222222222222222 weird.txt\0")]
+    [InlineData("​# branch.ab +3 -5\0")]
     public void Record_prefixes_are_matched_ordinally(string input)
     {
         // Culture-sensitive comparison skips ignorable characters (soft hyphen, zero-width space),
@@ -284,14 +284,14 @@ public class GitStatusParserTests
     public void A_large_payload_parses_completely()
     {
         var sb = new StringBuilder();
-        sb.Append("# branch.oid 1111111111111111111111111111111111111111 # branch.head main # branch.ab +1 -2 ");
+        sb.Append("# branch.oid 1111111111111111111111111111111111111111\0# branch.head main\0# branch.ab +1 -2\0");
         for (var i = 0; i < 20_000; i++)
         {
             sb.Append((i % 3) switch
             {
-                0 => $"1 .M N... 100644 100644 100644 2222222222222222222222222222222222222222 2222222222222222222222222222222222222222 src/dir{i % 50}/file{i}.cs ",
-                1 => $"? build/out{i}/artifact{i}.bin ",
-                _ => $"1 M. N... 100644 100644 100644 2222222222222222222222222222222222222222 3333333333333333333333333333333333333333 docs/page{i}.md ",
+                0 => $"1 .M N... 100644 100644 100644 2222222222222222222222222222222222222222 2222222222222222222222222222222222222222 src/dir{i % 50}/file{i}.cs\0",
+                1 => $"? build/out{i}/artifact{i}.bin\0",
+                _ => $"1 M. N... 100644 100644 100644 2222222222222222222222222222222222222222 3333333333333333333333333333333333333333 docs/page{i}.md\0",
             });
         }
 

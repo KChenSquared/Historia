@@ -33,7 +33,10 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
     private DateTimeOffset? _lastStatusCompletedAt;
 
     // A status slower than this means many index entries carry stale stat data; refreshing them
-    // lets the next status skip the hashing. At most one refresh per interval, none while one runs.
+    // lets the next status skip the hashing. At most one refresh per interval, none while one runs,
+    // and none after a tab's first status: that run is slow from a cold file cache whatever the
+    // index holds, and the refresh would hold the write lock against the user's first stage or commit.
+    // A status that is still slow with a warm cache is the signal.
     private static readonly TimeSpan SlowStatusThreshold = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan IndexStatRefreshInterval = TimeSpan.FromSeconds(60);
     private long? _lastIndexStatRefreshAt;
@@ -302,6 +305,7 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
         bool conflictSessionFlipped;
         bool nowActive;
         bool closedCleared = false;
+        bool followsEarlierStatus;
         lock (_sync)
         {
             bool wasActive = ComputeIsConflictSessionActive(_status, _pendingOperation, _keepConflictResolverOpen);
@@ -322,6 +326,7 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
 
             _status = status;
             _repository = info;
+            followsEarlierStatus = _lastStatusCompletedAt is not null;
             _lastStatusDuration = statusDuration;
             _lastStatusCompletedAt = _time.GetUtcNow();
             operationChanged = _pendingOperation != operation;
@@ -351,7 +356,7 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
         }
 
         QueueStatusRaise(status, info, operation);
-        RefreshIndexStatIfSlow(statusDuration);
+        RefreshIndexStatIfSlow(statusDuration, followsEarlierStatus);
 
         if (conflictSessionFlipped)
             HandleConflictSessionFlipped(nowActive, closedCleared);
@@ -368,9 +373,9 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
     /// <summary>The most recent index stat refresh this service started; completed when none is running.</summary>
     internal Task IndexStatRefreshTask { get { lock (_sync) return _indexStatRefresh; } }
 
-    private void RefreshIndexStatIfSlow(TimeSpan statusDuration)
+    private void RefreshIndexStatIfSlow(TimeSpan statusDuration, bool followsEarlierStatus)
     {
-        if (statusDuration <= SlowStatusThreshold || _disposed)
+        if (!followsEarlierStatus || statusDuration <= SlowStatusThreshold || _disposed)
             return;
 
         lock (_sync)
@@ -592,14 +597,17 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
     }
 
     /// <summary>Raises <see cref="StatusChanged"/> unless the status and operation state match the last raise.
-    /// Returns whether it raised.</summary>
+    /// A status with conflicted files always raises: the conflict resolver compares a conflicted file
+    /// with the disk on every raise, and an edit that keeps the file's size changes nothing the
+    /// comparison sees. Returns whether it raised.</summary>
     private bool RaiseStatus(RepositoryStatus status, RepositoryInfo info, OperationState operation)
     {
         lock (_raiseSync)
         {
             if (_lastRaised is { } last
                 && last.Operation == operation
-                && RepositoryStatusEquivalence.Equivalent(last.Status, last.Info, status, info))
+                && RepositoryStatusEquivalence.Equivalent(last.Status, last.Info, status, info)
+                && status.Conflicted.Count == 0)
                 return false;
             _lastRaised = (status, info, operation);
         }
@@ -617,21 +625,7 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
     }
 
     /// <summary>Derives <see cref="OperationState"/> from on-disk sequencer markers.</summary>
-    internal static OperationState DetectOperationState(string gitDir)
-    {
-        if (System.IO.Directory.Exists(System.IO.Path.Combine(gitDir, "rebase-merge")) ||
-            System.IO.Directory.Exists(System.IO.Path.Combine(gitDir, "rebase-apply")))
-            return OperationState.Rebasing;
-        if (System.IO.File.Exists(System.IO.Path.Combine(gitDir, "CHERRY_PICK_HEAD")))
-            return OperationState.CherryPicking;
-        if (System.IO.File.Exists(System.IO.Path.Combine(gitDir, "REVERT_HEAD")))
-            return OperationState.Reverting;
-        if (System.IO.File.Exists(System.IO.Path.Combine(gitDir, "MERGE_HEAD")))
-            return OperationState.Merging;
-        if (System.IO.File.Exists(System.IO.Path.Combine(gitDir, "BISECT_LOG")))
-            return OperationState.Bisecting;
-        return OperationState.None;
-    }
+    internal static OperationState DetectOperationState(string gitDir) => OperationMarkers.Detect(gitDir);
 
     public ValueTask DisposeAsync()
     {

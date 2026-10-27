@@ -45,7 +45,7 @@ public sealed partial class GitGateway
 
             if (!result.IsSuccess && !(result.ExitCode == 1 && IsIgnoredAdviceOnly(result.StandardError)))
                 throw HistoriaGitException.FromCli(result, "Stage");
-        }, ct).ConfigureAwait(false);
+        }, ct, label: "Stage").ConfigureAwait(false);
     }
 
     public async Task UnstageAsync(IReadOnlyList<string> paths, CancellationToken ct = default)
@@ -96,7 +96,7 @@ public sealed partial class GitGateway
 
             if (!restoreResult.IsSuccess)
                 throw HistoriaGitException.FromCli(restoreResult, "Unstage");
-        }, ct).ConfigureAwait(false);
+        }, ct, label: "Unstage").ConfigureAwait(false);
     }
 
     public async Task DiscardAsync(IReadOnlyList<string> paths, CancellationToken ct = default)
@@ -281,7 +281,7 @@ public sealed partial class GitGateway
                 if (!restoreResult.IsSuccess)
                     throw HistoriaGitException.FromCli(restoreResult, "Discard");
             }
-        }, ct).ConfigureAwait(false);
+        }, ct, label: "Discard").ConfigureAwait(false);
     }
 
     public async Task<GitObjectId> CommitAsync(CommitRequest request, CancellationToken ct = default)
@@ -339,7 +339,7 @@ public sealed partial class GitGateway
                 throw HistoriaGitException.FromCli(revParse, "Commit rev-parse");
 
             return GitObjectId.Parse(revParse.StandardOutput.Trim());
-        }, ct).ConfigureAwait(false);
+        }, ct, label: "Commit").ConfigureAwait(false);
     }
 
     /// <summary>
@@ -457,12 +457,12 @@ public sealed partial class GitGateway
                 innerCt.ThrowIfCancellationRequested();
 
             throw HistoriaGitException.FromCli(result, "Refresh index");
-        }, ct).ConfigureAwait(false);
+        }, ct, label: "Refresh index").ConfigureAwait(false);
     }
 
     private bool IsIndexStatRefreshSafe() =>
         !File.Exists(Path.Combine(context.GitDirectory, "index.lock"))
-        && Historia.Services.State.RepositoryStateService.DetectOperationState(context.GitDirectory) == OperationState.None;
+        && OperationMarkers.Detect(context.GitDirectory) == OperationState.None;
 
     /// <summary>
     /// Runs an idempotent index writer, retrying while another git process holds

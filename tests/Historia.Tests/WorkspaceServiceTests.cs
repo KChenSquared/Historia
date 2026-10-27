@@ -1411,6 +1411,7 @@ public class WorkspaceServiceRefreshPacingTests : WorkspaceServiceTestBase
     {
         private readonly object _gate = new();
         private readonly List<ManualTimer> _timers = [];
+        private readonly List<(TimerCallback Callback, object? State)> _created = [];
         private long _now;
 
         public override long TimestampFrequency => TimeSpan.TicksPerSecond;
@@ -1422,9 +1423,21 @@ public class WorkspaceServiceRefreshPacingTests : WorkspaceServiceTestBase
 
         public TimeSpan Now => TimeSpan.FromTicks(GetTimestamp());
 
+        /// <summary>The callback and state of the n-th timer created, so a test can fire a timer that was already disposed.</summary>
+        public (TimerCallback Callback, object? State) CreatedTimer(int index)
+        {
+            lock (_gate) return _created[index];
+        }
+
+        public int CreatedTimerCount
+        {
+            get { lock (_gate) return _created.Count; }
+        }
+
         public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
         {
             var timer = new ManualTimer(this, callback, state);
+            lock (_gate) _created.Add((callback, state));
             timer.Change(dueTime, period);
             return timer;
         }
@@ -1612,6 +1625,36 @@ public class WorkspaceServiceRefreshPacingTests : WorkspaceServiceTestBase
 
         Assert.Equal(2, rig.Calls.Count);
         Assert.Equal(TimeSpan.FromSeconds(4.5), rig.Calls[1].At - start);
+    }
+
+    [Fact(Timeout = 60000)]
+    public async Task A_late_callback_of_a_cancelled_trailing_timer_leaves_the_current_one_alone()
+    {
+        using var repo = Repo("late-timer.txt");
+        await using var rig = await OpenRigAsync(repo.Path, TimeSpan.Zero);
+
+        var first = rig.Request();
+        await rig.WaitForPacedRefreshToEndAsync();
+        rig.Time.Advance(TimeSpan.FromMilliseconds(100));
+        var second = rig.Request();
+        var staleIndex = rig.Time.CreatedTimerCount - 1;
+        rig.Time.Advance(TimeSpan.FromSeconds(1));
+        await AllCompleteAsync([first, second]);
+        await rig.WaitForPacedRefreshToEndAsync();
+        Assert.Equal(2, rig.Calls.Count);
+
+        rig.Time.Advance(TimeSpan.FromMilliseconds(100));
+        var third = rig.Request();
+        Assert.Equal(2, rig.Calls.Count);
+
+        var stale = rig.Time.CreatedTimer(staleIndex);
+        stale.Callback(stale.State);
+        await Task.Delay(200);
+        Assert.Equal(2, rig.Calls.Count);
+
+        rig.Time.Advance(TimeSpan.FromSeconds(1));
+        await AllCompleteAsync([third]);
+        Assert.Equal(3, rig.Calls.Count);
     }
 
     [Fact(Timeout = 60000)]

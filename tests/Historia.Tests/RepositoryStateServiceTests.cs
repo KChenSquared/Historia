@@ -740,6 +740,33 @@ public class RepositoryStateServiceTests : IAsyncDisposable
     }
 
     [Fact(Timeout = 10000)]
+    public async Task A_conflicted_status_raises_every_time_even_when_unchanged()
+    {
+        var (state, gateway, _, time, raised) = NewRaiseState(onUiThread: true);
+        var conflicted = StatusOf(Entry("a.txt", 10)) with
+        {
+            Conflicted = [new FileStatusEntry { Path = "c.txt", Kind = FileChangeKind.Conflicted, IsBinary = false, IsSubmodule = false, SizeBytes = 20 }],
+        };
+
+        for (var i = 0; i < 3; i++)
+        {
+            gateway.StatusToReturn = conflicted;
+            await state.RefreshStatusAsync();
+            time.Advance(1000);
+        }
+
+        Assert.Equal(3, raised.Count);
+
+        gateway.StatusToReturn = StatusOf(Entry("a.txt", 10));
+        await state.RefreshStatusAsync();
+        time.Advance(1000);
+        gateway.StatusToReturn = StatusOf(Entry("a.txt", 10));
+        await state.RefreshStatusAsync();
+
+        Assert.Equal(4, raised.Count);
+    }
+
+    [Fact(Timeout = 10000)]
     public async Task A_size_change_raises()
     {
         var (state, gateway, _, time, raised) = NewRaiseState(onUiThread: true);

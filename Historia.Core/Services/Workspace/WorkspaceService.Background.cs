@@ -294,15 +294,28 @@ public sealed partial class WorkspaceService
         }
     }
 
-    /// <summary>Caller holds the pacing lock.</summary>
-    private void ArmTrailingRefreshLocked(RefreshPacing pacing, RepositoryContext context, TimeSpan delay) =>
-        pacing.Timer = TimeSource.CreateTimer(_ => OnTrailingRefreshDue(pacing, context), null, delay, Timeout.InfiniteTimeSpan);
+    /// <summary>Caller holds the pacing lock. The callback gets its own timer as state and acts only
+    /// while that timer is still the pacing one, so a late callback of a timer already replaced or
+    /// cancelled cannot dispose its successor.</summary>
+    private void ArmTrailingRefreshLocked(RefreshPacing pacing, RepositoryContext context, TimeSpan delay)
+    {
+        var slot = new TimerSlot();
+        slot.Timer = TimeSource.CreateTimer(state => OnTrailingRefreshDue(pacing, context, (TimerSlot)state!), slot, delay, Timeout.InfiniteTimeSpan);
+        pacing.Timer = slot.Timer;
+    }
 
-    private void OnTrailingRefreshDue(RefreshPacing pacing, RepositoryContext context)
+    private sealed class TimerSlot
+    {
+        public ITimer? Timer;
+    }
+
+    private void OnTrailingRefreshDue(RefreshPacing pacing, RepositoryContext context, TimerSlot self)
     {
         PendingRefresh pending;
         lock (pacing)
         {
+            if (!ReferenceEquals(pacing.Timer, self.Timer))
+                return;
             pacing.Timer?.Dispose();
             pacing.Timer = null;
             if (pacing.Pending is not { } due || pacing.Running)

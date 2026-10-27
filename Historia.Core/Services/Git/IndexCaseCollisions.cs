@@ -196,7 +196,7 @@ internal sealed class IndexCaseCollisions(IGitCliService cli, string gitDirector
         if (stamp == (0L, 0L))
             return ImmutableDictionary<string, IReadOnlyList<CaseTwin>>.Empty;
 
-        var key = string.Join(' ', paths);
+        var key = string.Join('\0', paths);
         var cached = Volatile.Read(ref _candidateCache);
         if (cached is not null && cached.Stamp == stamp && cached.Key == key)
             return cached.Groups;
@@ -225,10 +225,10 @@ internal sealed class IndexCaseCollisions(IGitCliService cli, string gitDirector
             }
 
             // A twin pair split across chunks is reported by both; keep each entry once.
-            foreach (var entry in result.StandardOutput.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            foreach (var entry in result.StandardOutput.Split('\0', StringSplitOptions.RemoveEmptyEntries))
             {
                 if (seen.Add(entry))
-                    merged.Append(entry).Append(' ');
+                    merged.Append(entry).Append('\0');
             }
         }
 

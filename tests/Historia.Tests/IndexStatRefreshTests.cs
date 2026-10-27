@@ -172,34 +172,46 @@ public sealed class IndexStatRefreshTests : IAsyncDisposable
     // whenever it writes such an entry (Documentation/technical/racy-git). The refresh rewrites
     // the index, so it must leave an edit made right after it detectable. An mtime a minute ahead
     // makes the entry racy whatever the clock does; offset 0 is the entry written in the same
-    // second as the refresh.
+    // second as the refresh. When a second boundary passes between choosing that mtime and git
+    // writing the index, the entry is not racy and the scenario does not apply; it starts again.
     [Theory(Timeout = 60000)]
     [InlineData(0)]
     [InlineData(60)]
     public async Task An_edit_made_in_the_same_second_as_the_refresh_is_still_reported_modified(int offsetSeconds)
     {
-        using var repo = NewRepo();
-        Write(repo, "f.txt", "aaaa\n", Past);
-        Write(repo, "u.txt", "uuuu\n", Past.AddMinutes(1));
-        repo.Stage();
-        repo.Commit("init");
-        var blobsBefore = repo.Git("ls-files", "-s");
+        for (var attempt = 0; attempt < 10; attempt++)
+        {
+            using var repo = NewRepo();
+            Write(repo, "f.txt", "aaaa\n", Past);
+            Write(repo, "u.txt", "uuuu\n", Past.AddMinutes(1));
+            repo.Stage();
+            repo.Commit("init");
+            var blobsBefore = repo.Git("ls-files", "-s");
 
-        var racy = DateTime.UtcNow.AddSeconds(offsetSeconds);
-        File.SetLastWriteTimeUtc(Path.Combine(repo.Path, "f.txt"), racy);
+            var racy = DateTime.UtcNow.AddSeconds(offsetSeconds);
+            File.SetLastWriteTimeUtc(Path.Combine(repo.Path, "f.txt"), racy);
 
-        var (ctx, _) = Open(repo);
-        await ctx.Gateway.RefreshIndexStatAsync();
+            var (ctx, _) = Open(repo);
+            await ctx.Gateway.RefreshIndexStatAsync();
 
-        Assert.Equal(FileMtimeSeconds(repo, "f.txt"), IndexedMtimeSeconds(repo, "f.txt"));
-        Assert.Empty((await ctx.Gateway.GetStatusAsync()).Unstaged);
+            var racySeconds = new DateTimeOffset(racy).ToUnixTimeSeconds();
+            var indexSeconds = new DateTimeOffset(File.GetLastWriteTimeUtc(IndexPath(repo))).ToUnixTimeSeconds();
+            if (offsetSeconds == 0 && indexSeconds != racySeconds)
+                continue;
 
-        repo.WriteFile("f.txt", "bbbb\n");
-        File.SetLastWriteTimeUtc(Path.Combine(repo.Path, "f.txt"), racy);
+            Assert.Equal(FileMtimeSeconds(repo, "f.txt"), IndexedMtimeSeconds(repo, "f.txt"));
+            Assert.Empty((await ctx.Gateway.GetStatusAsync()).Unstaged);
 
-        var status = await ctx.Gateway.GetStatusAsync();
-        Assert.True(IsModified(status, "f.txt"));
-        Assert.Equal(blobsBefore, repo.Git("ls-files", "-s"));
+            repo.WriteFile("f.txt", "bbbb\n");
+            File.SetLastWriteTimeUtc(Path.Combine(repo.Path, "f.txt"), racy);
+
+            var status = await ctx.Gateway.GetStatusAsync();
+            Assert.True(IsModified(status, "f.txt"));
+            Assert.Equal(blobsBefore, repo.Git("ls-files", "-s"));
+            return;
+        }
+
+        Assert.Fail("The refresh never wrote the index in the second of the edit.");
     }
 
     [Fact(Timeout = 60000)]
@@ -402,6 +414,26 @@ public sealed class IndexStatRefreshTests : IAsyncDisposable
     }
 
     [Fact(Timeout = 60000)]
+    public async Task The_first_status_of_a_tab_starts_no_refresh_however_slow_it_is()
+    {
+        using var repo = NewRepo();
+        Write(repo, "t.txt", "touched\n", Past);
+        repo.Stage();
+        repo.Commit("init");
+        var (state, proxy, _, setStatusMs) = NewService(repo);
+
+        // A cold first run is slow whatever the index holds; only a slow run after it counts.
+        setStatusMs(30_000);
+        await state.RefreshStatusAsync();
+        await state.IndexStatRefreshTask;
+        Assert.Equal(0, proxy.Refreshes);
+
+        await state.RefreshStatusAsync();
+        await state.IndexStatRefreshTask;
+        Assert.Equal(1, proxy.Refreshes);
+    }
+
+    [Fact(Timeout = 60000)]
     public async Task A_slow_status_starts_one_refresh_per_minute()
     {
         using var repo = NewRepo();
@@ -453,6 +485,7 @@ public sealed class IndexStatRefreshTests : IAsyncDisposable
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         proxy.OnRefresh = () => release.Task;
 
+        await state.RefreshStatusAsync();
         setStatusMs(3000);
         await state.RefreshStatusAsync();
         time.Advance(120_000);
@@ -475,6 +508,7 @@ public sealed class IndexStatRefreshTests : IAsyncDisposable
         var (state, proxy, _, setStatusMs) = NewService(repo);
         proxy.OnRefresh = () => Task.FromException(new InvalidOperationException("boom"));
 
+        await state.RefreshStatusAsync();
         setStatusMs(3000);
         await state.RefreshStatusAsync();
         await state.IndexStatRefreshTask;

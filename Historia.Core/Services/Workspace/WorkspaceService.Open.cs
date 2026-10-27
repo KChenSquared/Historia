@@ -226,13 +226,20 @@ public sealed partial class WorkspaceService
         return InitOutcome.Completed;
     }
 
-    /// <summary>The tab's status right after its first load — immediately while it keeps focus,
-    /// otherwise from the background queue (see <see cref="RequestBackgroundRefreshAsync"/>).</summary>
+    /// <summary>The tab's status right after its first load: at once while it keeps focus, not
+    /// paced against earlier refreshes (it still opens the next pacing window), and from the
+    /// background queue otherwise (see <see cref="RequestBackgroundRefreshAsync"/>).</summary>
     private async Task RefreshStatusAfterInitAsync(RepositoryContext context)
     {
         try
         {
-            await RequestBackgroundRefreshAsync(context, full: false, context.Lifetime).ConfigureAwait(false);
+            bool isFocused;
+            lock (_sync)
+                isFocused = ReferenceEquals(_focused, context);
+
+            await (isFocused
+                ? RefreshUnpacedAsync(context, full: false, context.Lifetime)
+                : RequestRefreshAsync(context, full: false, context.Lifetime)).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
