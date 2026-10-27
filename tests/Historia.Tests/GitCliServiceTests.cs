@@ -109,15 +109,22 @@ public class GitCliServiceTests
         Assert.False(File.Exists(Path.Combine(repo.Path, "marker")));
     }
 
-    /// <summary>Runs <c>echo started; sleep N; echo finished</c> and cancels as soon as git has
-    /// printed the first line, so the cancellation always lands after the process started.</summary>
+    /// <summary>Runs <c>echo started; wait N seconds; echo finished</c> and cancels as soon as git has
+    /// printed the first line, so the cancellation always lands after the process started. With
+    /// <paramref name="shellBuiltinWait"/> the wait is a loop inside the shell itself instead of a
+    /// <c>sleep</c> child: a tree kill of concurrent MSYS processes can end a <c>sleep</c> early on
+    /// its own, after which the shell prints "finished" even though git was killed.</summary>
     private static async Task<GitCliResult> RunAndCancelAfterStartAsync(
-        GitCliService cli, string workingDirectory, int sleepSeconds, GitCliCancelPolicy policy)
+        GitCliService cli, string workingDirectory, int waitSeconds, GitCliCancelPolicy policy,
+        bool shellBuiltinWait = false)
     {
         using var cts = new CancellationTokenSource();
+        var wait = shellBuiltinWait
+            ? $"SECONDS=0; while [ $SECONDS -lt {waitSeconds} ]; do :; done"
+            : $"sleep {waitSeconds}";
         var request = new GitCliRequest
         {
-            Arguments = ["-c", $"alias.slow=!echo started; sleep {sleepSeconds}; echo finished", "slow"],
+            Arguments = ["-c", $"alias.slow=!echo started; {wait}; echo finished", "slow"],
             WorkingDirectory = workingDirectory,
             CancelPolicy = policy,
             Timeout = TimeSpan.FromSeconds(60),
@@ -136,7 +143,8 @@ public class GitCliServiceTests
         var cli = await MakeAsync();
         using var repo = TestRepositoryBuilder.FromTemplate("empty-repo", _ => { });
 
-        var result = await RunAndCancelAfterStartAsync(cli, repo.Path, sleepSeconds: 30, GitCliCancelPolicy.KillOnCancel);
+        var result = await RunAndCancelAfterStartAsync(
+            cli, repo.Path, waitSeconds: 30, GitCliCancelPolicy.KillOnCancel, shellBuiltinWait: true);
 
         Assert.Equal(GitErrorKind.Cancelled, result.ErrorKind);
         Assert.True(result.Duration < TimeSpan.FromSeconds(20), $"took {result.Duration}");
@@ -150,7 +158,7 @@ public class GitCliServiceTests
         using var repo = TestRepositoryBuilder.FromTemplate("empty-repo", _ => { });
 
         using var scope = GitWriteScope.Enter();
-        var result = await RunAndCancelAfterStartAsync(cli, repo.Path, sleepSeconds: 2, GitCliCancelPolicy.KillOnCancel);
+        var result = await RunAndCancelAfterStartAsync(cli, repo.Path, waitSeconds: 2, GitCliCancelPolicy.KillOnCancel);
 
         Assert.Equal(0, result.ExitCode);
         Assert.Equal(GitErrorKind.None, result.ErrorKind);
@@ -163,7 +171,7 @@ public class GitCliServiceTests
         var cli = await MakeAsync();
         using var repo = TestRepositoryBuilder.FromTemplate("empty-repo", _ => { });
 
-        var result = await RunAndCancelAfterStartAsync(cli, repo.Path, sleepSeconds: 2, GitCliCancelPolicy.NeverAfterStart);
+        var result = await RunAndCancelAfterStartAsync(cli, repo.Path, waitSeconds: 2, GitCliCancelPolicy.NeverAfterStart);
 
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("finished", result.StandardOutput);

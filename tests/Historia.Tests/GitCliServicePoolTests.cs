@@ -4,9 +4,12 @@ namespace Historia.Tests;
 /// Many concurrent git processes must not starve the thread pool, and a call made from a thread with
 /// a synchronization context (the UI thread) must not start git on that thread. Assertions measure
 /// what starvation does — queued work items and probe latency — and carry generous slack, because
-/// these tests run on machines that are busy with other work.
+/// these tests run on machines that are busy with other work. The class is in the serial collection:
+/// the pool counters are process-wide, so work items queued by any other test class running at the
+/// same time would be counted against the runner.
 /// </summary>
 [Trait("tier", "git")]
+[Collection("serial")]
 public class GitCliServicePoolTests
 {
     private const int Calls = 40;
