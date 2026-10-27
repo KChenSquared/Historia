@@ -8,8 +8,29 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
     private readonly IRepoStateCache? _repoCache;
     private readonly object _sync = new();
 
+    private readonly TimeProvider _time;
+
+    // A status that arrives when nothing was raised in the last StatusRaiseWindow is raised at once;
+    // later ones within the window wait on a trailing timer, restarted by each newer status but never
+    // so long that the oldest waiting one passes StatusRaiseMaxWait.
+    private static readonly TimeSpan StatusRaiseWindow = TimeSpan.FromMilliseconds(50);
+    private static readonly TimeSpan StatusRaiseMaxWait = TimeSpan.FromMilliseconds(150);
+
+    // Touched only on the UI thread when there is a dispatcher.
     private readonly IUiTimer? _statusCoalesceTimer;
-    private RepositoryStatus? _pendingStatusRaise;
+    private (RepositoryStatus Status, RepositoryInfo Info)? _pendingStatusRaise;
+    private bool _statusTimerRunning;
+    private long _pendingStatusSince;
+    private long _lastStatusRaiseAt;
+    private bool _statusRaisedOnce;
+    private volatile bool _disposed;
+
+    // The status and info of the last raise; guarded by _raiseSync.
+    private readonly object _raiseSync = new();
+    private (RepositoryStatus Status, RepositoryInfo Info)? _lastRaised;
+
+    private TimeSpan _lastStatusDuration;
+    private DateTimeOffset? _lastStatusCompletedAt;
 
     private RepositoryInfo _repository;
     private RepositoryStatus _status = RepositoryStatus.Empty;
@@ -50,9 +71,11 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
         RepositoryContext context,
         IUiDispatcher? ui = null,
         IRepoStateCache? repoCache = null,
-        IGitGateway? gateway = null)
+        IGitGateway? gateway = null,
+        TimeProvider? time = null)
     {
         _context = context;
+        _time = time ?? TimeProvider.System;
         _gateway = gateway ?? context.Gateway;
         _refsCoalescer = new(() => _context.Lifetime, () => _context.CompletedOperations);
         _statusCoalescer = new(() => _context.Lifetime, () => _context.CompletedOperations);
@@ -71,7 +94,7 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
         };
 
         if (_ui is not null)
-            _statusCoalesceTimer = _ui.CreateTimer(TimeSpan.FromMilliseconds(50), OnStatusCoalesceTick);
+            _statusCoalesceTimer = _ui.CreateTimer(StatusRaiseWindow, OnStatusCoalesceTick, UiPriority.Normal);
     }
 
     public RepositoryInfo Repository { get { lock (_sync) return _repository; } }
@@ -85,6 +108,8 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
     public DiffRequest? OpenDiff { get { lock (_sync) return _openDiff; } }
     public GitProfile? ActiveProfile { get { lock (_sync) return _activeProfile; } }
     public OperationState PendingOperation { get { lock (_sync) return _pendingOperation; } }
+    public TimeSpan LastStatusDuration { get { lock (_sync) return _lastStatusDuration; } }
+    public DateTimeOffset? LastStatusCompletedAt { get { lock (_sync) return _lastStatusCompletedAt; } }
     public bool KeepConflictResolverOpen { get { lock (_sync) return _keepConflictResolverOpen; } }
     public bool IsConflictSessionActive { get { lock (_sync) return ComputeIsConflictSessionActive(_status, _pendingOperation, _keepConflictResolverOpen); } }
     public string? SelectedConflictPath { get { lock (_sync) return _selectedConflictPath; } }
@@ -259,7 +284,9 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
     private async Task DoRefreshStatusAsync(CancellationToken ct)
     {
         using var _perf = Historia.Diagnostics.PerfLog.Scope($"RepositoryStateService.RefreshStatusAsync({_context.DisplayName})");
+        var statusStarted = _time.GetTimestamp();
         var status = await _gateway.GetStatusAsync(ct).ConfigureAwait(false);
+        var statusDuration = _time.GetElapsedTime(statusStarted);
         var info = await _gateway.GetRepositoryInfoAsync(ct).ConfigureAwait(false);
         var operation = DetectOperationState(_context.GitDirectory);
 
@@ -288,6 +315,8 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
 
             _status = status;
             _repository = info;
+            _lastStatusDuration = statusDuration;
+            _lastStatusCompletedAt = _time.GetUtcNow();
             operationChanged = _pendingOperation != operation;
             _pendingOperation = operation;
 
@@ -314,7 +343,7 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
                 _openDiff = null;
         }
 
-        QueueStatusRaise(status);
+        QueueStatusRaise(status, info);
 
         if (conflictSessionFlipped)
             HandleConflictSessionFlipped(nowActive, closedCleared);
@@ -404,8 +433,10 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
             _tags = tags;
         }
 
-        // Keep _repoCache.SaveRefs a single write after tags complete — do not write a half-populated ref snapshot.
-        _repoCache?.SaveRefs(_context.RepositoryPath, branches, tags, remotes);
+        // One write after tags complete, so a half-populated ref snapshot is never stored, and only
+        // when a ref list changed: an unchanged refresh would rewrite the same snapshot.
+        if (branchesOrRemotesChanged || tagsChanged)
+            _repoCache?.SaveRefs(_context.RepositoryPath, branches, tags, remotes);
 
         // Raise second time if tags changed.
         if (tagsChanged)
@@ -446,31 +477,89 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
         await _statusCoalescer.RunAsync(DoRefreshStatusAsync, joinFrom, ct).ConfigureAwait(false);
     }
 
-    // ── Status-raise coalescing on a 50 ms trailing window ──
+    // ── Status raise: leading edge, trailing coalescing, no raise for an unchanged status ──
 
-    private void QueueStatusRaise(RepositoryStatus status)
+    private void QueueStatusRaise(RepositoryStatus status, RepositoryInfo info)
     {
         if (_ui is null || _statusCoalesceTimer is null)
         {
-            StatusChanged?.Invoke(this, new StatusChangedEventArgs(status));
+            RaiseStatus(status, info);
             return;
         }
 
-        _ui.Post(() =>
+        if (_ui.CheckAccess())
+            OfferStatus(status, info);
+        else
+            _ui.Post(() => OfferStatus(status, info), UiPriority.Normal);
+    }
+
+    private void OfferStatus(RepositoryStatus status, RepositoryInfo info)
+    {
+        if (_disposed)
+            return;
+
+        var now = _time.GetTimestamp();
+        _pendingStatusRaise = (status, info);
+
+        if (_statusTimerRunning)
         {
-            _pendingStatusRaise = status;
-            _statusCoalesceTimer.Stop();
-            _statusCoalesceTimer.Start();
-        });
+            // Restarting waits one more window; skip it when the oldest waiting status would then
+            // pass the maximum wait. The running timer fires within one window of its last restart,
+            // which is within the maximum wait of that status's arrival.
+            if (_time.GetElapsedTime(_pendingStatusSince, now) + StatusRaiseWindow <= StatusRaiseMaxWait)
+            {
+                _statusCoalesceTimer!.Stop();
+                _statusCoalesceTimer.Start();
+            }
+            return;
+        }
+
+        if (!_statusRaisedOnce || _time.GetElapsedTime(_lastStatusRaiseAt, now) >= StatusRaiseWindow)
+        {
+            _pendingStatusRaise = null;
+            if (RaiseStatus(status, info))
+            {
+                _statusRaisedOnce = true;
+                _lastStatusRaiseAt = now;
+            }
+            return;
+        }
+
+        _pendingStatusSince = now;
+        _statusTimerRunning = true;
+        _statusCoalesceTimer!.Start();
     }
 
     private void OnStatusCoalesceTick()
     {
         _statusCoalesceTimer!.Stop();
-        var status = _pendingStatusRaise;
+        _statusTimerRunning = false;
+        var pending = _pendingStatusRaise;
         _pendingStatusRaise = null;
-        if (status is not null)
-            StatusChanged?.Invoke(this, new StatusChangedEventArgs(status));
+        if (_disposed || pending is not { } p)
+            return;
+
+        if (RaiseStatus(p.Status, p.Info))
+        {
+            _statusRaisedOnce = true;
+            _lastStatusRaiseAt = _time.GetTimestamp();
+        }
+    }
+
+    /// <summary>Raises <see cref="StatusChanged"/> unless the status matches the last one raised.
+    /// Returns whether it raised.</summary>
+    private bool RaiseStatus(RepositoryStatus status, RepositoryInfo info)
+    {
+        lock (_raiseSync)
+        {
+            if (_lastRaised is { } last
+                && RepositoryStatusEquivalence.Equivalent(last.Status, last.Info, status, info))
+                return false;
+            _lastRaised = (status, info);
+        }
+
+        StatusChanged?.Invoke(this, new StatusChangedEventArgs(status));
+        return true;
     }
 
     private void Raise(Action action)
@@ -500,6 +589,7 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
 
     public ValueTask DisposeAsync()
     {
+        _disposed = true;
         _statusCoalesceTimer?.Dispose();
         return ValueTask.CompletedTask;
     }
@@ -568,8 +658,10 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
                 run.Waiters++;
             }
 
+            // Off the caller's thread: a run started inline would execute the work's synchronous
+            // prefix (process start, file probes) on the UI thread of a UI-originated refresh.
             if (start)
-                _ = PumpAsync(work);
+                _ = Task.Run(() => PumpAsync(work));
             return WaitAsync(run, ct);
         }
 

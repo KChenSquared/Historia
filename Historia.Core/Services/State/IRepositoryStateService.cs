@@ -40,6 +40,13 @@ public interface IRepositoryStateService
     GitProfile? ActiveProfile { get; }
     OperationState PendingOperation { get; }
 
+    /// <summary>How long the last completed <c>git status</c> read took; zero before the first one.
+    /// Callers pace background work by it.</summary>
+    TimeSpan LastStatusDuration { get; }
+
+    /// <summary>When the last status read completed; null before the first one.</summary>
+    DateTimeOffset? LastStatusCompletedAt { get; }
+
     /// <summary>True when the conflict resolver should stay open despite 0 conflicts remaining until the operation completes.</summary>
     bool KeepConflictResolverOpen { get; }
 
@@ -126,6 +133,13 @@ public interface IRepositoryStateService
     void SeedFromCache();
 
     // ── Events: raised on the UI dispatcher ──
+
+    /// <summary>
+    /// Raised on the UI dispatcher when the status differs from the last one raised (see
+    /// <see cref="RepositoryStatusEquivalence"/>). The first change after a quiet moment is raised
+    /// at once; changes arriving in a burst are coalesced into one raise, never delayed past
+    /// 150 ms.
+    /// </summary>
     event EventHandler<StatusChangedEventArgs>? StatusChanged;
     event EventHandler<SelectionChangedEventArgs>? SelectedCommitChanged;
 
