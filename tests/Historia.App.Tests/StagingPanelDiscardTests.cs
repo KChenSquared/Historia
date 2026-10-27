@@ -119,6 +119,18 @@ public class StagingPanelDiscardTests : IDisposable
         Dispatcher.UIThread.RunJobs();
     }
 
+    /// <summary>The stage command returns when git does; the status refresh continues in the
+    /// background, so the tab's status is refreshed until it lists the staged files.</summary>
+    private async Task RefreshUntilStagedAsync(int count)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+        do
+        {
+            await _context.State.RefreshStatusAsync();
+        }
+        while (_context.State.Status.Staged.Count < count && DateTime.UtcNow < deadline);
+    }
+
     private static IReadOnlyList<CheckBox> RowCheckBoxes(ListBox list) =>
         [.. list.GetVisualDescendants().OfType<Border>().Where(b => b.Name is "ChangeRow" or "StagedRow")
             .Select(b => b.GetVisualDescendants().OfType<CheckBox>().Single())];
@@ -160,6 +172,7 @@ public class StagingPanelDiscardTests : IDisposable
         Assert.Null(panel.ChangesSelectAll.IsChecked);
 
         await panel.ViewModel.StageCheckedCommand.ExecuteAsync(null);
+        await RefreshUntilStagedAsync(1);
         Dispatcher.UIThread.RunJobs();
 
         Assert.Equal(["one.txt"], _context.State.Status.Staged.Select(f => f.Path));

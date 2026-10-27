@@ -223,6 +223,14 @@ public class StagingPanelCaseCollisionTests : IDisposable
         });
 
         await panel.ViewModel.StageAllChangesCommand.ExecuteAsync(null);
+
+        // The command returns when git does; the status refresh continues in the background.
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+        do
+        {
+            await context.State.RefreshStatusAsync();
+        }
+        while (context.State.Status.Staged.Count == 0 && DateTime.UtcNow < deadline);
         Dispatcher.UIThread.RunJobs();
 
         var lsFilesAfter = await _cli.RunAsync(new GitCliRequest
