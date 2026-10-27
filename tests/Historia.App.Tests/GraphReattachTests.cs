@@ -361,7 +361,140 @@ public sealed class GraphReattachTests
         for (var i = 0; i < 3; i++)
             Assert.Equal(-1, graph.ResolveHeadRowForTesting(GraphLayout.Empty));
 
-        Assert.InRange(graph.HeadRowLookupsForTesting - before, 0, 1);
+        Assert.Equal(1, graph.HeadRowLookupsForTesting - before);
+    }
+
+    [AvaloniaFact]
+    public async Task A_head_lookup_miss_on_one_layout_does_not_answer_for_another_layout()
+    {
+        using var setup = await CreateSetupAsync();
+        var graph = setup.Graph;
+        Assert.NotNull(setup.Context.State.CurrentBranch?.TipCommitId);
+        var other = new GraphLayout
+        {
+            Decorations = [],
+            RowCount = 0,
+            EdgeCount = 0,
+            TotalLaneCount = 0,
+            IsComplete = true,
+            RowByCommitId = new Dictionary<GitObjectId, int>(),
+        };
+
+        var before = graph.HeadRowLookupsForTesting;
+        Assert.Equal(-1, graph.ResolveHeadRowForTesting(GraphLayout.Empty));
+        Assert.Equal(-1, graph.ResolveHeadRowForTesting(GraphLayout.Empty));
+        Assert.Equal(1, graph.HeadRowLookupsForTesting - before);
+
+        Assert.Equal(-1, graph.ResolveHeadRowForTesting(other));
+        Assert.Equal(2, graph.HeadRowLookupsForTesting - before);
+        Assert.Equal(-1, graph.ResolveHeadRowForTesting(other));
+        Assert.Equal(2, graph.HeadRowLookupsForTesting - before);
+    }
+
+    /// <summary>A layout with no engine behind it. <paramref name="headCommit"/> is findable at
+    /// <paramref name="headRow"/>; <paramref name="placed"/> also records that row as the layout's
+    /// own HEAD row.</summary>
+    private static GraphLayout FakeLayout(int rows, int lanes, GitObjectId? headCommit = null, int headRow = -1,
+        bool placed = false)
+    {
+        var map = new Dictionary<GitObjectId, int>();
+        if (headCommit is { } id)
+            map[id] = headRow;
+        return new GraphLayout
+        {
+            Decorations = [],
+            RowCount = rows,
+            EdgeCount = 0,
+            TotalLaneCount = lanes,
+            IsComplete = false,
+            RowByCommitId = map,
+            HeadRow = placed ? headRow : -1,
+        };
+    }
+
+    [AvaloniaFact]
+    public async Task A_quiet_extend_that_adds_only_off_screen_rows_does_not_repaint()
+    {
+        using var setup = await CreateSetupAsync();
+
+        Assert.False(setup.Graph.NoteQuietExtendForTesting(FakeLayout(5_000, 3), FakeLayout(6_000, 3)));
+    }
+
+    [AvaloniaFact]
+    public async Task A_quiet_extend_that_reaches_the_viewport_repaints()
+    {
+        using var setup = await CreateSetupAsync();
+
+        Assert.True(setup.Graph.NoteQuietExtendForTesting(FakeLayout(10, 3), FakeLayout(5_010, 3)));
+    }
+
+    [AvaloniaFact]
+    public async Task A_quiet_extend_that_adds_a_lane_repaints()
+    {
+        using var setup = await CreateSetupAsync();
+
+        Assert.True(setup.Graph.NoteQuietExtendForTesting(FakeLayout(5_000, 3), FakeLayout(6_000, 4)));
+    }
+
+    [AvaloniaFact]
+    public async Task A_quiet_extend_that_places_head_repaints()
+    {
+        using var setup = await CreateSetupAsync();
+        var tip = setup.Context.State.CurrentBranch!.TipCommitId!.Value;
+
+        Assert.True(setup.Graph.NoteQuietExtendForTesting(
+            FakeLayout(5_000, 3), FakeLayout(6_000, 3, tip, headRow: 5_500, placed: true)));
+    }
+
+    [AvaloniaFact]
+    public async Task A_quiet_extend_looks_for_a_missed_head_once_per_batch()
+    {
+        using var setup = await CreateSetupAsync();
+        var graph = setup.Graph;
+        var tip = setup.Context.State.CurrentBranch!.TipCommitId!.Value;
+        var first = FakeLayout(5_000, 3);
+
+        // Nothing has missed HEAD yet, so a batch that does not reach the screen does no lookup.
+        var before = graph.HeadRowLookupsForTesting;
+        Assert.False(graph.NoteQuietExtendForTesting(first, FakeLayout(5_500, 3)));
+        Assert.Equal(before, graph.HeadRowLookupsForTesting);
+
+        Assert.Equal(-1, graph.ResolveHeadRowForTesting(first));
+        before = graph.HeadRowLookupsForTesting;
+
+        // A batch that still lacks HEAD costs one lookup and no repaint.
+        Assert.False(graph.NoteQuietExtendForTesting(first, FakeLayout(5_500, 3)));
+        Assert.Equal(before + 1, graph.HeadRowLookupsForTesting);
+
+        // A batch that brings HEAD in without the layout having placed it repaints.
+        Assert.True(graph.NoteQuietExtendForTesting(first, FakeLayout(6_000, 3, tip, headRow: 5_800)));
+    }
+
+    [AvaloniaFact]
+    public async Task A_quiet_extend_updates_the_scroll_range()
+    {
+        using var setup = await CreateSetupAsync();
+        var graph = setup.Graph;
+        var original = graph.LayoutForTesting!;
+        var grown = new GraphLayoutResult(FakeLayout(6_000, 3), original.State);
+
+        // Nothing renders between the swap and the restore: no dispatcher jobs run in between.
+        try
+        {
+            Assert.True(graph.SetLayoutForTesting(grown));
+            setup.Window.UpdateLayout();
+            var stale = graph.VerticalScrollBarForTesting.Maximum;
+            Assert.True(stale < 1_000 * graph.RowHeightForTesting, "the scroll range moved before the quiet extend was noted");
+
+            graph.NoteQuietExtendForTesting(original.Layout, grown.Layout);
+            setup.Window.UpdateLayout();
+
+            Assert.True(graph.VerticalScrollBarForTesting.Maximum > 5_000 * graph.RowHeightForTesting);
+        }
+        finally
+        {
+            graph.SetLayoutForTesting(original);
+        }
     }
 
     [AvaloniaFact]

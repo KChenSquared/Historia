@@ -10,8 +10,10 @@ public sealed partial class CommitGraphControl
 
     /// <summary>
     /// Row → decorations, built once per layout rather than re-scanned every frame. Keyed on
-    /// the <see cref="GraphLayout.Decorations"/> array identity, which Compute / Recompute /
-    /// Extend all replace. Frequent repaints (hover, selection, scroll) reuse it untouched.
+    /// the <see cref="GraphLayout.Decorations"/> array identity: Compute and Recompute build a
+    /// new array, and an Extend builds one whenever it added decorations (an Extend that added
+    /// none reuses the array, whose contents are unchanged). Frequent repaints (hover,
+    /// selection, scroll) reuse the index untouched.
     /// </summary>
     private Dictionary<int, List<GraphDecoration>> DecorationsByRow(GraphLayout layout)
     {
@@ -421,8 +423,8 @@ public sealed partial class CommitGraphControl
     }
 
     /// <summary>The row HEAD sits on, or -1. A lookup that missed (HEAD's commit is not among the
-    /// loaded rows) is remembered until the layout snapshot or HEAD's commit changes, so a frame
-    /// does not take the layout's row-map lock again for an answer that cannot have changed.</summary>
+    /// loaded rows) is remembered for that layout snapshot and HEAD's commit, so a frame does not
+    /// take the layout's row-map lock again for an answer that cannot have changed.</summary>
     private int ResolveHeadRow(GraphLayout layout)
     {
         if (layout.HeadRow >= 0 && layout.HeadRow < layout.RowCount)
@@ -430,7 +432,7 @@ public sealed partial class CommitGraphControl
 
         if (_state?.CurrentBranch?.TipCommitId is not { } tip)
             return -1;
-        if (_headRowMissed && _headRowMissTip.Equals(tip))
+        if (_headRowMissed && ReferenceEquals(_headRowMissLayout, layout) && _headRowMissTip.Equals(tip))
             return -1;
 
         _headRowLookups++;
@@ -438,6 +440,7 @@ public sealed partial class CommitGraphControl
             return r;
 
         _headRowMissed = true;
+        _headRowMissLayout = layout;
         _headRowMissTip = tip;
         return -1;
     }
@@ -965,7 +968,8 @@ public sealed partial class CommitGraphControl
     {
         var maxW = Math.Max(20, colWidth - 12);
         var brush = kind == GraphColumnKind.Message ? _text : _textMuted;
-        // The relative date changes with the minute, so a cached date cell is valid for one.
+        // The relative date changes with the minute, so a cached date cell is valid for one. The
+        // bucket is the UTC minute, so a cell can lag the commit's true age by up to 59 seconds.
         var minute = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMinute;
         for (var row = first; row <= last; row++)
         {

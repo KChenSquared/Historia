@@ -311,6 +311,7 @@ public sealed class GraphLayoutExtendLockTests
 
         // The reader is the render thread's own lookup, which goes through the same entry point.
         var partialRowCounts = new HashSet<int>();
+        var lookupFailed = false;
         using var stop = new CancellationTokenSource();
         using var ready = new ManualResetEventSlim();
         var reader = new Thread(() =>
@@ -318,7 +319,8 @@ public sealed class GraphLayoutExtendLockTests
             ready.Set();
             while (!stop.IsCancellationRequested)
             {
-                Assert.True(probe.TryGetRow(knownId, out _));
+                if (!probe.TryGetRow(knownId, out _))
+                    lookupFailed = true;
                 using (state.EnterAsReader())
                 {
                     var seen = state.Rows.Count;
@@ -340,6 +342,7 @@ public sealed class GraphLayoutExtendLockTests
             reader.Join();
         }
 
+        Assert.False(lookupFailed, "the reader's lookup of a known commit failed during the extend");
         Assert.NotNull(result);
         Assert.Equal(first + rows, state.Rows.Count);
         // 300 chunks: a reader that was locked out until the end would have seen none of them.

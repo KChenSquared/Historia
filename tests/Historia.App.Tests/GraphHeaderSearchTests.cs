@@ -323,6 +323,69 @@ public sealed class GraphHeaderSearchTests
         Assert.Empty(s.Graph.MatchRowsForTesting);
     }
 
+    private static void PressEnter(Setup s) =>
+        s.Graph.SearchBoxForTesting.RaiseEvent(new KeyEventArgs
+        {
+            RoutedEvent = InputElement.KeyDownEvent,
+            Key = Key.Enter,
+            Source = s.Graph.SearchBoxForTesting,
+        });
+
+    [AvaloniaFact]
+    public async Task Enter_before_the_debounce_ends_steps_through_the_new_terms_matches()
+    {
+        using var s = CreateGraph();
+        s.Graph.FindDebounceForTesting = TimeSpan.FromMilliseconds(10);
+        s.Graph.FindSearchForTesting = (term, _) => term == "old" ? [0] : [1];
+        s.Graph.SearchBoxForTesting.Text = "old";
+        Assert.True(await WaitForAsync(() => s.Graph.MatchRowsForTesting.SequenceEqual([0])), "no match for old");
+
+        // A debounce this long would outlast the test: only Enter can make the search run.
+        s.Graph.FindDebounceForTesting = TimeSpan.FromMinutes(5);
+        s.Graph.SearchBoxForTesting.Text = "new";
+        PressEnter(s);
+
+        var newRow = s.Graph.LayoutForTesting!.Layout.Commits[1].Id;
+        Assert.True(await WaitForAsync(() => s.Context.State.SelectedCommitId == newRow), "Enter did not select the new term's match");
+        Assert.Equal([1], s.Graph.MatchRowsForTesting);
+        Assert.Equal(1, s.Graph.CurrentMatchRowForTesting);
+    }
+
+    [AvaloniaFact]
+    public async Task A_pending_Enter_steps_once_and_a_later_Enter_steps_normally()
+    {
+        using var s = CreateGraph();
+        s.Graph.FindDebounceForTesting = TimeSpan.FromMinutes(5);
+        s.Graph.FindSearchForTesting = (_, _) => [0, 1];
+
+        s.Graph.SearchBoxForTesting.Text = "c";
+        PressEnter(s);
+        Assert.True(await WaitForAsync(() => s.Graph.CurrentMatchRowForTesting == 1), "the pending step did not apply");
+        await WaitForAsync(() => false, timeoutMs: 100);
+        Assert.Equal(1, s.Graph.CurrentMatchRowForTesting);
+
+        PressEnter(s);
+        Assert.Equal(0, s.Graph.CurrentMatchRowForTesting);
+    }
+
+    [AvaloniaFact]
+    public async Task A_new_term_drops_the_old_terms_matches_at_once()
+    {
+        using var s = CreateGraph();
+        s.Graph.FindDebounceForTesting = TimeSpan.FromMilliseconds(10);
+        s.Graph.FindSearchForTesting = (_, _) => [0, 1];
+        s.Graph.SearchBoxForTesting.Text = "old";
+        Assert.True(await WaitForAsync(() => s.Graph.MatchRowsForTesting.Count == 2));
+
+        s.Graph.FindDebounceForTesting = TimeSpan.FromMinutes(5);
+        s.Graph.SearchBoxForTesting.Text = "new";
+        Dispatcher.UIThread.RunJobs();
+
+        Assert.Empty(s.Graph.MatchRowsForTesting);
+        s.Graph.StepMatchForTesting(1);
+        Assert.Equal(-1, s.Graph.CurrentMatchRowForTesting);
+    }
+
     [AvaloniaFact]
     public async Task Find_matches_the_stores_rows_without_the_test_hook()
     {
