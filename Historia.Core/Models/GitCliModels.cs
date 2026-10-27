@@ -43,6 +43,29 @@ public sealed record GitCliResult(
     public bool OutputTruncated { get; init; }
 }
 
+/// <summary>How a git invocation competes with the rest of the app.</summary>
+public enum GitCliPriority
+{
+    /// <summary>User-driven work whose result the user is waiting for. Runs at normal priority and
+    /// never waits for a background slot.</summary>
+    Interactive,
+
+    /// <summary>The default: ordinary foreground work. Runs at normal priority and never waits for a
+    /// background slot.</summary>
+    Normal,
+
+    /// <summary>Local, self-contained work nobody is waiting for (a commit-graph write, an index
+    /// stat refresh). Runs at below-normal priority, and at most two such processes run at a time
+    /// across the app; the rest wait for a slot before they start. A call made inside a
+    /// <see cref="GitWriteScope"/> never waits for a slot.</summary>
+    Background,
+
+    /// <summary>Background network work (auto-fetch). Runs at below-normal priority but does not take
+    /// a background slot: a fetch can run for a long time on a bad network and must not hold local
+    /// background work back.</summary>
+    BackgroundNetwork,
+}
+
 /// <summary>What a cancellation or timeout does to a git process that has already started.</summary>
 public enum GitCliCancelPolicy
 {
@@ -96,13 +119,24 @@ public sealed record GitCliRequest
     /// <summary>When set, written to the process's stdin and then closed (e.g. a patch for <c>git apply -</c>).</summary>
     public string? StandardInput { get; init; }
 
-    /// <summary>Run the process at
-    /// <see cref="System.Diagnostics.ProcessPriorityClass.BelowNormal"/> — for background,
-    /// self-contained git operations (a commit-graph write) that should never contend with a
-    /// user-driven git invocation for CPU. It says nothing about cancellation: a cancelled token
-    /// or an elapsed <see cref="Timeout"/> kills the process tree like any other request, unless
+    /// <summary>How urgently the invocation competes for CPU and for the background slots; see
+    /// <see cref="GitCliPriority"/>. It says nothing about cancellation: a cancelled token or an
+    /// elapsed <see cref="Timeout"/> kills the process tree like any other request, unless
     /// <see cref="CancelPolicy"/> or an enclosing <see cref="GitWriteScope"/> forbids it.</summary>
-    public bool LowerPriority { get; init; }
+    public GitCliPriority Priority { get; init; } = GitCliPriority.Normal;
+
+    /// <summary>Shorthand for <see cref="GitCliPriority.Background"/>: setting it to true on a
+    /// request that has no other priority makes the request a background one; it reads true for
+    /// both background priorities.</summary>
+    public bool LowerPriority
+    {
+        get => Priority is GitCliPriority.Background or GitCliPriority.BackgroundNetwork;
+        init
+        {
+            if (value && Priority == GitCliPriority.Normal)
+                Priority = GitCliPriority.Background;
+        }
+    }
 
     /// <summary>What a cancellation or <see cref="Timeout"/> does once the process has started.
     /// A call made inside a <see cref="GitWriteScope"/> behaves as

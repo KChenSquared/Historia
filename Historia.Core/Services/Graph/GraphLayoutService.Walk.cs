@@ -132,8 +132,8 @@ public sealed partial class GraphLayoutService
         // Step 2 — off the gate: prime or resume the walk.
         WalkResult walked = prep.Kind switch
         {
-            GatePrepKind.PrimeCli => await PrimeCliWalkAsync(context, cache, query, prep, allowPrefix: !background, ct).ConfigureAwait(false),
-            GatePrepKind.ResumeCli => await ResumeCliWalkAsync(context, cache, prep, ct).ConfigureAwait(false),
+            GatePrepKind.PrimeCli => await PrimeCliWalkAsync(context, cache, query, prep, allowPrefix: !background, background, ct).ConfigureAwait(false),
+            GatePrepKind.ResumeCli => await ResumeCliWalkAsync(context, cache, prep, background, ct).ConfigureAwait(false),
             _ => prep.Result,
         };
 
@@ -408,9 +408,12 @@ public sealed partial class GraphLayoutService
     /// the lock next already sees it. The result carries none for the caller to merge.</para>
     /// <para>A foreground first prime may paint from a proven prefix instead
     /// (<see cref="TryPrefixPrime"/>), leaving no live walk; the next prime is then the full
-    /// walk, skipping and checking the proven rows.</para></summary>
+    /// walk, skipping and checking the proven rows.</para>
+    /// <para>The git process starts on a pool thread and runs at below-normal priority while
+    /// <paramref name="background"/> is true.</para></summary>
     private async Task<WalkResult> PrimeCliWalkAsync(
-        RepositoryContext context, RepoCache cache, GraphQuery query, GatePrep prep, bool allowPrefix, CancellationToken ct)
+        RepositoryContext context, RepoCache cache, GraphQuery query, GatePrep prep, bool allowPrefix, bool background,
+        CancellationToken ct)
     {
         await cache.WalkLock.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -432,8 +435,8 @@ public sealed partial class GraphLayoutService
                 return new WalkResult([], prep.Decorations, Exhausted: false, prep.Fingerprint, prep.DecosFresh,
                     WalkKey: prep.WalkKey, CarriesRefState: false);
 
-            var stream = GitLogStream.TryStart(
-                _locator, context.RepositoryPath, prep.Tips!, context.ActiveProfile, query.PathFilter);
+            var stream = await Task.Run(() => GitLogStream.TryStart(
+                _locator, context.RepositoryPath, prep.Tips!, context.ActiveProfile, query.PathFilter)).ConfigureAwait(false);
 
             if (stream is null)
             {
@@ -453,6 +456,7 @@ public sealed partial class GraphLayoutService
             // prep.Have rows may already be resident from a partial on-disk cache (a
             // non-exhausted .gz or .meta store), so the fresh walk re-skips them or its rows
             // [0, need) would land duplicated after the cached ones.
+            stream.SetLowPriority(background);
             var exhausted = PumpCommits(stream, delta, skip: prep.Have, want: need, cache, ct);
 
             if (cache.PrefixRejected)
@@ -504,9 +508,10 @@ public sealed partial class GraphLayoutService
 
     /// <summary>Resumes an already-primed <see cref="GitLogStream"/>, so a
     /// scroll Extend or the background spill's next chunk never queues behind status/diff
-    /// work on this repo.</summary>
+    /// work on this repo. The live walk may serve a foreground pull after a background one, so its
+    /// process priority is set on every pull from <paramref name="background"/>.</summary>
     private static async Task<WalkResult> ResumeCliWalkAsync(
-        RepositoryContext context, RepoCache cache, GatePrep prep, CancellationToken ct)
+        RepositoryContext context, RepoCache cache, GatePrep prep, bool background, CancellationToken ct)
     {
         await cache.WalkLock.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -538,6 +543,8 @@ public sealed partial class GraphLayoutService
             // stream discards them. The reorder pass clears cache.Commits per batch, so its `have`
             // is 0 and nothing is skipped there.
             var delta = new List<RawCommit>(Math.Min(need, 8192));
+            if (live is GitLogStream liveStream)
+                liveStream.SetLowPriority(background);
             var exhausted = PumpCommits(live, delta, skip: have, want: need, cache, ct);
             if (cache.PrefixRejected)
             {

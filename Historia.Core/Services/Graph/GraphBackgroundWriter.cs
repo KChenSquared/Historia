@@ -25,7 +25,8 @@ namespace Historia.Services.Graph;
 /// </list>
 /// Every job awaits <see cref="IBackgroundWorkGate"/> before it starts and runs at
 /// <see cref="ProcessPriorityClass.BelowNormal"/> for the git process itself
-/// (<see cref="GitCliRequest.LowerPriority"/>). Every commit-graph write sets
+/// (<see cref="GitCliPriority.Background"/>, which also keeps at most two background git
+/// processes running across the app). Every commit-graph write sets
 /// <c>GIT_NO_LAZY_FETCH=1</c>: in a partial clone, <c>commit-graph write --reachable</c> otherwise
 /// fetches a promisor-only object a ref points at — a network call the user never asked for.
 /// Never calls <c>git maintenance start</c>/<c>register</c> or changes git config.
@@ -34,8 +35,8 @@ namespace Historia.Services.Graph;
 /// <c>objects/info/commit-graph.lock</c> / <c>commit-graphs/commit-graph-chain.lock</c> from its own
 /// exit/signal handlers, never when the process tree is torn down with <c>TerminateProcess</c>
 /// (<see cref="GitCliProcessSetup.TryKill"/> calls <c>Process.Kill(entireProcessTree: true)</c>,
-/// which on Windows is exactly that). <see cref="GitCliRequest.LowerPriority"/> does not protect a
-/// process: the runner kills a lower-priority request on cancellation or timeout like any other,
+/// which on Windows is exactly that). <see cref="GitCliRequest.Priority"/> does not protect a
+/// process: the runner kills a background request on cancellation or timeout like any other,
 /// unless the request is <see cref="GitCliCancelPolicy.NeverAfterStart"/> or runs inside a
 /// <see cref="GitWriteScope"/>. So <see cref="RunWriteAsync"/> runs the git process with
 /// <see cref="CancellationToken.None"/> and an infinite timeout, leaving nothing that could cancel
@@ -443,7 +444,7 @@ internal sealed class GraphBackgroundWriter(IGitCliService cli, IBackgroundWorkG
             Arguments = args,
             WorkingDirectory = context.RepositoryPath,
             Timeout = Timeout.InfiniteTimeSpan,
-            LowerPriority = true,
+            Priority = GitCliPriority.Background,
             ExtraEnvironment = NoLazyFetch,
         }, CancellationToken.None).ConfigureAwait(false);
 
