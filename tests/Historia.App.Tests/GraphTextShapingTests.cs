@@ -249,6 +249,29 @@ public sealed class GraphTextShapingTests
     }
 
     [AvaloniaFact]
+    public void A_repeat_frame_builds_no_date_or_sha_cell_text()
+    {
+        using var s = CreateGraph();
+        RenderFrame(s.Graph);
+        Assert.True(s.Graph.CellTextMissesForTesting >= VisibleRows(s),
+            $"the first frame built only {s.Graph.CellTextMissesForTesting} date and SHA cells");
+
+        // A date cell is valid for one minute, so a pass that happens to straddle a minute
+        // boundary rebuilds once; a cache that never hits fails every pass.
+        var misses = -1;
+        for (var pass = 0; pass < 3 && misses != 0; pass++)
+        {
+            s.Graph.ResetMissCountersForTesting();
+            RenderFrame(s.Graph);
+            misses = s.Graph.CellTextMissesForTesting;
+        }
+
+        Assert.Equal(0, misses);
+        Assert.Equal(0, s.Graph.TextMissesForTesting);
+        Assert.Equal(0, s.Graph.PoolMissesForTesting);
+    }
+
+    [AvaloniaFact]
     public void A_repeat_frame_with_numbered_remote_clouds_shapes_no_text_and_builds_no_pooled_object()
     {
         using var s = CreateGraph(twoRemotes: true);
