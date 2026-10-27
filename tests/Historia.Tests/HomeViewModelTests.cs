@@ -13,7 +13,16 @@ public sealed class HomeViewModelTests : IAsyncDisposable
         public List<RecentRepository> Entries { get; } = [];
         public List<string> Removed { get; } = [];
 
-        public IReadOnlyList<RecentRepository> Items => [.. Entries];
+        public int ItemsReads { get; private set; }
+
+        public IReadOnlyList<RecentRepository> Items
+        {
+            get
+            {
+                ItemsReads++;
+                return [.. Entries];
+            }
+        }
 
         public event EventHandler? Changed;
 
@@ -185,6 +194,31 @@ public sealed class HomeViewModelTests : IAsyncDisposable
         Assert.Equal(["/src/a", "/src/gone"], rig.Home.Recents.Select(r => r.Path));
         Assert.Equal([false, true], rig.Home.Recents.Select(r => r.IsStale));
         Assert.False(rig.Home.HasNoRecents);
+    }
+
+    [Fact]
+    public void A_staleness_only_change_updates_the_rows()
+    {
+        var rig = NewRig(seed: [Recent("/src/a", "a"), Recent("/src/b", "b")]);
+        Assert.Equal([false, false], rig.Home.Recents.Select(r => r.IsStale));
+
+        rig.Recents.Set(("/src/a", "a", false), ("/src/b", "b", true));
+        rig.Recents.RaiseChanged();
+
+        Assert.Equal([false, true], rig.Home.Recents.Select(r => r.IsStale));
+        Assert.Equal("b  (missing)", rig.Home.Recents[1].Title);
+    }
+
+    [Fact]
+    public async Task Clone_takes_the_default_root_from_the_rows_without_reading_the_service()
+    {
+        var rig = NewRig(seed: [Recent("/src/projects/a", "a")]);
+        var readsBefore = rig.Recents.ItemsReads;
+
+        await rig.Home.CloneCommand.ExecuteAsync(null);
+
+        Assert.Equal(readsBefore, rig.Recents.ItemsReads);
+        Assert.Equal(Path.GetDirectoryName("/src/projects/a"), Assert.Single(rig.DialogCalls).DefaultRoot);
     }
 
     [Fact]
