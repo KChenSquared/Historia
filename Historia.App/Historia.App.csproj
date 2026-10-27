@@ -23,6 +23,13 @@
     <ApplicationIcon>Historia.ico</ApplicationIcon>
   </PropertyGroup>
 
+  <!-- Release publishes ship ReadyToRun images (precompiled native code beside the IL) so startup
+       skips most JIT work. Needs a runtime identifier; the build stays framework-dependent, so the
+       package gains no runtime prerequisite. Debug builds and plain builds are unaffected. -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release' and '$(RuntimeIdentifier)' != ''">
+    <PublishReadyToRun>true</PublishReadyToRun>
+  </PropertyGroup>
+
   <ItemGroup>
     <!-- Pinned, no floating wildcard. -->
     <PackageReference Include="Avalonia" Version="11.3.20" />
