@@ -59,17 +59,8 @@ internal static class GitCliProcessSetup
         }
     }
 
-    /// <summary>Kills the whole process tree, swallowing the "already gone" cases.</summary>
-    public static void TryKill(Process process)
-    {
-        try
-        {
-            if (!process.HasExited)
-                process.Kill(entireProcessTree: true);
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
-        {
-            // Process already gone.
-        }
-    }
+    /// <summary>Queues a kill of the whole process tree on <see cref="ProcessKiller"/>'s thread and
+    /// returns at once; "already gone" cases are swallowed there. The process may still be alive
+    /// when this returns — await <see cref="ProcessKiller.KillAsync"/> before disposing it.</summary>
+    public static void TryKill(Process process) => ProcessKiller.Kill(process);
 }
