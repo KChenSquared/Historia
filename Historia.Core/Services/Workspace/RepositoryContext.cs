@@ -254,6 +254,7 @@ public sealed class RepositoryContext : IAsyncDisposable
     }
 
     private const double WriteLockLogThresholdMs = 5.0;
+    private const double CloseWaitLogThresholdMs = 50.0;
 
     /// <summary>The write-lock holder's label and acquisition time. Immutable and swapped whole, so
     /// a reader on another thread never sees a label from one holder and a time from another.</summary>
@@ -300,6 +301,13 @@ public sealed class RepositoryContext : IAsyncDisposable
         if (_isHoldingWriteLock.Value)
             throw new InvalidOperationException("Nested or re-entrant write lock acquisition is not permitted.");
 
+        // The pre-checks and Process.Start in the work delegate must not run on a UI thread.
+        // Task.Yield would post straight back to a UI context's queue; ForceYielding schedules the
+        // continuation on the thread pool. Everything below, including the wait timing and the
+        // holder bookkeeping, therefore runs after the hop, and the AsyncLocal below is set after it.
+        if (SynchronizationContext.Current is not null)
+            await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, Lifetime);
         var holderAtWaitStart = Volatile.Read(ref _writeHolder);
         var waitStart = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -330,6 +338,9 @@ public sealed class RepositoryContext : IAsyncDisposable
         _isHoldingWriteLock.Value = true;
         try
         {
+            // A git process started by the work is never killed once it has started, so a
+            // cancellation (tab close) cannot leave index.lock behind or a half-applied change.
+            using var writeScope = GitWriteScope.Enter();
             return await work(linked.Token).ConfigureAwait(false);
         }
         finally
@@ -493,6 +504,19 @@ public sealed class RepositoryContext : IAsyncDisposable
         using var perfScope = Historia.Diagnostics.PerfLog.Scope($"RepositoryContext.DisposeAsync({DisplayName})");
         AppLog.Write(AppLogLevel.Info, "repo", $"Close({DisplayName})");
         try { _lifetimeCts.Cancel(); } catch { /* ignore */ }
+
+        // A write that already holds the lock finishes before the watcher and state go away; the
+        // cancelled lifetime stops writes that are still waiting. A close requested from inside a
+        // write would wait for itself, so that flow skips the wait.
+        if (!_isHoldingWriteLock.Value)
+        {
+            var waitStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            await _writeLock.WaitAsync().ConfigureAwait(false);
+            _writeLock.Release();
+            var waitedMs = System.Diagnostics.Stopwatch.GetElapsedTime(waitStart).TotalMilliseconds;
+            if (waitedMs > CloseWaitLogThresholdMs && PerfLog.Enabled)
+                PerfLog.Mark($"close waited {waitedMs:F1}ms for the write lock ({DisplayName})");
+        }
 
         await Watcher.DisposeAsync().ConfigureAwait(false);
         if (State is IAsyncDisposable stateDisposable)
