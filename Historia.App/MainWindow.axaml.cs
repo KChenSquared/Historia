@@ -39,6 +39,11 @@ public partial class MainWindow : Window
             _scrollProbe = services.GetService<IScrollDirectionProbe>();
             if (_scrollProbe is not null)
                 Activated += (_, _) => _scrollProbe.Refresh();
+            if (services.GetService<IWorkspaceService>() is { } workspace)
+            {
+                Activated += (_, _) => workspace.SetAppActive(true);
+                Deactivated += (_, _) => workspace.SetAppActive(false);
+            }
             _placementWriter = new AtomicFileWriter(AppPaths.WindowPlacementFile);
             if (_theme is not null)
                 _theme.ThemeChanged += OnThemeChanged;

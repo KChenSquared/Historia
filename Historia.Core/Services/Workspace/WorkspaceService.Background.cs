@@ -32,6 +32,19 @@ public sealed partial class WorkspaceService
     /// <inheritdoc/>
     public Task RequestBackgroundRefreshAsync(RepositoryContext context, bool full = false, CancellationToken ct = default)
     {
+        bool isFocused;
+        lock (_sync)
+            isFocused = ReferenceEquals(_focused, context);
+
+        return isFocused
+            ? RequestPacedRefreshAsync(context, full, ct)
+            : RequestRefreshAsync(context, full, ct);
+    }
+
+    /// <summary>Runs the refresh now: at once for the focused tab, through the background queue for
+    /// every other one. No pacing — <see cref="RequestPacedRefreshAsync"/> decides when to call it.</summary>
+    private Task RequestRefreshAsync(RepositoryContext context, bool full, CancellationToken ct)
+    {
         Task? taskToAwait = null;
         bool startPump = false;
         bool isFocused;
@@ -81,7 +94,7 @@ public sealed partial class WorkspaceService
         // run synchronously up to their first await, and _sync must be held only across queue
         // mutation.
         if (isFocused)
-            return RefreshFocusedAsync(context, full, focus, ct);
+            return FocusedRefreshForTesting?.Invoke(context, full) ?? RefreshFocusedAsync(context, full, focus, ct);
 
         return TaskGate.WaitWithCancellationAsync(taskToAwait!, ct);
     }
@@ -123,7 +136,213 @@ public sealed partial class WorkspaceService
             }
         }
 
-        await RequestBackgroundRefreshAsync(context, full, ct).ConfigureAwait(false);
+        await RequestRefreshAsync(context, full, ct).ConfigureAwait(false);
+    }
+
+    // Watcher-driven refreshes of the focused tab follow the cost of status: the next one starts no
+    // sooner than twice the last status duration (at least a second, three while the window is
+    // inactive) after the previous one ended. A request that comes sooner, or while one runs,
+    // joins a single trailing refresh armed for that moment.
+    private static readonly TimeSpan ActivePaceFloor = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan InactivePaceFloor = TimeSpan.FromSeconds(3);
+    private const double PaceStatusCostFactor = 2;
+
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<RepositoryContext, RefreshPacing> _pacing = new();
+    private int _appActive = 1;
+
+    /// <summary>The pacing clock; tests substitute a manual one.</summary>
+    internal TimeProvider TimeSource { get; set; } = TimeProvider.System;
+
+    /// <summary>Test seam: the last status duration pacing reads, instead of the tab's own.</summary>
+    internal Func<RepositoryContext, TimeSpan>? StatusDurationForTesting { get; set; }
+
+    /// <summary>Test seam: replaces the focused tab's refresh, so tests count refreshes without
+    /// running git.</summary>
+    internal Func<RepositoryContext, bool, Task>? FocusedRefreshForTesting { get; set; }
+
+    /// <summary>Test seam: whether a paced refresh of <paramref name="context"/> is in flight.</summary>
+    internal bool IsPacedRefreshRunningForTesting(RepositoryContext context)
+    {
+        if (!_pacing.TryGetValue(context, out var pacing))
+            return false;
+        lock (pacing)
+            return pacing.Running;
+    }
+
+    /// <summary>One tab's pacing state; every field is guarded by the instance's own lock.</summary>
+    private sealed class RefreshPacing
+    {
+        public bool Running;
+        public bool HasEnded;
+        public long EndedAt;
+        public PendingRefresh? Pending;
+        public ITimer? Timer;
+    }
+
+    private sealed class PendingRefresh
+    {
+        public bool Full;
+        public TaskCompletionSource Done { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    /// <inheritdoc/>
+    public bool IsAppActive => Volatile.Read(ref _appActive) != 0;
+
+    /// <inheritdoc/>
+    public void SetAppActive(bool active)
+    {
+        Volatile.Write(ref _appActive, active ? 1 : 0);
+        if (active)
+            _ = Task.Run(RefreshFocusedOnActivationAsync);
+    }
+
+    /// <summary>The focused tab's status right away, ignoring pacing — and a full refresh when its
+    /// watcher is degraded, since that watcher misses file events and activation is when it catches
+    /// up. A tab still loading is skipped: its own first status follows the load.</summary>
+    private async Task RefreshFocusedOnActivationAsync()
+    {
+        var focused = Focused;
+        if (focused is null || !focused.FirstFullLoad.IsCompleted)
+            return;
+
+        try
+        {
+            await RefreshUnpacedAsync(focused, focused.Watcher.IsDegraded, focused.Lifetime).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Tab closed.
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write(AppLogLevel.Warn, "workspace", $"Failed to refresh on activation: {focused.DisplayName}", ex);
+        }
+    }
+
+    private TimeSpan PaceInterval(RepositoryContext context)
+    {
+        var floor = IsAppActive ? ActivePaceFloor : InactivePaceFloor;
+        var cost = StatusDurationForTesting?.Invoke(context) ?? context.State.LastStatusDuration;
+        var scaled = cost * PaceStatusCostFactor;
+        return scaled > floor ? scaled : floor;
+    }
+
+    private Task RequestPacedRefreshAsync(RepositoryContext context, bool full, CancellationToken ct)
+    {
+        var pacing = _pacing.GetValue(context, static _ => new RefreshPacing());
+        var interval = PaceInterval(context);
+        Task? wait = null;
+        PendingRefresh? claimed = null;
+        lock (pacing)
+        {
+            var sinceEnd = pacing.HasEnded ? TimeSource.GetElapsedTime(pacing.EndedAt) : TimeSpan.MaxValue;
+            if (pacing.Running || sinceEnd < interval)
+            {
+                var pending = pacing.Pending ??= new PendingRefresh();
+                pending.Full |= full;
+                wait = pending.Done.Task;
+                if (!pacing.Running && pacing.Timer is null)
+                    ArmTrailingRefreshLocked(pacing, context, interval - sinceEnd);
+            }
+            else
+            {
+                pacing.Running = true;
+                claimed = pacing.Pending;
+                pacing.Pending = null;
+                pacing.Timer?.Dispose();
+                pacing.Timer = null;
+            }
+        }
+
+        if (wait is not null)
+            return TaskGate.WaitWithCancellationAsync(wait, ct);
+
+        return RunPacedAsync(pacing, context, full || claimed?.Full == true, claimed, ct);
+    }
+
+    /// <summary>Runs a refresh the caller marked as running; completes <paramref name="satisfies"/>
+    /// (the waiters it replaces) with the outcome and opens the next pacing window when it ends.</summary>
+    private async Task RunPacedAsync(RefreshPacing pacing, RepositoryContext context, bool full,
+        PendingRefresh? satisfies, CancellationToken ct)
+    {
+        try
+        {
+            await RequestRefreshAsync(context, full, ct).ConfigureAwait(false);
+            satisfies?.Done.TrySetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            satisfies?.Done.TrySetCanceled();
+            throw;
+        }
+        catch (Exception ex)
+        {
+            satisfies?.Done.TrySetException(ex);
+            throw;
+        }
+        finally
+        {
+            var interval = PaceInterval(context);
+            lock (pacing)
+            {
+                pacing.Running = false;
+                pacing.HasEnded = true;
+                pacing.EndedAt = TimeSource.GetTimestamp();
+                if (pacing.Pending is not null && pacing.Timer is null)
+                    ArmTrailingRefreshLocked(pacing, context, interval);
+            }
+        }
+    }
+
+    /// <summary>Caller holds the pacing lock.</summary>
+    private void ArmTrailingRefreshLocked(RefreshPacing pacing, RepositoryContext context, TimeSpan delay) =>
+        pacing.Timer = TimeSource.CreateTimer(_ => OnTrailingRefreshDue(pacing, context), null, delay, Timeout.InfiniteTimeSpan);
+
+    private void OnTrailingRefreshDue(RefreshPacing pacing, RepositoryContext context)
+    {
+        PendingRefresh pending;
+        lock (pacing)
+        {
+            pacing.Timer?.Dispose();
+            pacing.Timer = null;
+            if (pacing.Pending is not { } due || pacing.Running)
+                return; // a running refresh arms the next trailing one when it ends
+            pending = due;
+            pacing.Pending = null;
+            pacing.Running = true;
+        }
+
+        _ = RunTrailingAsync(pacing, context, pending);
+    }
+
+    private async Task RunTrailingAsync(RefreshPacing pacing, RepositoryContext context, PendingRefresh pending)
+    {
+        try
+        {
+            await RunPacedAsync(pacing, context, pending.Full, pending, context.Lifetime).ConfigureAwait(false);
+        }
+        catch
+        {
+            // The requests waiting on this refresh hold its outcome.
+        }
+    }
+
+    /// <summary>A refresh that is not paced (activation); it still opens the next pacing window.</summary>
+    private async Task RefreshUnpacedAsync(RepositoryContext context, bool full, CancellationToken ct)
+    {
+        var pacing = _pacing.GetValue(context, static _ => new RefreshPacing());
+        try
+        {
+            await RequestRefreshAsync(context, full, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (pacing)
+            {
+                pacing.HasEnded = true;
+                pacing.EndedAt = TimeSource.GetTimestamp();
+            }
+        }
     }
 
     /// <summary>Initialises and refreshes the queued background tabs one at a time in app-band tab order,

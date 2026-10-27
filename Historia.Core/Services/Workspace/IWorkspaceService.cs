@@ -59,10 +59,23 @@ public interface IWorkspaceService
     /// <summary>
     /// Enqueues a refresh for a background tab, draining on the serial background pump behind the
     /// focused tab's first full load in app-band tab order. If <paramref name="context"/>
-    /// is currently focused, runs immediately.
+    /// is currently focused, it refreshes itself instead, paced by the cost of its last status
+    /// (see <see cref="IsAppActive"/>); explicit user operations call the state service directly
+    /// and are never paced.
     /// </summary>
     Task RequestBackgroundRefreshAsync(RepositoryContext context, bool full = false, CancellationToken ct = default)
         => full ? context.State.RefreshAllAsync(ct) : context.State.RefreshStatusAsync(ct);
+
+    /// <summary>True while the Historia window is the active window. Watcher-driven refreshes of the
+    /// focused tab are paced further apart while it is not.</summary>
+    bool IsAppActive => true;
+
+    /// <summary>Records whether the Historia window is active. Activation refreshes the focused
+    /// tab's status at once, regardless of pacing; a tab whose watcher is degraded gets a full
+    /// refresh, since that watcher misses file events. Safe to call from any thread.</summary>
+    void SetAppActive(bool active)
+    {
+    }
 
     /// <summary>
     /// Moves an open tab so its first tab ends at <paramref name="newIndex"/> in the strip
