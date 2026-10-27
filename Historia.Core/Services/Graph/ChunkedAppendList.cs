@@ -83,9 +83,9 @@ internal sealed class ChunkedAppendList<T>
         Volatile.Write(ref _count, index + 1); // publish the item before any reader can see the new count
     }
 
-    /// <summary>Copies every element into a fresh array. Never called by
-    /// <c>DagLayoutEngine.Build</c> (that copy would make extends quadratic) — for tests and
-    /// diagnostics only.</summary>
+    /// <summary>Copies every element into a fresh array. Called once per full Compute, never on
+    /// the incremental path: <c>DagLayoutEngine.Build</c> reads the list in place, because a copy
+    /// per extend would make extends quadratic.</summary>
     public T[] ToArray()
     {
         var count = Count;

@@ -24,7 +24,7 @@ public sealed partial class CommitGraphControl
     {
         if (e.Key == Key.Enter)
         {
-            StepMatch((e.KeyModifiers & KeyModifiers.Shift) != 0 ? -1 : 1);
+            StepOrFlushFind((e.KeyModifiers & KeyModifiers.Shift) != 0 ? -1 : 1);
             e.Handled = true;
         }
         else if (e.Key == Key.Escape)
@@ -39,6 +39,8 @@ public sealed partial class CommitGraphControl
     // before it: the version number is bumped and the previous token cancelled, and a result is
     // applied only if its version is still the latest. _findTerm, _findStore and _findRows
     // describe the latest request, whether its result is applied yet or still on its way.
+    // Enter while a request is still waiting or running does not step through the previous
+    // term's matches: it skips the rest of the debounce and steps once the new result lands.
 
     private static readonly TimeSpan DefaultFindDebounce = TimeSpan.FromMilliseconds(200);
     private TimeSpan _findDebounce = DefaultFindDebounce;
@@ -47,6 +49,9 @@ public sealed partial class CommitGraphControl
     private string _findTerm = "";
     private ICommitStore? _findStore;
     private int _findRows;
+    private bool _findPending;
+    private CancellationTokenSource? _findSkipDelay;
+    private int _pendingStep;
     private Func<string, CancellationToken, IReadOnlyList<int>>? _findSearchForTesting;
     private Task? _findTask;
 
@@ -86,6 +91,14 @@ public sealed partial class CommitGraphControl
         _findStore = store;
         _findRows = rows;
 
+        // Matches of another term must neither stay highlighted nor be stepped through while the
+        // new term's search is on its way.
+        if (!sameTerm && _matches.HasMatches)
+        {
+            _matches.Clear();
+            InvalidateVisual();
+        }
+
         // A lease keeps the store's file open for the scan however soon a re-walk lets go of it.
         if (term.Length == 0 || store?.AddRef() is not { } lease)
         {
@@ -95,16 +108,44 @@ public sealed partial class CommitGraphControl
 
         _matchLabel.Text = "";
         var cts = _findCts = new CancellationTokenSource();
-        _findTask = RunFindAsync(term, lease, _findVersion, debounce ? _findDebounce : TimeSpan.Zero, sameTerm, cts.Token);
+        var skipDelay = _findSkipDelay = new CancellationTokenSource();
+        _findPending = true;
+        _findTask = RunFindAsync(term, lease, _findVersion, debounce ? _findDebounce : TimeSpan.Zero, sameTerm, cts.Token, skipDelay.Token);
+    }
+
+    /// <summary>Enter in the box. With the latest request already applied it steps through the
+    /// matches. With one still waiting out its debounce or scanning, it records the step, cuts the
+    /// wait short and lets the result apply it, so the step acts on the term in the box. Text
+    /// typed in the same dispatcher turn may not have raised its change event yet, so the box is
+    /// read again first.</summary>
+    private void StepOrFlushFind(int direction)
+    {
+        RecomputeMatches(debounce: false);
+        if (!_findPending)
+        {
+            StepMatch(direction);
+            return;
+        }
+
+        _pendingStep = direction;
+        var skip = _findSkipDelay;
+        if (skip is null)
+            return;
+        try { skip.Cancel(); }
+        catch (ObjectDisposedException) { }
     }
 
     private async Task RunFindAsync(string term, ICommitStore lease, int version, TimeSpan delay,
-        bool preserveCursor, CancellationToken ct)
+        bool preserveCursor, CancellationToken ct, CancellationToken skipDelay)
     {
         try
         {
             if (delay > TimeSpan.Zero)
-                await Task.Delay(delay, ct).ConfigureAwait(true);
+            {
+                using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct, skipDelay);
+                try { await Task.Delay(delay, wait.Token).ConfigureAwait(true); }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
+            }
 
             // The store owns the scan: an in-memory array loops; a disk-backed store streams its
             // search sidecar rather than paging every record. The scan itself cannot be
@@ -131,6 +172,9 @@ public sealed partial class CommitGraphControl
     /// text, leaves the cursor and the scroll position where they are.</summary>
     private void ApplyMatches(IReadOnlyList<int> hits, bool preserveCursor)
     {
+        _findPending = false;
+        var step = _pendingStep;
+        _pendingStep = 0;
         var shown = _matches.Rows;
         var same = preserveCursor && hits.Count == shown.Count;
         for (var i = 0; same && i < hits.Count; i++)
@@ -145,6 +189,8 @@ public sealed partial class CommitGraphControl
 
         UpdateMatchLabel();
         InvalidateVisual();
+        if (step != 0)
+            StepMatch(step);
     }
 
     /// <summary>Supersedes any search in flight: its result will be dropped and its token is
@@ -152,6 +198,10 @@ public sealed partial class CommitGraphControl
     private void CancelFind()
     {
         _findVersion++;
+        _findPending = false;
+        _pendingStep = 0;
+        _findSkipDelay?.Dispose();
+        _findSkipDelay = null;
         var cts = _findCts;
         _findCts = null;
         if (cts is null)

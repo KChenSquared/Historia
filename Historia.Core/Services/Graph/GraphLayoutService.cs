@@ -516,7 +516,7 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
     {
         if (Volatile.Read(ref state.LockWaiters) <= 0)
             return;
-        state.ExtendYields++;
+        Interlocked.Increment(ref state.ExtendYields);
         var spin = new SpinWait();
         for (var i = 0; i < MaxYieldSpins && Volatile.Read(ref state.LockWaiters) > 0; i++)
             spin.SpinOnce(sleep1Threshold: -1);

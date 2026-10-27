@@ -121,8 +121,10 @@ public sealed partial class CommitGraphControl : Control
     // tree, where nothing else would notice and the control would keep the closed repository alive.
     private CancellationTokenRegistration _closeRegistration;
     private CloseWatch? _closeWatch;
-    // A HEAD lookup that found no row, valid until the layout snapshot or HEAD's commit changes.
+    // A HEAD lookup that found no row, valid only for the layout snapshot and HEAD commit it ran
+    // against.
     private bool _headRowMissed;
+    private GraphLayout? _headRowMissLayout;
     private GitObjectId _headRowMissTip;
     private int _headRowLookups;
     internal int RefsRecomputeCount => _refsRecomputeCount;
@@ -892,26 +894,22 @@ public sealed partial class CommitGraphControl : Control
     /// <summary>What a repository's lifetime token calls back into. A cancelled token's callback
     /// nodes stay linked to each other, so a node that outlives the cancellation (the token's
     /// other users keep timers pending) would keep whatever it was registered with alive; this
-    /// holder lets go of the control and the repository as soon as it has fired or been
-    /// cleared.</summary>
+    /// holder lets go of the repository as soon as it has fired or been cleared and reaches the
+    /// control only weakly, since the control keeps the holder and the token's list must not keep
+    /// the control.</summary>
     private sealed class CloseWatch(CommitGraphControl graph, RepositoryContext context)
     {
-        private CommitGraphControl? _graph = graph;
+        private readonly WeakReference<CommitGraphControl> _graph = new(graph);
         private RepositoryContext? _context = context;
 
         public void Fire()
         {
-            var g = Interlocked.Exchange(ref _graph, null);
             var c = Interlocked.Exchange(ref _context, null);
-            if (g is not null && c is not null)
+            if (c is not null && _graph.TryGetTarget(out var g))
                 Dispatcher.UIThread.Post(() => g.ReleaseClosedContext(c));
         }
 
-        public void Clear()
-        {
-            _graph = null;
-            _context = null;
-        }
+        public void Clear() => _context = null;
     }
 
     /// <summary>Lets go of a repository that closed while the control was off the visual tree:
@@ -1399,8 +1397,6 @@ public sealed partial class CommitGraphControl : Control
     /// and neither it nor the lease is adopted; the caller keeps whatever it had.</para></summary>
     private bool SetLayout(GraphLayoutResult? result)
     {
-        if (!ReferenceEquals(result?.Layout, _layout?.Layout))
-            _headRowMissed = false;
         var next = result?.Layout.Commits;
         if (ReferenceEquals(next, _leasedStore))
         {
@@ -1584,18 +1580,27 @@ public sealed partial class CommitGraphControl : Control
     /// <summary>After a silent-crawl batch: re-arrange for the new scroll extent (the arrange pass
     /// also resolves the auto Graph width), and repaint only when the batch can change what is on
     /// screen: it reaches the viewport, adds a lane, places HEAD, or the graph is showing the
-    /// reveal placeholder with its row count.</summary>
-    private void NoteQuietExtend(GraphLayout previous, GraphLayout next)
+    /// reveal placeholder with its row count. HEAD that an earlier lookup missed is looked up
+    /// again once per batch, in the new layout. Returns whether it asked for a repaint.</summary>
+    private bool NoteQuietExtend(GraphLayout previous, GraphLayout next)
     {
         InvalidateArrange();
         var rowArea = Bounds.Height - RowsTop;
         var lastDrawn = (int)((_scrollOffset + rowArea) / _rowHeight) + 2;
-        if (RevealBlanking
+        if (!(RevealBlanking
             || previous.RowCount <= lastDrawn + 1
             || next.TotalLaneCount != previous.TotalLaneCount
-            || (previous.HeadRow < 0 && next.HeadRow >= 0))
-            InvalidateVisual();
+            || (previous.HeadRow < 0 && next.HeadRow >= 0)
+            || (_headRowMissed && ResolveHeadRow(next) >= 0)))
+            return false;
+
+        InvalidateVisual();
+        return true;
     }
+
+    internal bool NoteQuietExtendForTesting(GraphLayout previous, GraphLayout next) => NoteQuietExtend(previous, next);
+
+    internal bool SetLayoutForTesting(GraphLayoutResult? result) => SetLayout(result);
 
     private async Task EnsureExtendedAsync(int neededRow)
     {
