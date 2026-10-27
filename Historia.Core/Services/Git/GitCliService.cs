@@ -18,6 +18,12 @@ public sealed class GitCliService : IGitCliService
 
     private static readonly TimeSpan PipePollInterval = TimeSpan.FromMilliseconds(250);
 
+    /// <summary>How many <see cref="GitCliPriority.Background"/> processes may run at once across
+    /// the whole app, whatever the number of repositories or <see cref="GitCliService"/> instances.</summary>
+    private const int MaxBackgroundProcesses = 2;
+
+    private static readonly SemaphoreSlim BackgroundSlots = new(MaxBackgroundProcesses, MaxBackgroundProcesses);
+
     private readonly IGitExecutableLocator _locator;
 
     public GitCliService(IGitExecutableLocator locator)
@@ -36,6 +42,10 @@ public sealed class GitCliService : IGitCliService
     /// <summary>Delays the start of every pipe reader thread — a seam for tests that need output to
     /// wait in the pipe while git exits.</summary>
     internal TimeSpan ReaderStartDelay { get; init; } = TimeSpan.Zero;
+
+    /// <summary>Called right after every git process has started and its priority has been applied,
+    /// on the thread that started it — a seam for tests that inspect the live process.</summary>
+    internal Action<Process>? ProcessStarted { get; init; }
 
     public Task<GitCliResult> RunAsync(GitCliRequest request, CancellationToken ct = default)
         => RunAsync(request, progress: null, onStdoutLine: null, ct);
@@ -98,7 +108,45 @@ public sealed class GitCliService : IGitCliService
                 GitErrorKind.Unknown, TimeSpan.Zero);
         }
 
-        var psi = new ProcessStartInfo(git.Path)
+        // Read here, after the hop off the caller's thread: the write scope is an ambient flag that
+        // flows with the execution context.
+        var inWriteScope = GitWriteScope.IsActive;
+
+        // Only background work outside a write waits for a slot: a write, an interactive request
+        // and a network request never queue behind the cap.
+        if (request.Priority != GitCliPriority.Background || inWriteScope)
+            return await StartAndRunAsync(request, git.Path, inWriteScope, progress, onStdoutLine, ct).ConfigureAwait(false);
+
+        try
+        {
+            await BackgroundSlots.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return new GitCliResult(-1, string.Empty, string.Empty, GitErrorKind.Cancelled, TimeSpan.Zero);
+        }
+
+        try
+        {
+            return await StartAndRunAsync(request, git.Path, inWriteScope, progress, onStdoutLine, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            BackgroundSlots.Release();
+        }
+    }
+
+    private async Task<GitCliResult> StartAndRunAsync(
+        GitCliRequest request,
+        string gitPath,
+        bool inWriteScope,
+        IProgress<GitProgress>? progress,
+        Action<string>? onStdoutLine,
+        CancellationToken ct)
+    {
+        var raw = request.RawStandardOutput;
+
+        var psi = new ProcessStartInfo(gitPath)
         {
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -117,9 +165,7 @@ public sealed class GitCliService : IGitCliService
 
         GitCliProcessSetup.ComposeEnvironment(psi, request.Profile, request.ExtraEnvironment);
 
-        // Read here, after the hop off the caller's thread: the write scope is an ambient flag that
-        // flows with the execution context.
-        var neverKill = request.CancelPolicy == GitCliCancelPolicy.NeverAfterStart || GitWriteScope.IsActive;
+        var neverKill = request.CancelPolicy == GitCliCancelPolicy.NeverAfterStart || inWriteScope;
 
         if (ct.IsCancellationRequested)
             return new GitCliResult(-1, string.Empty, string.Empty, GitErrorKind.Cancelled, TimeSpan.Zero);
@@ -137,13 +183,15 @@ public sealed class GitCliService : IGitCliService
             return new GitCliResult(-1, string.Empty, ex.Message, GitErrorKind.Unknown, stopwatch.Elapsed);
         }
 
-        if (request.LowerPriority)
+        if (request.Priority is GitCliPriority.Background or GitCliPriority.BackgroundNetwork)
         {
             // Best-effort: the process may already have exited (or the platform may refuse the
             // change) by the time this runs — never let a priority tweak fail the invocation.
             try { process.PriorityClass = ProcessPriorityClass.BelowNormal; }
             catch { }
         }
+
+        ProcessStarted?.Invoke(process);
 
         using var timeoutCts = new CancellationTokenSource();
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
