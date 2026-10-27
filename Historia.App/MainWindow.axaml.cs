@@ -146,8 +146,9 @@ public partial class MainWindow : Window
     private double _rightW;
 
     // Avalonia's XAML name generator does not emit fields for ColumnDefinition; index instead.
+    // Only the side columns are pinned; the centre column stays a star so the three columns always
+    // span the grid, whatever the side widths round to.
     private ColumnDefinition LeftCol => BodyGrid.ColumnDefinitions[0];
-    private ColumnDefinition CenterCol => BodyGrid.ColumnDefinitions[2];
     private ColumnDefinition RightCol => BodyGrid.ColumnDefinitions[4];
 
     private bool _dividerDragging;
@@ -193,17 +194,30 @@ public partial class MainWindow : Window
 
     internal void ApplyBodyLayout()
     {
-        var total = BodyContentWidth;
-        if (total <= 0)
-            return;
+        try
+        {
+            var total = BodyContentWidth;
+            if (total <= 0)
+                return;
 
-        var (left, centre, right) = ResolveColumns(total);
-        if (!LeftCol.Width.IsAbsolute || Math.Abs(LeftCol.Width.Value - left) > 0.5)
-            LeftCol.Width = new GridLength(left);
-        if (!CenterCol.Width.IsAbsolute || Math.Abs(CenterCol.Width.Value - centre) > 0.5)
-            CenterCol.Width = new GridLength(centre);
-        if (!RightCol.Width.IsAbsolute || Math.Abs(RightCol.Width.Value - right) > 0.5)
-            RightCol.Width = new GridLength(right);
+            var (left, _, right) = ResolveColumns(total);
+            var scale = RenderScaling > 0 ? RenderScaling : 1;
+            (left, right) = BodyColumnLayout.RoundColumns(total, left, right, scale);
+
+            PinColumn(LeftCol, left);
+            PinColumn(RightCol, right);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write(AppLogLevel.Error, "layout", "ApplyBodyLayout failed", ex);
+        }
+    }
+
+    private static void PinColumn(ColumnDefinition column, double width)
+    {
+        var safe = double.IsFinite(width) && width > 0 ? width : 0;
+        if (!column.Width.IsAbsolute || Math.Abs(column.Width.Value - safe) > 0.001)
+            column.Width = new GridLength(safe);
     }
 
     // Divider drags are driven off the raw pointer position in BodyGrid's (stationary)
@@ -213,8 +227,10 @@ public partial class MainWindow : Window
     {
         if (!e.GetCurrentPoint(BodyGrid).Properties.IsLeftButtonPressed)
             return;
-        if (!CenterCol.Width.IsAbsolute)
-            ApplyBodyLayout(); // first drag before any Bounds change — pin the star columns
+        if (!RightCol.Width.IsAbsolute)
+            ApplyBodyLayout(); // first drag before any Bounds change — pin the side columns
+        if (!RightCol.Width.IsAbsolute)
+            return;
         _dividerDragging = true;
         _dragPointerStartX = e.GetPosition(BodyGrid).X;
         _dragStartLeft = LeftCol.Width.Value;

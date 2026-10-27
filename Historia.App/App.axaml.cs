@@ -457,10 +457,16 @@ public sealed class App : Application
 
     private void RegisterGlobalExceptionHandlers()
     {
+        var layoutRecovery = new LayoutRecovery(
+            () => (ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.Windows.ToArray() ?? [],
+            action => Dispatcher.UIThread.Post(action, DispatcherPriority.Background),
+            () => TimeSpan.FromMilliseconds(Environment.TickCount64));
+
         Dispatcher.UIThread.UnhandledException += (_, args) =>
         {
             AppLog.Write(AppLogLevel.Error, "unhandled", "Dispatcher.UIThread.UnhandledException", args.Exception);
             TryNotifyFatal(args.Exception);
+            layoutRecovery.OnDispatcherException();
             args.Handled = true;
         };
 

@@ -261,6 +261,15 @@ public sealed class GraphBackgroundWriterTests : IAsyncDisposable
             return Task.CompletedTask;
         });
 
+        // Job 1 may take a while to start on a loaded machine: wait for it, then give job 2 a
+        // moment it would use if it were not queued behind job 1.
+        var started = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (DateTime.UtcNow < started)
+        {
+            lock (sync) if (order.Count > 0) break;
+            await Task.Delay(20);
+        }
+
         await Task.Delay(200);
         lock (sync) Assert.Equal([1], order); // job 2 hasn't started — job 1 is still blocked
 

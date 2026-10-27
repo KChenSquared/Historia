@@ -44,6 +44,23 @@ public sealed class QueuedLineWriterTests : IDisposable
         }
     }
 
+    /// <summary>Heap growth since <paramref name="before"/>, taking the lowest of a few forced-GC
+    /// readings. The heap is process-wide, so tests running in parallel add transient garbage and
+    /// live data of their own; a queue that really retains the backlog stays above the limit in
+    /// every reading, noise does not.</summary>
+    private static long LowestRetained(long before, long limit)
+    {
+        var lowest = long.MaxValue;
+        for (var attempt = 0; attempt < 10 && lowest >= limit; attempt++)
+        {
+            if (attempt > 0)
+                Thread.Sleep(200);
+            lowest = Math.Min(lowest, GC.GetTotalMemory(forceFullCollection: true) - before);
+        }
+
+        return lowest;
+    }
+
     internal static Stream Append(string path) => new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
 
     internal static string[] ReadShared(string path)
@@ -192,7 +209,7 @@ public sealed class QueuedLineWriterTests : IDisposable
             // Each line is a fresh megacharacter string: kept whole, 100 of them would hold 200 MB.
             for (var i = 0; i < 100; i++)
                 writer.Enqueue(path, new string('x', 1_000_000));
-            var retained = GC.GetTotalMemory(forceFullCollection: true) - before;
+            var retained = LowestRetained(before, 40L * 1024 * 1024);
 
             Assert.True(retained < 40L * 1024 * 1024, $"the queue retained {retained / (1024 * 1024)} MB behind a stalled write");
         }
@@ -225,7 +242,7 @@ public sealed class QueuedLineWriterTests : IDisposable
             // character backlog can stop them. Kept whole they would hold about 30 MB.
             for (var i = 0; i < 1_000; i++)
                 writer.Enqueue(path, new string('z', 15_000));
-            var retained = GC.GetTotalMemory(forceFullCollection: true) - before;
+            var retained = LowestRetained(before, 12L * 1024 * 1024);
 
             Assert.True(retained < 12L * 1024 * 1024, $"the queue retained {retained / (1024 * 1024)} MB behind a stalled write");
         }
