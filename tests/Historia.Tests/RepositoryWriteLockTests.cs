@@ -152,7 +152,8 @@ public sealed class RepositoryWriteLockTests : IAsyncDisposable
             }
         });
 
-        await ctx.DisposeAsync();
+        // The close waits for the running writer, so it is not awaited until the writer is released.
+        var disposeTask = ctx.DisposeAsync().AsTask();
 
         var wasCanceled = await waiterCanceled.Task;
         Assert.True(wasCanceled);
@@ -160,6 +161,162 @@ public sealed class RepositoryWriteLockTests : IAsyncDisposable
         releaseWriter1.SetResult();
         await writer1;
         await waiter;
+        await disposeTask;
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Work_started_on_a_synchronization_context_runs_on_a_different_thread()
+    {
+        using var repo = TestRepositoryBuilder.FromTemplate("write-lock-seed", b =>
+        {
+            b.WriteFile("a.txt", "initial\n").Stage();
+            b.Commit("c1");
+        });
+        var ctx = _host.Open(repo.Path);
+
+        using var pump = new PumpContext();
+        var callerThread = 0;
+        var workThread = 0;
+        await pump.RunAsync(async () =>
+        {
+            callerThread = Environment.CurrentManagedThreadId;
+            await ctx.WithWriteLockAsync(_ =>
+            {
+                workThread = Environment.CurrentManagedThreadId;
+                return Task.CompletedTask;
+            });
+        });
+
+        Assert.Equal(pump.ThreadId, callerThread);
+        Assert.NotEqual(0, workThread);
+        Assert.NotEqual(callerThread, workThread);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Nested_acquire_from_a_synchronization_context_still_throws()
+    {
+        using var repo = TestRepositoryBuilder.FromTemplate("write-lock-seed", b =>
+        {
+            b.WriteFile("a.txt", "initial\n").Stage();
+            b.Commit("c1");
+        });
+        var ctx = _host.Open(repo.Path);
+
+        using var pump = new PumpContext();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => pump.RunAsync(async () =>
+        {
+            await ctx.WithWriteLockAsync(async ct =>
+            {
+                await ctx.WithWriteLockAsync(_ => Task.CompletedTask, ct);
+            });
+        }));
+
+        // The lock is still usable afterwards.
+        await ctx.WithWriteLockAsync(_ => Task.CompletedTask);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task GitWriteScope_is_active_inside_work_and_cleared_after()
+    {
+        using var repo = TestRepositoryBuilder.FromTemplate("write-lock-seed", b =>
+        {
+            b.WriteFile("a.txt", "initial\n").Stage();
+            b.Commit("c1");
+        });
+        var ctx = _host.Open(repo.Path);
+
+        Assert.False(GitWriteScope.IsActive);
+        var activeInWork = false;
+        var activeAfterAwaitInWork = false;
+        var activeInTaskRun = false;
+        await ctx.WithWriteLockAsync(async ct =>
+        {
+            activeInWork = GitWriteScope.IsActive;
+            await Task.Delay(10, ct);
+            activeAfterAwaitInWork = GitWriteScope.IsActive;
+            activeInTaskRun = await Task.Run(() => GitWriteScope.IsActive, ct);
+        });
+
+        Assert.True(activeInWork);
+        Assert.True(activeAfterAwaitInWork);
+        Assert.True(activeInTaskRun);
+        Assert.False(GitWriteScope.IsActive);
+
+        // Cleared after the work throws as well.
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            ctx.WithWriteLockAsync<int>(_ => throw new InvalidOperationException("boom")));
+        Assert.False(GitWriteScope.IsActive);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task GitWriteScope_is_active_and_cleared_when_started_from_a_synchronization_context()
+    {
+        using var repo = TestRepositoryBuilder.FromTemplate("write-lock-seed", b =>
+        {
+            b.WriteFile("a.txt", "initial\n").Stage();
+            b.Commit("c1");
+        });
+        var ctx = _host.Open(repo.Path);
+
+        using var pump = new PumpContext();
+        var activeInWork = false;
+        var activeAfterOnCaller = true;
+        await pump.RunAsync(async () =>
+        {
+            await ctx.WithWriteLockAsync(_ =>
+            {
+                activeInWork = GitWriteScope.IsActive;
+                return Task.CompletedTask;
+            });
+            activeAfterOnCaller = GitWriteScope.IsActive;
+        });
+
+        Assert.True(activeInWork);
+        Assert.False(activeAfterOnCaller);
+    }
+
+    /// <summary>A single-thread synchronization context that stands in for the UI thread.</summary>
+    private sealed class PumpContext : SynchronizationContext, IDisposable
+    {
+        private readonly BlockingCollection<(SendOrPostCallback Callback, object? State)> _queue = new();
+        private readonly Thread _thread;
+
+        public PumpContext()
+        {
+            _thread = new Thread(Loop) { IsBackground = true, Name = "test-pump" };
+            _thread.Start();
+        }
+
+        public int ThreadId => _thread.ManagedThreadId;
+
+        public override void Post(SendOrPostCallback d, object? state) => _queue.Add((d, state));
+
+        public Task RunAsync(Func<Task> body)
+        {
+            var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Post(async _ =>
+            {
+                try
+                {
+                    await body();
+                    tcs.SetResult();
+                }
+                catch (Exception ex)
+                {
+                    tcs.SetException(ex);
+                }
+            }, null);
+            return tcs.Task;
+        }
+
+        private void Loop()
+        {
+            SetSynchronizationContext(this);
+            foreach (var (callback, state) in _queue.GetConsumingEnumerable())
+                callback(state);
+        }
+
+        public void Dispose() => _queue.CompleteAdding();
     }
 
     [Fact]
