@@ -7,15 +7,26 @@ public sealed class UiDispatcher : IUiDispatcher
 
     public void Post(Action action) => Dispatcher.UIThread.Post(action);
 
-    public IUiTimer CreateTimer(TimeSpan interval, Action tick) => new Timer(interval, tick);
+    public void Post(Action action, UiPriority priority) => Dispatcher.UIThread.Post(action, Map(priority));
+
+    public IUiTimer CreateTimer(TimeSpan interval, Action tick) => new Timer(interval, tick, DispatcherPriority.Background);
+
+    public IUiTimer CreateTimer(TimeSpan interval, Action tick, UiPriority priority) => new Timer(interval, tick, Map(priority));
+
+    private static DispatcherPriority Map(UiPriority priority) => priority switch
+    {
+        UiPriority.Normal => DispatcherPriority.Normal,
+        UiPriority.Background => DispatcherPriority.Background,
+        _ => throw new ArgumentOutOfRangeException(nameof(priority), priority, null),
+    };
 
     private sealed class Timer : IUiTimer
     {
         private readonly DispatcherTimer _timer;
 
-        public Timer(TimeSpan interval, Action tick)
+        public Timer(TimeSpan interval, Action tick, DispatcherPriority priority)
         {
-            _timer = new DispatcherTimer { Interval = interval };
+            _timer = new DispatcherTimer(priority) { Interval = interval };
             _timer.Tick += (_, _) => tick();
         }
 

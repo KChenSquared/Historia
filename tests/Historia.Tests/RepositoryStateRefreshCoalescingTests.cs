@@ -255,6 +255,47 @@ public sealed class RepositoryStateRefreshCoalescingTests : IAsyncDisposable
         Assert.Equal(2, gateway.TagsCalls);
     }
 
+    [Fact(Timeout = 10000)]
+    public async Task Status_refresh_from_a_context_bound_thread_reads_git_on_another_thread()
+    {
+        var gateway = new FakeGitGateway();
+        var entered = new ManualResetEventSlim();
+        var release = new ManualResetEventSlim();
+        var gatewayThread = -1;
+
+        gateway.OnGetStatus = ct =>
+        {
+            gatewayThread = Environment.CurrentManagedThreadId;
+            entered.Set();
+            // Blocks synchronously, like a git start that runs its prefix inline would.
+            release.Wait(TimeSpan.FromSeconds(5));
+            return Task.FromResult(Historia.Models.RepositoryStatus.Empty);
+        };
+
+        var ctx = _host.Open(_repo.Path);
+        var state = NewState(ctx, gateway);
+
+        var callerThread = -1;
+        Task? refresh = null;
+        var caller = new Thread(() =>
+        {
+            SynchronizationContext.SetSynchronizationContext(new SynchronizationContext());
+            callerThread = Environment.CurrentManagedThreadId;
+            refresh = state.RefreshStatusAsync();
+        });
+        caller.Start();
+
+        // The caller returns while the gateway is still blocked, so the call did not run inline.
+        Assert.True(caller.Join(TimeSpan.FromSeconds(5)), "RefreshStatusAsync blocked its caller");
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+        Assert.False(refresh!.IsCompleted);
+        Assert.NotEqual(callerThread, gatewayThread);
+
+        release.Set();
+        await refresh;
+        Assert.Equal(1, gateway.StatusCalls);
+    }
+
     // Ends one of Historia's own operations on the tab and returns the count it ended at.
     private static long EndOperation(RepositoryContext ctx)
     {
