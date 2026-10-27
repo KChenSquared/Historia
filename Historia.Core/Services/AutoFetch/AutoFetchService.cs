@@ -268,9 +268,9 @@ public sealed class AutoFetchService : IAutoFetchService
     }
 
     /// <summary>
-    /// runs one fetch for <paramref name="context"/>. On success, also refreshes that repo's
-    /// commit-graph and, for an inactive tab, queues its headless disk cache. A repository whose
-    /// network gate is held — a fetch, pull or push the user started, or a lock cleanup — is
+    /// runs one fetch for <paramref name="context"/>. On success, also refreshes that repo's state
+    /// and commit-graph (after the network gate is released) and, for an inactive tab, queues its
+    /// headless disk cache. A repository whose network gate is held — a fetch, pull or push the user started, or a lock cleanup — is
     /// skipped until the next cycle. Failures stop quietly here; the host reports them.
     /// </summary>
     /// <returns><c>true</c> if the fetch completed without error.</returns>
@@ -284,8 +284,12 @@ public sealed class AutoFetchService : IAutoFetchService
 
         try
         {
+            // The gate covers the network part only; the refresh below can take seconds on a large
+            // repo and a user pull or push must not queue behind it.
             using (lease)
                 await _host.FetchAsync(context, ct).ConfigureAwait(false);
+
+            await _host.RefreshAfterFetchAsync(context, ct).ConfigureAwait(false);
 
             // Refresh this repo's commit-graph after every successful fetch the loop runs.
             // Itself fire-and-forget and best-effort — never allowed to fail this fetch or the loop.
