@@ -303,7 +303,13 @@ public sealed class GitGatewayCaseCollisionStatusTests : IAsyncDisposable
         var secondStatus = await ctx.Gateway.GetStatusAsync();
         Assert.Single(secondStatus.Unstaged);
         Assert.Empty(secondStatus.HiddenCaseCollisions);
-        Assert.Equal(countBefore + 1, spy.Requests.Count);
+
+        // The tab's own refreshes (the file watcher reacting to git's index writes) share the spy,
+        // so the cached answers are checked by kind rather than by total request count.
+        var secondRequests = spy.Requests.Skip(countBefore).ToList();
+        Assert.Contains(secondRequests, r => r.Arguments.Contains("status"));
+        Assert.DoesNotContain(secondRequests, r => r.Arguments.Contains("ls-files"));
+        Assert.DoesNotContain(secondRequests, r => r.Arguments.Contains("core.ignorecase"));
 
         await File.WriteAllTextAsync(Path.Combine(repo.Path, "file.txt"), "v3\n");
         await ctx.Gateway.GetStatusAsync();
