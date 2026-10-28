@@ -23,7 +23,7 @@ public sealed class RecentRepositoryService : IRecentRepositoryService, IAsyncDi
     private readonly Dictionary<string, bool> _stale = new(StringComparer.OrdinalIgnoreCase);
 
     // Paths whose check has not returned yet: one hung check per path, never a pile of them.
-    private readonly HashSet<string> _checksInFlight = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Task<bool?>> _checksInFlight = new(StringComparer.OrdinalIgnoreCase);
     private Task? _refreshTask;
     private bool _refreshWanted;
     private bool _disposed;
@@ -198,33 +198,36 @@ public sealed class RecentRepositoryService : IRecentRepositoryService, IAsyncDi
 
     public Task<bool?> IsStaleAsync(string path) => CheckPathAsync(path);
 
-    /// <returns>Whether the folder is gone, or null when the check did not answer in time, failed, or an earlier one is still hanging.</returns>
+    /// <returns>Whether the folder is gone, or null when the check did not answer in time or failed. A caller that finds a check of the path already running waits for that one.</returns>
     private async Task<bool?> CheckPathAsync(string path)
     {
+        Task<bool?> check;
         lock (_sync)
         {
-            if (!_checksInFlight.Add(path))
-                return null;
+            if (!_checksInFlight.TryGetValue(path, out check!))
+            {
+                // A dedicated thread: a dead network share can hold the call for tens of seconds,
+                // which must not eat into the pool. The task is stored under the lock its own
+                // cleanup takes, so it can never remove an entry that is not there yet.
+                check = Task.Factory.StartNew(() =>
+                {
+                    try
+                    {
+                        return (bool?)!_pathExists(path);
+                    }
+                    catch
+                    {
+                        return null;
+                    }
+                    finally
+                    {
+                        lock (_sync)
+                            _checksInFlight.Remove(path);
+                    }
+                }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+                _checksInFlight[path] = check;
+            }
         }
-
-        // A dedicated thread: a dead network share can hold the call for tens of seconds, which
-        // must not eat into the pool.
-        var check = Task.Factory.StartNew(() =>
-        {
-            try
-            {
-                return (bool?)!_pathExists(path);
-            }
-            catch
-            {
-                return null;
-            }
-            finally
-            {
-                lock (_sync)
-                    _checksInFlight.Remove(path);
-            }
-        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
         try
         {
