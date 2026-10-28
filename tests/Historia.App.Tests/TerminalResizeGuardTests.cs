@@ -213,7 +213,8 @@ public class TerminalResizeGuardTests
             var logFile = Assert.Single(Directory.GetFiles(AppPaths.LogsDirectory, "dev-*.log"));
             var text = File.ReadAllText(logFile);
             Assert.Contains("[terminal]", text);
-            Assert.Contains("resize failed", text);
+            Assert.Contains("Pty resize to", text);
+            Assert.Contains("failed", text);
         }
         finally
         {

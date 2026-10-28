@@ -50,7 +50,8 @@ public class TerminalRenderPoolTests
         return sc.BuildServiceProvider();
     }
 
-    private static (Window Window, TerminalControl Control, EmittingPty Pty, TerminalSession Session) Show()
+    private static (Window Window, TerminalControl Control, EmittingPty Pty, TerminalSession Session) Show(
+        double width = 640, double height = 384)
     {
         var services = Services();
         var control = new TerminalControl();
@@ -61,7 +62,7 @@ public class TerminalRenderPoolTests
             TerminalOrigin.Home("/home/me"), pty, services.GetRequiredService<IUiDispatcher>(), 80, 24, 1000);
         control.SetSession(session);
 
-        var window = new Window { Content = control, Width = 640, Height = 384 };
+        var window = new Window { Content = control, Width = width, Height = height };
         window.Show();
         window.UpdateLayout();
         Dispatcher.UIThread.RunJobs();
@@ -126,6 +127,145 @@ public class TerminalRenderPoolTests
             RenderFrame(control);
             Assert.True(control.RunMissesForTesting > 0, "changed text must be shaped again");
             Assert.True(control.CachedRunCountForTesting >= cached);
+        }
+        finally
+        {
+            window.Close();
+            control.Teardown();
+            session.Dispose();
+        }
+    }
+
+    // The headless font resolves a glyph for every code point, so the missing-glyph path is reached by
+    // dropping the control's glyph typefaces: every run then takes the font-fallback layout.
+    private static string FallbackText(TerminalControl control)
+    {
+        control.DropGlyphTypefacesForTesting();
+        return char.ConvertFromUtf32(0x4E2D);
+    }
+
+    [AvaloniaFact]
+    public void A_run_with_a_glyph_missing_from_the_font_is_cached_and_not_reshaped_per_frame()
+    {
+        var (window, control, pty, session) = Show();
+        try
+        {
+            pty.Emit("ab" + FallbackText(control) + "cd");
+            RenderFrame(control);
+            Assert.True(control.RunMissesForTesting > 0);
+            Assert.True(control.CachedRunCountForTesting > 0);
+
+            control.ResetRenderCountersForTesting();
+            RenderFrame(control);
+            RenderFrame(control);
+
+            Assert.Equal(0, control.RunMissesForTesting);
+        }
+        finally
+        {
+            window.Close();
+            control.Teardown();
+            session.Dispose();
+        }
+    }
+
+    [AvaloniaFact]
+    public void A_fallback_run_is_shaped_again_when_its_colour_changes()
+    {
+        var (window, control, pty, session) = Show();
+        try
+        {
+            var missing = FallbackText(control);
+            pty.Emit("\x1b[31m" + missing + "\x1b[0m");
+            RenderFrame(control);
+
+            control.ResetRenderCountersForTesting();
+            pty.Emit("\r\x1b[32m" + missing + "\x1b[0m");
+            RenderFrame(control);
+
+            Assert.Equal(1, control.RunMissesForTesting);
+        }
+        finally
+        {
+            window.Close();
+            control.Teardown();
+            session.Dispose();
+        }
+    }
+
+    [AvaloniaFact]
+    public void Runs_of_rows_no_longer_drawn_are_dropped_after_the_next_frame()
+    {
+        var (window, control, pty, session) = Show();
+        try
+        {
+            pty.Emit(Content);
+            RenderFrame(control);
+            Assert.True(control.CachedRunCountForTesting >= 3);
+
+            pty.Emit("\x1b[2J\x1b[Hone");
+            RenderFrame(control);
+
+            Assert.Equal(1, control.CachedRunCountForTesting);
+        }
+        finally
+        {
+            window.Close();
+            control.Teardown();
+            session.Dispose();
+        }
+    }
+
+    [AvaloniaFact]
+    public void A_frame_with_more_runs_than_the_old_cap_is_still_served_from_the_cache()
+    {
+        var (window, control, pty, session) = Show(2400, 1200);
+        try
+        {
+            // One colour change per cell makes every cell its own run.
+            var text = new System.Text.StringBuilder();
+            for (var i = 0; i < 12000; i++)
+                text.Append("\x1b[").Append(i % 2 == 0 ? "31" : "32").Append('m').Append('x');
+            pty.Emit(text.ToString());
+
+            RenderFrame(control);
+            Assert.True(control.CachedRunCountForTesting > 4096,
+                $"the frame draws more runs than the old cap, got {control.CachedRunCountForTesting}");
+
+            control.ResetRenderCountersForTesting();
+            RenderFrame(control);
+
+            Assert.Equal(0, control.RunMissesForTesting);
+        }
+        finally
+        {
+            window.Close();
+            control.Teardown();
+            session.Dispose();
+        }
+    }
+
+    [AvaloniaFact]
+    public void A_bold_run_is_shaped_with_the_bold_face_and_regular_text_is_not_reused_for_it()
+    {
+        var (window, control, pty, session) = Show();
+        try
+        {
+            var regular = control.GlyphFaceForTesting(0);
+            var bold = control.GlyphFaceForTesting(1);
+            Assert.NotNull(regular);
+            Assert.NotNull(bold);
+            // The face is the family's real bold, or the regular stands in; never a synthetic one.
+            Assert.Equal(FontSimulations.None, bold.FontSimulations);
+
+            pty.Emit("hello");
+            RenderFrame(control);
+
+            control.ResetRenderCountersForTesting();
+            pty.Emit("\r\x1b[1mhello\x1b[0m");
+            RenderFrame(control);
+
+            Assert.Equal(1, control.RunMissesForTesting);
         }
         finally
         {

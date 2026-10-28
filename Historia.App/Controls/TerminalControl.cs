@@ -23,6 +23,9 @@ public sealed class TerminalControl : Control
 
     private Typeface _typeface = new(FontFamily.Default);
     private IGlyphTypeface? _glyphTypeface;
+    // Regular, bold, italic and bold-italic glyph typefaces by FaceIndex; a face the family lacks
+    // (or would only synthesise) holds the regular one.
+    private readonly IGlyphTypeface?[] _glyphFaces = new IGlyphTypeface?[4];
     private double _cellWidth = 8;
     private double _cellHeight = 16;
     private double _lastFontSize = DefaultFontSize;
@@ -51,12 +54,16 @@ public sealed class TerminalControl : Control
     private readonly RenderResourceCache<PenKey, IPen> _pens;
     private readonly RenderResourceCache<int, GlyphMetric> _glyphs;
 
-    // Glyph runs by the cell a text run starts at. A run is reused while its text is unchanged;
-    // GlyphRun owns a reference-counted platform object that only Dispose releases (DrawGlyphRun
-    // records its own reference), so a replaced or dropped run is disposed.
+    // Drawn text runs by the cell a run starts at. A run is reused while its text, face and (for a
+    // fallback layout, which bakes its brush) colour are unchanged. GlyphRun owns a
+    // reference-counted platform object that only Dispose releases (DrawGlyphRun records its own
+    // reference), so a replaced, dropped or unused run is disposed: entries not drawn in a frame
+    // are swept at its end, and the cap is only a safety net.
     private const int MaxCachedRuns = 4096;
     private readonly Dictionary<RunKey, CachedRun> _runs = [];
     private long _runMisses;
+    private long _frameNumber;
+    private int _frameRunsTouched;
 
     // Per-control scratch for building one text run; grown on demand, never per run.
     private char[] _runText = new char[256];
@@ -82,10 +89,33 @@ public sealed class TerminalControl : Control
     private readonly record struct GlyphMetric(ushort Index, double Advance, bool Found);
     private readonly record struct RunKey(int ScreenRow, int StartCol);
 
-    private sealed class CachedRun(GlyphRun run, char[] text)
+    // A run drawn from the terminal font's glyphs (Run) or, when a glyph is missing from it, shaped
+    // with font fallback (Layout); exactly one is set.
+    private sealed class CachedRun(GlyphRun? run, TextLayout? layout, char[] text, int face, uint fgArgb)
     {
-        public GlyphRun Run { get; } = run;
+        public GlyphRun? Run { get; } = run;
+        public TextLayout? Layout { get; } = layout;
         public char[] Text { get; } = text;
+        public int Face { get; } = face;
+        public uint FgArgb { get; } = fgArgb;
+        public long Frame { get; set; }
+
+        public bool Matches(ReadOnlySpan<char> text, int face, uint fgArgb)
+            => Face == face && (Layout is null || FgArgb == fgArgb) && text.SequenceEqual(Text);
+
+        public void Draw(DrawingContext dc, IBrush brush, Point origin)
+        {
+            if (Run is { } run)
+                dc.DrawGlyphRun(brush, run);
+            else
+                Layout!.Draw(dc, origin);
+        }
+
+        public void Dispose()
+        {
+            Run?.Dispose();
+            Layout?.Dispose();
+        }
     }
 
     public TerminalControl()
@@ -294,12 +324,17 @@ public sealed class TerminalControl : Control
         _typeface = new Typeface(ff);
 
         _glyphTypeface = null;
+        Array.Clear(_glyphFaces);
         try
         {
             if (FontManager.Current.TryGetGlyphTypeface(_typeface, out var gtf))
                 _glyphTypeface = gtf;
         }
         catch { _glyphTypeface = null; }
+
+        _glyphFaces[0] = _glyphTypeface;
+        for (var face = 1; face < _glyphFaces.Length; face++)
+            _glyphFaces[face] = ResolveStyledFace(face) ?? _glyphTypeface;
 
         // Advance width of 'M', line height from the typeface metrics.
         var probe = new FormattedText("M", CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
@@ -318,11 +353,42 @@ public sealed class TerminalControl : Control
         ClearRuns();
     }
 
+    // The family's real bold/italic face, or null when it has none: a face the platform would
+    // only synthesise (FontSimulations) is not used, so bold is never smeared regular.
+    private IGlyphTypeface? ResolveStyledFace(int face)
+    {
+        try
+        {
+            if (FontManager.Current.TryGetGlyphTypeface(FaceTypeface(face), out var gtf)
+                && gtf.FontSimulations == FontSimulations.None)
+            {
+                return gtf;
+            }
+        }
+        catch { /* the regular face stands in */ }
+        return null;
+    }
+
     private void ClearRuns()
     {
         foreach (var cached in _runs.Values)
-            cached.Run.Dispose();
+            cached.Dispose();
         _runs.Clear();
+    }
+
+    // Disposes every entry the frame that just ended did not draw (a row scrolled away, text
+    // that changed shape or colour, a smaller grid).
+    private void SweepUnusedRuns()
+    {
+        if (_runs.Count == _frameRunsTouched)
+            return;
+        foreach (var (key, cached) in _runs)
+        {
+            if (cached.Frame == _frameNumber)
+                continue;
+            cached.Dispose();
+            _runs.Remove(key);
+        }
     }
 
     private static string PlatformMonospaceStack()
@@ -332,9 +398,14 @@ public sealed class TerminalControl : Control
         return "DejaVu Sans Mono, Liberation Mono, monospace";
     }
 
-    private GlyphMetric ResolveGlyph(int codepoint)
+    private const int GlyphFaceShift = 22;
+
+    private static int GlyphKey(int codepoint, int face) => codepoint | (face << GlyphFaceShift);
+
+    private GlyphMetric ResolveGlyph(int key)
     {
-        var gtf = _glyphTypeface;
+        var codepoint = key & ((1 << GlyphFaceShift) - 1);
+        var gtf = _glyphFaces[key >> GlyphFaceShift];
         if (gtf is null)
             return new GlyphMetric(0, _cellWidth, false);
         try
@@ -421,17 +492,9 @@ public sealed class TerminalControl : Control
         // and since ConPTY keeps no scrollback, a prompt the shell has already printed is
         // lost. The session keeps its spawn size until the control has real bounds, and
         // OnSizeChanged delivers them.
+        // TerminalSession.Resize logs its own failures and never throws.
         if (HasUsableSize(Bounds.Size, _cellWidth, _cellHeight))
-        {
-            try
-            {
-                _session?.Resize(_cols, _rows);
-            }
-            catch (Exception ex)
-            {
-                AppLog.Write(AppLogLevel.Warn, "terminal", "Terminal session resize failed", ex);
-            }
-        }
+            _session?.Resize(_cols, _rows);
 
         InvalidateVisual();
     }
@@ -451,6 +514,8 @@ public sealed class TerminalControl : Control
             return;
 
         _frameDc = dc;
+        _frameNumber++;
+        _frameRunsTouched = 0;
         _frameCursorArgb = ArgbOf(palette["term-cursor"]);
         (_frameCols, _frameRows) = (_cols, _rows);
         (_frameMetMax, _frameMetValue) = (0, 0);
@@ -458,6 +523,7 @@ public sealed class TerminalControl : Control
         try
         {
             _session.ReadBuffer(_renderBuffer);
+            SweepUnusedRuns();
         }
         finally
         {
@@ -608,72 +674,71 @@ public sealed class TerminalControl : Control
         var brush = Brush(fgArgb);
         var text = _runText.AsSpan(0, _runTextLength);
         var key = new RunKey(screenRow, startCol);
+        var face = FaceIndex(flags);
 
-        var gtf = _glyphTypeface;
-        var baseline = y + _ascentPx;
-        var drawn = false;
-        if (gtf is not null)
-        {
-            if (_runs.TryGetValue(key, out var cached)
-                && text.SequenceEqual(cached.Text))
-            {
-                dc.DrawGlyphRun(brush, cached.Run);
-                drawn = true;
-            }
-            else if (CreateRun(gtf, key, text, baseline) is { } run)
-            {
-                dc.DrawGlyphRun(brush, run);
-                drawn = true;
-            }
-        }
+        if (!_runs.TryGetValue(key, out var run) || !run.Matches(text, face, fgArgb))
+            run = CreateRun(key, text, face, fgArgb, brush, y);
 
-        if (!drawn)
+        if (run.Frame != _frameNumber)
         {
-            // Fallback path (missing glyph / no glyph typeface): FormattedText, not cached.
-            var ft = new FormattedText(text.ToString(), CultureInfo.CurrentUICulture, FlowDirection.LeftToRight,
-                Face(flags), _lastFontSize, brush);
-            dc.DrawText(ft, new Point(startCol * _cellWidth, y));
+            run.Frame = _frameNumber;
+            _frameRunsTouched++;
         }
+        run.Draw(dc, brush, new Point(startCol * _cellWidth, y));
 
         DrawTextDecorations(dc, text.Length, startCol, y, fgArgb, flags);
     }
 
-    // Shapes the run, replaces any run cached for the cell and disposes it. Null when a glyph
-    // is missing from the typeface.
-    private GlyphRun? CreateRun(IGlyphTypeface gtf, RunKey key, ReadOnlySpan<char> text, double baseline)
+    // Shapes the run, replaces any run cached for the cell and disposes it. The terminal font's
+    // glyphs draw it when it has them all; otherwise (missing glyph, no glyph typeface) it is
+    // shaped with font fallback.
+    private CachedRun CreateRun(RunKey key, ReadOnlySpan<char> text, int face, uint fgArgb, IBrush brush, double y)
     {
-        if (_runIndices.Length < text.Length)
-            _runIndices = new ushort[Math.Max(_runIndices.Length * 2, text.Length)];
+        _runMisses++;
+        // The cached run keeps its character memory, so it gets a copy.
+        var chars = text.ToArray();
+        var cached = TryShapeGlyphRun(key, chars, face, y + _ascentPx) is { } glyphRun
+            ? new CachedRun(glyphRun, null, chars, face, fgArgb)
+            : new CachedRun(null, new TextLayout(new string(chars), FaceTypeface(face), _lastFontSize, brush), chars, face, fgArgb);
+
+        DropRun(key);
+        if (_runs.Count >= RunCacheCap)
+            ClearRuns();
+        _runs[key] = cached;
+        return cached;
+    }
+
+    // Safety net only: positions bound the cache to one entry per cell, and the end-of-frame
+    // sweep keeps stale ones out.
+    private int RunCacheCap => Math.Max(MaxCachedRuns, _frameRows * _frameCols);
+
+    // Null when a glyph is missing from the face's typeface.
+    private GlyphRun? TryShapeGlyphRun(RunKey key, char[] chars, int face, double baseline)
+    {
+        var gtf = _glyphFaces[face];
+        if (gtf is null)
+            return null;
+
+        if (_runIndices.Length < chars.Length)
+            _runIndices = new ushort[Math.Max(_runIndices.Length * 2, chars.Length)];
 
         var count = 0;
-        foreach (var rune in text.EnumerateRunes())
+        foreach (var rune in new ReadOnlySpan<char>(chars).EnumerateRunes())
         {
-            var m = _glyphs.Get(rune.Value);
+            var m = _glyphs.Get(GlyphKey(rune.Value, face));
             if (!m.Found)
-            {
-                DropRun(key);
                 return null;
-            }
             _runIndices[count++] = m.Index;
         }
 
-        _runMisses++;
-        // The glyph run keeps its character memory, so it gets a copy.
-        var chars = text.ToArray();
-        var run = new GlyphRun(gtf, _lastFontSize, chars.AsMemory(), new ArraySegment<ushort>(_runIndices, 0, count),
+        return new GlyphRun(gtf, _lastFontSize, chars.AsMemory(), new ArraySegment<ushort>(_runIndices, 0, count),
             baselineOrigin: new Point(key.StartCol * _cellWidth, baseline));
-
-        DropRun(key);
-        if (_runs.Count >= MaxCachedRuns)
-            ClearRuns();
-        _runs[key] = new CachedRun(run, chars);
-        return run;
     }
 
     private void DropRun(RunKey key)
     {
         if (_runs.Remove(key, out var old))
-            old.Run.Dispose();
+            old.Dispose();
     }
 
     private void DrawTextDecorations(DrawingContext dc, int cellCount, int startCol, double y, uint fgArgb, TerminalCellFlags flags)
@@ -756,10 +821,14 @@ public sealed class TerminalControl : Control
         return cell.Flags.HasFlag(TerminalCellFlags.Inverse) ? (fg, bg) : (bg, fg);
     }
 
-    private Typeface Face(TerminalCellFlags flags)
+    // 0 regular, 1 bold, 2 italic, 3 bold-italic.
+    private static int FaceIndex(TerminalCellFlags flags)
+        => (flags.HasFlag(TerminalCellFlags.Bold) ? 1 : 0) | (flags.HasFlag(TerminalCellFlags.Italic) ? 2 : 0);
+
+    private Typeface FaceTypeface(int face)
     {
-        var weight = flags.HasFlag(TerminalCellFlags.Bold) ? FontWeight.Bold : FontWeight.Normal;
-        var style = flags.HasFlag(TerminalCellFlags.Italic) ? FontStyle.Italic : FontStyle.Normal;
+        var weight = (face & 1) != 0 ? FontWeight.Bold : FontWeight.Normal;
+        var style = (face & 2) != 0 ? FontStyle.Italic : FontStyle.Normal;
         return new Typeface(_typeface.FontFamily, style, weight);
     }
 
@@ -1324,6 +1393,15 @@ public sealed class TerminalControl : Control
     internal long PenMissesForTesting => _pens.Misses;
     internal long RunMissesForTesting => _runMisses;
     internal int CachedRunCountForTesting => _runs.Count;
+    internal IGlyphTypeface? GlyphFaceForTesting(int face) => _glyphFaces[face];
+
+    // Leaves the control without glyph typefaces, as when none resolves; the next remeasure restores them.
+    internal void DropGlyphTypefacesForTesting()
+    {
+        Array.Clear(_glyphFaces);
+        _glyphs.Clear();
+        ClearRuns();
+    }
 
     internal void ResetRenderCountersForTesting()
     {
