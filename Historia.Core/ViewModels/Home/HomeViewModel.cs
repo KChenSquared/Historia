@@ -60,6 +60,9 @@ public sealed partial class HomeViewModel : ViewModelBase
         Subscribe(() => _cloneService.Changed += OnCloneServiceChanged, () => _cloneService.Changed -= OnCloneServiceChanged);
         RefreshRecents();
         RefreshCloneStatus();
+        // The rows above carry the last known staleness; the check runs off this thread and its
+        // result arrives through the change event.
+        _ = _recents.RefreshStalenessAsync();
 
         if (intent == "clone" && _cloneService.IsRunning)
         {

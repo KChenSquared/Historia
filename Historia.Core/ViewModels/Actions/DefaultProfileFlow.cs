@@ -39,31 +39,20 @@ public static class DefaultProfileFlow
         notifications.Publish(NotificationSeverity.Info, $"'{p.DisplayName}' is now the default profile.");
     }
 
-    /// <summary>
-    /// Whether <paramref name="path"/> is a folder, checked off the calling thread. A path that
-    /// does not answer within two seconds (a dead network share) counts as missing.
-    /// </summary>
-    private static async Task<bool> FolderExistsAsync(string path)
-    {
-        try
-        {
-            return await Task.Run(() => Directory.Exists(path)).WaitAsync(TimeSpan.FromSeconds(2));
-        }
-        catch (TimeoutException)
-        {
-            return false;
-        }
-    }
-
     /// <summary>"Only new repositories": pin every known (recent) repo that has no explicit
     /// selection row to its current resolution, so it keeps that identity when the default moves.</summary>
     private static async Task PinExistingRowlessReposAsync(IServiceProvider sp, IProfileService profiles)
     {
         var recents = sp.GetRequiredService<IRecentRepositoryService>();
         var identity = sp.GetRequiredService<IRepoIdentityService>();
-        foreach (var entry in recents.Items)
+        // One concurrent, timeout-guarded check per entry; a folder that is missing or does not
+        // answer is skipped.
+        var entries = recents.Items;
+        var stale = await Task.WhenAll(entries.Select(e => recents.IsStaleAsync(e.Path)));
+        for (var i = 0; i < entries.Count; i++)
         {
-            if (!await FolderExistsAsync(entry.Path))
+            var entry = entries[i];
+            if (stale[i] is not false)
                 continue;
             try
             {

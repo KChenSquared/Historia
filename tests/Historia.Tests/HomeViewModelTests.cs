@@ -14,6 +14,13 @@ public sealed class HomeViewModelTests : IAsyncDisposable
         public List<string> Removed { get; } = [];
 
         public int ItemsReads { get; private set; }
+        public int RefreshCalls { get; private set; }
+
+        public Task RefreshStalenessAsync()
+        {
+            RefreshCalls++;
+            return Task.CompletedTask;
+        }
 
         public IReadOnlyList<RecentRepository> Items
         {
@@ -194,6 +201,15 @@ public sealed class HomeViewModelTests : IAsyncDisposable
         Assert.Equal(["/src/a", "/src/gone"], rig.Home.Recents.Select(r => r.Path));
         Assert.Equal([false, true], rig.Home.Recents.Select(r => r.IsStale));
         Assert.False(rig.Home.HasNoRecents);
+    }
+
+    [Fact]
+    public void Showing_home_asks_the_service_to_refresh_staleness_without_reading_the_disk_state_again()
+    {
+        var rig = NewRig(seed: [Recent("/src/a", "a")]);
+
+        Assert.Equal(1, rig.Recents.RefreshCalls);
+        Assert.Equal(1, rig.Recents.ItemsReads);
     }
 
     [Fact]

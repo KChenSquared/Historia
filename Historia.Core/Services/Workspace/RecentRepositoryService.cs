@@ -15,7 +15,6 @@ public sealed class RecentRepositoryService : IRecentRepositoryService, IAsyncDi
     private readonly AtomicFileWriter _writer;
     private readonly Func<string, bool> _pathExists;
     private readonly TimeSpan _checkTimeout;
-    private readonly TimeSpan _recheckAfter;
     private readonly object _sync = new();
     private List<RecentEntry> _entries;
     private long _persistSequence;
@@ -27,27 +26,22 @@ public sealed class RecentRepositoryService : IRecentRepositoryService, IAsyncDi
     private readonly HashSet<string> _checksInFlight = new(StringComparer.OrdinalIgnoreCase);
     private Task? _refreshTask;
     private bool _refreshWanted;
-    private long _lastRefreshTimestamp;
-    private bool _everRefreshed;
     private bool _disposed;
 
     public event EventHandler? Changed;
 
     public RecentRepositoryService(ISettingsService settings)
-        : this(settings, SafeExists, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5))
+        : this(settings, SafeExists, TimeSpan.FromSeconds(2))
     {
     }
 
     /// <param name="pathExists">The folder check. It may block for as long as a dead network path takes.</param>
     /// <param name="checkTimeout">How long one path's check is awaited before its previous value is kept.</param>
-    /// <param name="recheckAfter">How old the last full check may get before reading <see cref="Items"/> starts another.</param>
-    internal RecentRepositoryService(ISettingsService settings, Func<string, bool> pathExists, TimeSpan checkTimeout,
-        TimeSpan recheckAfter)
+    internal RecentRepositoryService(ISettingsService settings, Func<string, bool> pathExists, TimeSpan checkTimeout)
     {
         _settings = settings;
         _pathExists = pathExists;
         _checkTimeout = checkTimeout;
-        _recheckAfter = recheckAfter;
         _writer = new AtomicFileWriter(AppPaths.RecentRepositoriesFile);
         _entries = Load();
         _ = RefreshStalenessAsync();
@@ -55,18 +49,15 @@ public sealed class RecentRepositoryService : IRecentRepositoryService, IAsyncDi
 
     /// <summary>
     /// Most-recent first. Staleness is the last value a background check produced; reading never
-    /// touches the disk. A read that finds the last full check old starts a new one, whose result
-    /// arrives through <see cref="Changed"/>.
+    /// touches the disk and never starts a check.
     /// </summary>
     public IReadOnlyList<RecentRepository> Items
     {
         get
         {
-            List<RecentRepository> snapshot;
-            bool recheck;
             lock (_sync)
             {
-                snapshot = _entries
+                return _entries
                     .OrderByDescending(e => e.LastOpenedAt)
                     .Select(e => new RecentRepository
                     {
@@ -76,13 +67,7 @@ public sealed class RecentRepositoryService : IRecentRepositoryService, IAsyncDi
                         IsStale = _stale.GetValueOrDefault(e.Path),
                     })
                     .ToList();
-                recheck = _refreshTask is null && !_disposed
-                    && (!_everRefreshed || Stopwatch.GetElapsedTime(_lastRefreshTimestamp) > _recheckAfter);
             }
-
-            if (recheck)
-                _ = RefreshStalenessAsync();
-            return snapshot;
         }
     }
 
@@ -143,34 +128,48 @@ public sealed class RecentRepositoryService : IRecentRepositoryService, IAsyncDi
 
     private async Task RefreshLoopAsync()
     {
-        while (true)
+        var exitedCleanly = false;
+        try
         {
-            string[] paths;
-            lock (_sync)
+            while (true)
             {
-                if (!_refreshWanted || _disposed)
+                string[] paths;
+                lock (_sync)
                 {
-                    _refreshTask = null;
-                    return;
+                    if (!_refreshWanted || _disposed)
+                    {
+                        _refreshTask = null;
+                        exitedCleanly = true;
+                        return;
+                    }
+                    _refreshWanted = false;
+                    paths = _entries.Select(e => e.Path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
                 }
-                _refreshWanted = false;
-                paths = _entries.Select(e => e.Path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+
+                var results = await Task.WhenAll(paths.Select(CheckPathAsync)).ConfigureAwait(false);
+
+                bool changed;
+                lock (_sync)
+                {
+                    changed = ApplyResults(paths, results);
+                    if (_disposed)
+                        changed = false;
+                }
+
+                if (changed)
+                    Changed?.Invoke(this, EventArgs.Empty);
             }
-
-            var results = await Task.WhenAll(paths.Select(CheckPathAsync)).ConfigureAwait(false);
-
-            bool changed;
-            lock (_sync)
+        }
+        finally
+        {
+            // A fault (a Changed handler throwing) must not leave a dead task that every later
+            // refresh request joins. A clean exit already cleared it under the lock that decided
+            // to stop, and a newer loop may have started since.
+            if (!exitedCleanly)
             {
-                changed = ApplyResults(paths, results);
-                _lastRefreshTimestamp = Stopwatch.GetTimestamp();
-                _everRefreshed = true;
-                if (_disposed)
-                    changed = false;
+                lock (_sync)
+                    _refreshTask = null;
             }
-
-            if (changed)
-                Changed?.Invoke(this, EventArgs.Empty);
         }
     }
 
@@ -197,7 +196,9 @@ public sealed class RecentRepositoryService : IRecentRepositoryService, IAsyncDi
         return changed;
     }
 
-    /// <returns>Whether the folder is gone, or null when the check did not answer in time or an earlier one is still hanging.</returns>
+    public Task<bool?> IsStaleAsync(string path) => CheckPathAsync(path);
+
+    /// <returns>Whether the folder is gone, or null when the check did not answer in time, failed, or an earlier one is still hanging.</returns>
     private async Task<bool?> CheckPathAsync(string path)
     {
         lock (_sync)
@@ -212,7 +213,11 @@ public sealed class RecentRepositoryService : IRecentRepositoryService, IAsyncDi
         {
             try
             {
-                return !_pathExists(path);
+                return (bool?)!_pathExists(path);
+            }
+            catch
+            {
+                return null;
             }
             finally
             {
@@ -225,7 +230,7 @@ public sealed class RecentRepositoryService : IRecentRepositoryService, IAsyncDi
         {
             return await check.WaitAsync(_checkTimeout).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is TimeoutException or IOException or UnauthorizedAccessException)
+        catch
         {
             return null;
         }
