@@ -52,7 +52,7 @@ public sealed class DefaultProfileFlowTests : IAsyncDisposable
         var recents = new ScriptedRecents();
         foreach (var name in new[] { "gone", "hung", "failed" })
         {
-            var path = Path.Combine(Path.GetTempPath(), "historia-dpf-" + name);
+            var path = Path.Combine(TestScratch.Root, "historia-dpf-" + name);
             recents.Entries.Add(new RecentRepository { Path = path, DisplayName = name, LastOpenedAt = DateTimeOffset.Now });
             recents.Answers[path] = new TaskCompletionSource<bool?>(TaskCreationOptions.RunContinuationsAsynchronously);
         }
