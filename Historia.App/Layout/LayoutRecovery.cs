@@ -8,7 +8,9 @@ namespace Historia.Layout;
 /// regardless of the flag and clears it.
 /// <para>
 /// Trap: invalidating the whole tree on every exception loops forever when the thrower is
-/// deterministic, so recoveries are capped per time window and a failing pass is only logged.
+/// deterministic, so recoveries are capped per time window. A pass that throws schedules another
+/// (the flag is still set), within the same cap; at the cap one warning is logged and recovery
+/// stops until the window elapses.
 /// </para>
 /// </summary>
 internal sealed class LayoutRecovery(
@@ -24,7 +26,9 @@ internal sealed class LayoutRecovery(
 
     /// <summary>Call from the UI thread when the dispatcher caught an exception. Schedules a layout
     /// pass on every open window unless the per-window cap is reached.</summary>
-    public void OnDispatcherException()
+    public void OnDispatcherException() => TrySchedule();
+
+    private void TrySchedule()
     {
         var at = now();
         while (_accepted.Count > 0 && at - _accepted.Peek() >= CapWindow)
@@ -48,6 +52,7 @@ internal sealed class LayoutRecovery(
 
     private void Recover()
     {
+        var failed = false;
         foreach (var topLevel in topLevels())
         {
             try
@@ -56,8 +61,14 @@ internal sealed class LayoutRecovery(
             }
             catch (Exception ex)
             {
+                failed = true;
                 AppLog.Write(AppLogLevel.Error, "layout", $"Layout recovery pass failed for {topLevel.GetType().Name}.", ex);
             }
         }
+
+        // A pass that threw leaves the queued flag set again, so another pass is needed; the cap
+        // bounds how many of those a deterministic thrower gets.
+        if (failed)
+            TrySchedule();
     }
 }
