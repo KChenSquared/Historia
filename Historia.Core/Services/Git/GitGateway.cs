@@ -321,7 +321,7 @@ public sealed partial class GitGateway(
 
     public async Task FetchAsync(string remote, GitFetchOptions options, IProgress<GitProgress>? progress, CancellationToken ct = default)
     {
-        await LeaveUiThreadAsync().ConfigureAwait(false);
+        await ThreadHop.LeaveUiThreadAsync().ConfigureAwait(false);
 
         if (options.All)
         {
@@ -463,14 +463,6 @@ public sealed partial class GitGateway(
         "-c", "http.lowSpeedTime=60",
     ];
 
-    /// <summary>Moves the rest of a method off a UI thread. Task.Yield would post straight back
-    /// to the UI context's queue; ForceYielding schedules the continuation on the thread pool.</summary>
-    private static async ValueTask LeaveUiThreadAsync()
-    {
-        if (SynchronizationContext.Current is not null)
-            await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
-    }
-
     /// <summary>One failed transport attempt, kept so the surfaced error can name every
     /// attempt in its Details.</summary>
     private sealed record NetworkAttempt(string Label, string? Url, HistoriaGitException Error, string? Note);
@@ -494,7 +486,7 @@ public sealed partial class GitGateway(
         IReadOnlyList<string> args, string operation, SelfOperationKind scope, string? remote,
         IProgress<GitProgress>? progress, CancellationToken ct, bool background = false)
     {
-        await LeaveUiThreadAsync().ConfigureAwait(false);
+        await ThreadHop.LeaveUiThreadAsync().ConfigureAwait(false);
 
         string? remoteUrl = null;
         if (remote is not null)

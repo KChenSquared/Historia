@@ -61,10 +61,8 @@ public sealed class GitCliService : IGitCliService
         ArgumentNullException.ThrowIfNull(request);
 
         // Resolving git, building the process and Process.Start itself cost milliseconds that must
-        // not land on a UI thread. Task.Yield would post straight back to a UI context's queue;
-        // ForceYielding schedules the continuation on the thread pool instead.
-        if (SynchronizationContext.Current is not null)
-            await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+        // not land on a UI thread.
+        await ThreadHop.LeaveUiThreadAsync().ConfigureAwait(false);
 
         await _locator.WhenResolvedAsync(ct).ConfigureAwait(false);
 
@@ -90,7 +88,6 @@ public sealed class GitCliService : IGitCliService
             op.Dispose();
         }
     }
-
 
     private async Task<GitCliResult> RunCoreAsync(
         GitCliRequest request,
@@ -238,6 +235,23 @@ public sealed class GitCliService : IGitCliService
             var stderrLines = new Queue<string>();
             long stderrBytes = 0;
             var pipes = new List<PipeThread>(3);
+            Exception? callbackError = null;
+
+            // The first failure of a caller callback is kept and the callbacks stop; the readers
+            // go on draining, so git never blocks on a full pipe. It is rethrown after the drain.
+            void RecordCallbackFailure(Exception ex)
+            {
+                bool first;
+                lock (gate)
+                {
+                    first = callbackError is null;
+                    callbackError ??= ex;
+                }
+
+                // A started write is never killed: it runs to its end and the failure surfaces then.
+                if (first && !neverKill)
+                    GitCliProcessSetup.TryKill(process);
+            }
 
             void ReadStdoutLines(StreamReader reader)
             {
@@ -245,9 +259,11 @@ public sealed class GitCliService : IGitCliService
                 {
                     var lineBytes = Utf8NoBom.GetByteCount(line) + Environment.NewLine.Length;
                     var overflow = false;
+                    var callbacksStopped = false;
                     lock (gate)
                     {
                         if (closed) return;
+                        callbacksStopped = callbackError is not null;
                         if (outputTruncated) continue; // Keep draining so git never blocks on a full pipe.
 
                         if (request.MaxStandardOutputBytes is { } max && lineBufferedBytes + lineBytes > max)
@@ -268,8 +284,11 @@ public sealed class GitCliService : IGitCliService
                         if (!neverKill)
                             GitCliProcessSetup.TryKill(process);
                     }
-                    else
-                        onStdoutLine?.Invoke(line);
+                    else if (onStdoutLine is not null && !callbacksStopped)
+                    {
+                        try { onStdoutLine(line); }
+                        catch (Exception ex) { RecordCallbackFailure(ex); }
+                    }
                 }
             }
 
@@ -308,17 +327,22 @@ public sealed class GitCliService : IGitCliService
             {
                 while (reader.ReadLine() is { } line)
                 {
+                    bool callbacksStopped;
                     lock (gate)
                     {
                         if (closed) return;
+                        callbacksStopped = callbackError is not null;
                         stderrLines.Enqueue(line);
                         stderrBytes += Utf8NoBom.GetByteCount(line) + Environment.NewLine.Length;
                         while (stderrBytes > MaxStandardErrorBytes && stderrLines.Count > 1)
                             stderrBytes -= Utf8NoBom.GetByteCount(stderrLines.Dequeue()) + Environment.NewLine.Length;
                     }
 
-                    if (progress is not null && GitProgressParser.TryParse(line, out var gp))
-                        progress.Report(gp);
+                    if (progress is not null && !callbacksStopped && GitProgressParser.TryParse(line, out var gp))
+                    {
+                        try { progress.Report(gp); }
+                        catch (Exception ex) { RecordCallbackFailure(ex); }
+                    }
                 }
             }
 
@@ -357,6 +381,12 @@ public sealed class GitCliService : IGitCliService
             await DrainPipesAsync(pipes, Stopwatch.GetTimestamp(), describe).ConfigureAwait(false);
 
             stopwatch.Stop();
+
+            Exception? failure;
+            lock (gate)
+                failure = callbackError;
+            if (failure is not null)
+                ExceptionDispatchInfo.Capture(failure).Throw();
 
             string stderrText;
             string? stdoutText = null;
@@ -426,12 +456,20 @@ public sealed class GitCliService : IGitCliService
         {
             try
             {
-                // A failed reader (a throwing callback) rethrows here.
+                // A failed reader rethrows here.
                 await all.WaitAsync(PipePollInterval).ConfigureAwait(false);
                 return;
             }
             catch (TimeoutException)
             {
+            }
+
+            // Every reader may have finished between the poll timing out and this check; an empty
+            // set of unfinished readers would pass the stuck test below.
+            if (all.IsCompleted)
+            {
+                await all.ConfigureAwait(false);
+                return;
             }
 
             var now = Stopwatch.GetTimestamp();

@@ -315,11 +315,9 @@ public sealed class RepositoryContext : IAsyncDisposable
             throw new InvalidOperationException("Nested or re-entrant write lock acquisition is not permitted.");
 
         // The pre-checks and Process.Start in the work delegate must not run on a UI thread.
-        // Task.Yield would post straight back to a UI context's queue; ForceYielding schedules the
-        // continuation on the thread pool. Everything below, including the wait timing and the
-        // holder bookkeeping, therefore runs after the hop, and the AsyncLocal below is set after it.
-        if (SynchronizationContext.Current is not null)
-            await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+        // Everything below, including the wait timing and the holder bookkeeping, therefore runs
+        // after the hop, and the AsyncLocal below is set after it.
+        await ThreadHop.LeaveUiThreadAsync().ConfigureAwait(false);
 
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, Lifetime);
         var holderAtWaitStart = Volatile.Read(ref _writeHolder);

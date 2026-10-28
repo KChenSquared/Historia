@@ -424,8 +424,9 @@ public sealed partial class GitGateway
     /// did not, so the next status stops re-hashing them. <c>update-index --refresh</c> only
     /// re-stats and re-hashes: an entry whose content differs from its blob is left as it is, and
     /// an unmerged entry is skipped. It still writes <c>index</c>, so it runs as one of
-    /// Historia's own operations inside the write lock, at background priority, and is never
-    /// killed once started. It does nothing while another process holds <c>index.lock</c> or while
+    /// Historia's own operations inside the write lock, at normal priority (a write must not
+    /// starve behind CPU load while user writes queue behind it), and is never killed once
+    /// started. It does nothing while another process holds <c>index.lock</c> or while
     /// a merge, rebase, cherry-pick, revert or bisect is under way.
     /// </summary>
     public async Task RefreshIndexStatAsync(CancellationToken ct = default)
@@ -444,7 +445,7 @@ public sealed partial class GitGateway
             {
                 Arguments = ["update-index", "-q", "--refresh"],
                 WorkingDirectory = context.RepositoryPath,
-                Priority = GitCliPriority.Background,
+                Priority = GitCliPriority.Normal,
                 // No wall clock: a writer killed mid-way leaves index.lock behind.
                 Timeout = Timeout.InfiniteTimeSpan,
                 CancelPolicy = GitCliCancelPolicy.NeverAfterStart,

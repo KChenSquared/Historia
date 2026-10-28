@@ -299,7 +299,7 @@ public sealed class IndexStatRefreshTests : IAsyncDisposable
     }
 
     [Fact(Timeout = 60000)]
-    public async Task The_refresh_runs_at_background_priority_without_a_wall_clock_inside_the_write_lock()
+    public async Task The_refresh_runs_at_normal_priority_without_a_wall_clock_inside_the_write_lock()
     {
         using var repo = NewRepo();
         Write(repo, "t.txt", "touched\n", Past);
@@ -318,7 +318,7 @@ public sealed class IndexStatRefreshTests : IAsyncDisposable
         await ctx.Gateway.RefreshIndexStatAsync();
 
         var request = Assert.Single(cli.Requests, IsRefresh);
-        Assert.Equal(GitCliPriority.Background, request.Priority);
+        Assert.Equal(GitCliPriority.Normal, request.Priority);
         Assert.Equal(Timeout.InfiniteTimeSpan, request.Timeout);
         Assert.Equal(GitCliCancelPolicy.NeverAfterStart, request.CancelPolicy);
         Assert.Equal(["update-index", "-q", "--refresh"], request.Arguments);
