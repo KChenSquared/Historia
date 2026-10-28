@@ -70,7 +70,7 @@ public sealed class GraphLayout : IDisposable
                 return _edges = OffWindowEdges;
 
             GraphEdge[] real;
-            lock (state)
+            using (state.EnterAsReader())
             {
                 var n = Math.Min(RealEdgeCap, state.RealEdges.Count);
                 real = new GraphEdge[n];
@@ -133,7 +133,7 @@ public sealed class GraphLayout : IDisposable
         int value;
         if (SourceState is { } state)
         {
-            lock (state)
+            using (state.EnterAsReader())
                 found = _rawRowByCommitId.TryGetValue(id, out value);
         }
         else
@@ -175,7 +175,7 @@ public sealed class GraphLayout : IDisposable
         private List<KeyValuePair<GitObjectId, int>> Snapshot()
         {
             if (owner.SourceState is { } state)
-                lock (state)
+                using (state.EnterAsReader())
                     return Filter();
             return Filter();
         }

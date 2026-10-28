@@ -298,6 +298,114 @@ public class WorkspaceServiceTests : WorkspaceServiceTestBase
         await ws.DisposeAsync();
     }
 
+    [Fact(Timeout = 60000)]
+    public async Task Session_restore_opens_the_focused_tab_first_and_never_more_than_two_others_at_once()
+    {
+        var repos = Enumerable.Range(0, 6).Select(i => Repo($"r{i}.txt")).ToList();
+        try
+        {
+            var focusIndex = 3;
+            var focusPath = repos[focusIndex].Path;
+            File.WriteAllText(AppPaths.SessionFile, new JsonObject
+            {
+                ["schemaVersion"] = 2,
+                ["paths"] = new JsonArray(repos.Select(r => (JsonNode)r.Path).ToArray()),
+                ["focusedPath"] = focusPath,
+            }.ToJsonString());
+
+            var ws = NewWorkspace();
+            var sync = new object();
+            var started = new List<string>();
+            var gates = new Dictionary<string, TaskCompletionSource>(StringComparer.OrdinalIgnoreCase);
+            var inFlightOthers = 0;
+            var maxInFlightOthers = 0;
+            foreach (var r in repos)
+                gates[r.Path] = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            ws.OpenContext = async (path, services, ct) =>
+            {
+                var isFocus = string.Equals(path, focusPath, StringComparison.OrdinalIgnoreCase);
+                lock (sync)
+                {
+                    started.Add(path);
+                    if (!isFocus)
+                        maxInFlightOthers = Math.Max(maxInFlightOthers, ++inFlightOthers);
+                }
+
+                try
+                {
+                    await gates[path].Task.WaitAsync(ct);
+                    return await RepositoryContext.OpenAsync(path, services, ct);
+                }
+                finally
+                {
+                    if (!isFocus)
+                        lock (sync) inFlightOthers--;
+                }
+            };
+
+            List<string> Started() { lock (sync) return [.. started]; }
+            async Task WaitForStartedAsync(int count)
+            {
+                var sw = Stopwatch.StartNew();
+                while (Started().Count < count)
+                {
+                    Assert.True(sw.Elapsed < TimeSpan.FromSeconds(20), $"expected {count} opens to have started");
+                    await Task.Delay(5);
+                }
+            }
+
+            var restore = ws.RestoreSessionAsync();
+
+            // Only the focused tab's open starts; the others wait for it.
+            await WaitForStartedAsync(1);
+            await Task.Delay(150);
+            Assert.Equal([focusPath], Started());
+
+            // Once it finishes, exactly two others start.
+            gates[focusPath].SetResult();
+            await WaitForStartedAsync(3);
+            await Task.Delay(150);
+            Assert.Equal(3, Started().Count);
+
+            // The focused tab is open and focused while every other open is still held, even though
+            // earlier tabs come before it in the saved order.
+            var focusSw = Stopwatch.StartNew();
+            while (ws.Focused is null)
+            {
+                Assert.True(focusSw.Elapsed < TimeSpan.FromSeconds(20), "the focused tab was not focused before the others opened");
+                await Task.Delay(5);
+            }
+            Assert.Equal(Norm(focusPath), Norm(ws.Focused.RepositoryPath));
+            Assert.Equal([Norm(focusPath)], ws.OpenRepositories.Select(c => Norm(c.RepositoryPath)));
+
+            // Each finished open lets exactly one more start, until all have.
+            for (var startedCount = 3; startedCount < repos.Count; startedCount++)
+            {
+                var running = Started().First(p => p != focusPath && !gates[p].Task.IsCompleted);
+                gates[running].SetResult();
+                await WaitForStartedAsync(startedCount + 1);
+            }
+
+            foreach (var g in gates.Values)
+                g.TrySetResult();
+            await restore.WaitAsync(TimeSpan.FromSeconds(30));
+
+            Assert.Equal(2, maxInFlightOthers);
+            Assert.Equal(repos.Count, ws.OpenRepositories.Count);
+            Assert.Equal(Norm(focusPath), Norm(ws.Focused!.RepositoryPath));
+            Assert.Equal(
+                repos.Select(r => Norm(r.Path)),
+                ws.OpenRepositories.Select(c => Norm(c.RepositoryPath)));
+            await ws.DisposeAsync();
+        }
+        finally
+        {
+            foreach (var r in repos)
+                r.Dispose();
+        }
+    }
+
     /// <summary>
     /// Verifies that restored repositories from session are not touched in the recent list.
     /// Also guards the dispose path: the restored background tab is still queued when the
@@ -629,6 +737,206 @@ public class WorkspaceFocusPriorityTests : WorkspaceServiceTestBase
     public void ShouldCompactAfterHibernate_uses_named_heap_and_LOH_thresholds(long heapBytes, long lohBytes, bool expected)
     {
         Assert.Equal(expected, WorkspaceService.ShouldCompactAfterHibernate(heapBytes, lohBytes));
+    }
+
+    // ── The idle collection never runs while the window is active ──
+
+    private const long BigHeap = 2L * 1024 * 1024 * 1024;
+
+    private sealed class CollectRecorder
+    {
+        private readonly ConcurrentQueue<(int Generation, GCCollectionMode Mode, bool Blocking)> _calls = new();
+        public List<(int Generation, GCCollectionMode Mode, bool Blocking)> Calls => _calls.ToList();
+        public void Collect(int generation, GCCollectionMode mode, bool blocking) => _calls.Enqueue((generation, mode, blocking));
+    }
+
+    private WorkspaceService NewWorkspaceWithRecorder(CollectRecorder recorder)
+    {
+        var ws = NewWorkspace();
+        ws.CollectGarbage = recorder.Collect;
+        return ws;
+    }
+
+    [Fact]
+    public async Task Idle_collection_is_not_requested_while_the_window_is_active()
+    {
+        var recorder = new CollectRecorder();
+        var ws = NewWorkspaceWithRecorder(recorder);
+        Assert.True(ws.IsAppActive);
+
+        ws.ReclaimIfHeapGrown(BigHeap, 0);
+
+        Assert.Empty(recorder.Calls);
+        await ws.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Pending_request_runs_one_gentle_collection_when_the_window_deactivates()
+    {
+        var recorder = new CollectRecorder();
+        var ws = NewWorkspaceWithRecorder(recorder);
+        ws.ReclaimIfHeapGrown(BigHeap, 0);
+        ws.ReclaimIfHeapGrown(0, BigHeap); // a second request while active joins the first
+
+        ws.SetAppActive(false);
+        await ws.IdleCollectTask;
+
+        var call = Assert.Single(recorder.Calls);
+        Assert.Equal(GC.MaxGeneration, call.Generation);
+        Assert.Equal(GCCollectionMode.Optimized, call.Mode);
+        Assert.False(call.Blocking);
+
+        // The request was consumed: later activations and deactivations collect nothing more.
+        ws.SetAppActive(true);
+        ws.SetAppActive(false);
+        await ws.IdleCollectTask;
+        Assert.Single(recorder.Calls);
+        await ws.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Reactivation_before_deactivation_leaves_the_request_pending()
+    {
+        var recorder = new CollectRecorder();
+        var ws = NewWorkspaceWithRecorder(recorder);
+        ws.ReclaimIfHeapGrown(BigHeap, 0);
+
+        ws.SetAppActive(true);
+        Assert.Empty(recorder.Calls);
+
+        ws.SetAppActive(false);
+        await ws.IdleCollectTask;
+        Assert.Single(recorder.Calls);
+        await ws.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Deactivation_without_a_pending_request_collects_nothing()
+    {
+        var recorder = new CollectRecorder();
+        var ws = NewWorkspaceWithRecorder(recorder);
+
+        ws.SetAppActive(false);
+        await ws.IdleCollectTask;
+
+        Assert.Empty(recorder.Calls);
+        await ws.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Request_while_the_window_is_inactive_collects_at_once_and_leaves_nothing_pending()
+    {
+        var recorder = new CollectRecorder();
+        var ws = NewWorkspaceWithRecorder(recorder);
+        ws.SetAppActive(false);
+
+        ws.ReclaimIfHeapGrown(BigHeap, 0);
+        Assert.Single(recorder.Calls);
+
+        ws.SetAppActive(true);
+        ws.SetAppActive(false);
+        await ws.IdleCollectTask;
+        Assert.Single(recorder.Calls);
+        await ws.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Small_heap_requests_no_collection_even_while_inactive()
+    {
+        var recorder = new CollectRecorder();
+        var ws = NewWorkspaceWithRecorder(recorder);
+        ws.SetAppActive(false);
+
+        ws.ReclaimIfHeapGrown(1024, 1024);
+        ws.SetAppActive(true);
+        ws.SetAppActive(false);
+        await ws.IdleCollectTask;
+
+        Assert.Empty(recorder.Calls);
+        await ws.DisposeAsync();
+    }
+
+    // ── Identity: the config read runs beside the root-commit walk ──
+
+    /// <summary>Signals when a git invocation whose first argument is <c>config</c> starts.</summary>
+    private sealed class ConfigReadObservingCli(IGitCliService inner) : IGitCliService
+    {
+        public bool IsGitAvailable => inner.IsGitAvailable;
+        public TaskCompletionSource ConfigReadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<GitCliResult> RunAsync(GitCliRequest request, CancellationToken ct = default)
+        {
+            if (request.Arguments.Count > 0 && request.Arguments[0] == "config")
+                ConfigReadStarted.TrySetResult();
+            return inner.RunAsync(request, ct);
+        }
+
+        public Task<GitCliResult> RunAsync(
+            GitCliRequest request, IProgress<GitProgress>? progress, Action<string>? onStdoutLine, CancellationToken ct = default)
+            => inner.RunAsync(request, progress, onStdoutLine, ct);
+    }
+
+    /// <summary>An identity service whose walk finishes only after the config read has started, so
+    /// a sequential resolve (walk, then read) can never complete.</summary>
+    private sealed class WaitsForConfigReadIdentityService(Task configReadStarted) : IRepoIdentityService
+    {
+        public bool ConfigReadWasStartedFirst { get; private set; }
+
+        public async Task<RepoIdentityKey> ResolveAsync(RepositoryContext context, CancellationToken ct = default)
+        {
+            await configReadStarted.WaitAsync(TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
+            ConfigReadWasStartedFirst = true;
+            return RepoIdentityKey.FromRootCommit("0123456789abcdef0123456789abcdef01234567");
+        }
+    }
+
+    private static GitProfile NewProfile() => new()
+    {
+        Id = Guid.NewGuid(),
+        DisplayName = "Test Profile",
+        GitUserName = "Profile Name",
+        GitUserEmail = "profile@example.com",
+        CreatedAt = DateTimeOffset.Now,
+    };
+
+    [Fact(Timeout = 30000)]
+    public async Task Identity_resolution_starts_the_config_read_while_the_walk_is_running()
+    {
+        var realCli = _host.Provider.GetRequiredService<IGitCliService>();
+        var cli = new ConfigReadObservingCli(realCli);
+        var provider = new OverrideServiceProvider(_host.Provider, typeof(IGitCliService), cli);
+        var identity = new WaitsForConfigReadIdentityService(cli.ConfigReadStarted.Task);
+        var profiles = new ConfigWriteProfileService(NewProfile());
+        var recents = _recents = new RecentRepositoryService(_host.Settings);
+        var ws = new WorkspaceService(provider, cli, recents, profiles, identity);
+
+        using var r = RepoWithoutLocalIdentity();
+        var ctx = await ws.OpenAsync(r.Path);
+        ctx.MarkFirstGraphPaintDone();
+
+        // The repo has no local identity, so the profile is written once both reads finished.
+        await profiles.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.True(identity.ConfigReadWasStartedFirst);
+
+        profiles.Release.TrySetResult();
+        await ws.DisposeAsync();
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Profile_is_not_written_when_the_repo_already_has_a_local_identity()
+    {
+        var cli = _host.Provider.GetRequiredService<IGitCliService>();
+        var profiles = new ConfigWriteProfileService(NewProfile());
+        var recents = _recents = new RecentRepositoryService(_host.Settings);
+        var ws = new WorkspaceService(_host.Provider, cli, recents, profiles, new RepoIdentityService(cli));
+
+        using var r = Repo("has-identity.txt"); // the builder sets user.name and user.email locally
+        var ctx = await ws.OpenAsync(r.Path);
+        ctx.MarkFirstGraphPaintDone();
+        await ctx.FirstFullLoad.WaitAsync(TimeSpan.FromSeconds(20));
+
+        Assert.False(profiles.Started.Task.IsCompleted);
+        await ws.DisposeAsync();
     }
 
     // ── A focus switch mid-git-config-write must not cancel the write ──
@@ -968,6 +1276,47 @@ public class WorkspaceSubmoduleTabTests : WorkspaceServiceTestBase
 
         Assert.Contains(child, ws.OpenRepositories);
         Assert.Null(child.LinkOwner);
+        await ws.DisposeAsync();
+    }
+
+    [Fact(Timeout = 60000)]
+    public async Task CloseAsync_updates_the_strip_and_focus_before_a_running_write_ends()
+    {
+        var ws = NewWorkspace();
+        using var r1 = Repo("a.txt");
+        using var r2 = Repo("b.txt");
+        var a = await ws.OpenAsync(r1.Path);
+        var b = await ws.OpenAsync(r2.Path);
+        ws.Focus(b);
+
+        var acquired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var write = Task.Run(() => b.WithWriteLockAsync(async _ =>
+        {
+            acquired.SetResult();
+            await release.Task;
+            return 1;
+        }));
+        await acquired.Task;
+
+        var stripUpdated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var focusMoved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        ws.OpenRepositoriesChanged += (_, _) => stripUpdated.TrySetResult();
+        ws.FocusedRepositoryChanged += (_, e) =>
+        {
+            if (ReferenceEquals(e.New, a))
+                focusMoved.TrySetResult();
+        };
+
+        var close = ws.CloseAsync(b);
+        await stripUpdated.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await focusMoved.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.False(close.IsCompleted, "close finished while a write still held the lock");
+        Assert.DoesNotContain(b, ws.OpenRepositories);
+
+        release.SetResult();
+        Assert.Equal(1, await write);
+        await close.WaitAsync(TimeSpan.FromSeconds(10));
         await ws.DisposeAsync();
     }
 
@@ -1357,5 +1706,367 @@ public class WorkspaceStatusLoadTests : WorkspaceServiceTestBase
         Assert.True(Directory.Exists(ctx.GitDirectory));
 
         await ws.DisposeAsync();
+    }
+}
+
+/// <summary>Watcher-driven refreshes of the focused tab follow the cost of status, and activating
+/// the window refreshes at once. The clock is manual and the refresh is a stand-in that takes the
+/// scripted status duration on that clock, so no test waits on wall time.</summary>
+[Trait("tier", "git")]
+public class WorkspaceServiceRefreshPacingTests : WorkspaceServiceTestBase
+{
+    private sealed class ManualTime : TimeProvider
+    {
+        private readonly object _gate = new();
+        private readonly List<ManualTimer> _timers = [];
+        private readonly List<(TimerCallback Callback, object? State)> _created = [];
+        private long _now;
+
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+        public override long GetTimestamp()
+        {
+            lock (_gate) return _now;
+        }
+
+        public TimeSpan Now => TimeSpan.FromTicks(GetTimestamp());
+
+        /// <summary>The callback and state of the n-th timer created, so a test can fire a timer that was already disposed.</summary>
+        public (TimerCallback Callback, object? State) CreatedTimer(int index)
+        {
+            lock (_gate) return _created[index];
+        }
+
+        public int CreatedTimerCount
+        {
+            get { lock (_gate) return _created.Count; }
+        }
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            var timer = new ManualTimer(this, callback, state);
+            lock (_gate) _created.Add((callback, state));
+            timer.Change(dueTime, period);
+            return timer;
+        }
+
+        /// <summary>Moves the clock forward, firing each timer at its own due time in order —
+        /// including timers a callback creates that fall inside the span. The callbacks run on a
+        /// pool thread, so the continuations they release run inline there: the work they trigger
+        /// has finished when this returns, instead of being queued behind the test's own context.</summary>
+        public void Advance(TimeSpan by) => Task.Run(() => AdvanceCore(by)).GetAwaiter().GetResult();
+
+        private void AdvanceCore(TimeSpan by)
+        {
+            long target;
+            lock (_gate) target = _now + by.Ticks;
+            while (true)
+            {
+                ManualTimer? next;
+                lock (_gate)
+                {
+                    next = _timers.Where(t => t.Due is long due && due <= target).OrderBy(t => t.Due).FirstOrDefault();
+                    if (next is null)
+                    {
+                        _now = target;
+                        return;
+                    }
+                    _now = Math.Max(_now, next.Due!.Value);
+                    next.Due = next.Period > 0 ? next.Due + next.Period : null;
+                }
+                next.Callback(next.State);
+            }
+        }
+
+        private sealed class ManualTimer(ManualTime owner, TimerCallback callback, object? state) : ITimer
+        {
+            public TimerCallback Callback { get; } = callback;
+            public object? State { get; } = state;
+            public long? Due { get; set; }
+            public long Period { get; private set; }
+
+            public bool Change(TimeSpan dueTime, TimeSpan period)
+            {
+                lock (owner._gate)
+                {
+                    Due = dueTime == Timeout.InfiniteTimeSpan ? null : owner._now + dueTime.Ticks;
+                    Period = period == Timeout.InfiniteTimeSpan ? 0 : period.Ticks;
+                    if (!owner._timers.Contains(this))
+                        owner._timers.Add(this);
+                }
+                return true;
+            }
+
+            public void Dispose()
+            {
+                lock (owner._gate) owner._timers.Remove(this);
+            }
+
+            public ValueTask DisposeAsync()
+            {
+                Dispose();
+                return ValueTask.CompletedTask;
+            }
+        }
+    }
+
+    /// <summary>A workspace whose focused tab's refresh is recorded and takes <c>StatusCost</c> on
+    /// the manual clock, with a loaded tab open and the load's own status already finished.</summary>
+    private sealed class Rig(WorkspaceService workspace, RepositoryContext context, ManualTime time) : IAsyncDisposable
+    {
+        public WorkspaceService Workspace => workspace;
+        public RepositoryContext Context => context;
+        public ManualTime Time => time;
+        public TimeSpan StatusCost { get; set; }
+
+        private readonly ConcurrentQueue<(TimeSpan At, bool Full)> _calls = new();
+        private readonly SemaphoreSlim _callSignal = new(0);
+        private int _baseline;
+
+        /// <summary>The refreshes started since the rig was last reset.</summary>
+        public List<(TimeSpan At, bool Full)> Calls => _calls.Skip(_baseline).ToList();
+
+        public void RecordCall(TimeSpan at, bool full)
+        {
+            _calls.Enqueue((at, full));
+            _callSignal.Release();
+        }
+
+        public void ResetCalls() => _baseline = _calls.Count;
+
+        public Task Request(bool full = false) => workspace.RequestBackgroundRefreshAsync(context, full);
+
+        /// <summary>Waits until the workspace has seen the paced refresh end. The refresh's thread
+        /// reads the clock when it does, so the clock must not move until then.</summary>
+        public async Task WaitForPacedRefreshToEndAsync()
+        {
+            var deadline = Stopwatch.StartNew();
+            while (workspace.IsPacedRefreshRunningForTesting(context))
+            {
+                Assert.True(deadline.Elapsed < TimeSpan.FromSeconds(20), "the refresh never ended");
+                await Task.Yield();
+            }
+        }
+
+        /// <summary>Waits until <paramref name="count"/> refreshes have started since the reset.</summary>
+        public async Task WaitForCallsAsync(int count)
+        {
+            while (Calls.Count < count)
+                Assert.True(await _callSignal.WaitAsync(TimeSpan.FromSeconds(20)), "no refresh started");
+        }
+
+        public ValueTask DisposeAsync() => workspace.DisposeAsync();
+    }
+
+    private async Task<Rig> OpenRigAsync(string path, TimeSpan statusCost)
+    {
+        var ws = NewWorkspace();
+        var time = new ManualTime();
+        Rig? rig = null;
+        ws.TimeSource = time;
+        ws.StatusDurationForTesting = _ => rig!.StatusCost;
+        ws.FocusedRefreshForTesting = async (_, full) =>
+        {
+            // The delay is armed before the call is announced, so a test that reacts to the call
+            // advances a clock the refresh is already waiting on.
+            var status = rig!.StatusCost > TimeSpan.Zero ? Task.Delay(rig.StatusCost, time) : Task.CompletedTask;
+            rig.RecordCall(time.Now, full);
+            await status.ConfigureAwait(false);
+        };
+
+        var ctx = await ws.OpenAsync(path);
+        rig = new Rig(ws, ctx, time) { StatusCost = statusCost };
+        ctx.MarkFirstGraphPaintDone();
+        await ctx.FirstFullLoad.WaitAsync(TimeSpan.FromSeconds(30));
+
+        // The load's own status runs through the same path; finish it, let pacing see it end at
+        // that moment on the clock, then leave the pacing window behind.
+        await rig.WaitForCallsAsync(1);
+        time.Advance(statusCost);
+        await rig.WaitForPacedRefreshToEndAsync();
+        time.Advance(TimeSpan.FromSeconds(10));
+        rig.ResetCalls();
+        return rig;
+    }
+
+    private static async Task AllCompleteAsync(IEnumerable<Task> tasks) =>
+        await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(20));
+
+    [Fact(Timeout = 60000)]
+    public async Task Requests_arriving_during_a_slow_status_lead_to_refreshes_at_least_three_seconds_apart()
+    {
+        using var repo = Repo("pace.txt");
+        await using var rig = await OpenRigAsync(repo.Path, TimeSpan.FromSeconds(1.5));
+        var start = rig.Time.Now;
+
+        var requests = new List<Task> { rig.Request() };
+        for (var i = 0; i < 60; i++)
+        {
+            rig.Time.Advance(TimeSpan.FromMilliseconds(200));
+            requests.Add(rig.Request());
+        }
+
+        var starts = rig.Calls.Select(c => c.At - start).ToList();
+        Assert.Equal(new[] { TimeSpan.Zero, TimeSpan.FromSeconds(4.5), TimeSpan.FromSeconds(9) }, starts);
+        for (var i = 1; i < starts.Count; i++)
+            Assert.True(starts[i] - starts[i - 1] >= TimeSpan.FromSeconds(3));
+
+        rig.Time.Advance(TimeSpan.FromSeconds(20));
+        await AllCompleteAsync(requests);
+    }
+
+    [Fact(Timeout = 60000)]
+    public async Task A_burst_of_requests_leads_to_one_trailing_refresh()
+    {
+        using var repo = Repo("burst.txt");
+        await using var rig = await OpenRigAsync(repo.Path, TimeSpan.FromSeconds(1.5));
+        var start = rig.Time.Now;
+
+        var requests = new List<Task> { rig.Request() };
+        for (var i = 0; i < 10; i++)
+        {
+            rig.Time.Advance(TimeSpan.FromMilliseconds(100));
+            requests.Add(rig.Request());
+        }
+        rig.Time.Advance(TimeSpan.FromSeconds(30));
+        await AllCompleteAsync(requests);
+
+        Assert.Equal(2, rig.Calls.Count);
+        Assert.Equal(TimeSpan.FromSeconds(4.5), rig.Calls[1].At - start);
+    }
+
+    [Fact(Timeout = 60000)]
+    public async Task A_late_callback_of_a_cancelled_trailing_timer_leaves_the_current_one_alone()
+    {
+        using var repo = Repo("late-timer.txt");
+        await using var rig = await OpenRigAsync(repo.Path, TimeSpan.Zero);
+
+        var first = rig.Request();
+        await rig.WaitForPacedRefreshToEndAsync();
+        rig.Time.Advance(TimeSpan.FromMilliseconds(100));
+        var second = rig.Request();
+        var staleIndex = rig.Time.CreatedTimerCount - 1;
+        rig.Time.Advance(TimeSpan.FromSeconds(1));
+        await AllCompleteAsync([first, second]);
+        await rig.WaitForPacedRefreshToEndAsync();
+        Assert.Equal(2, rig.Calls.Count);
+
+        rig.Time.Advance(TimeSpan.FromMilliseconds(100));
+        var third = rig.Request();
+        Assert.Equal(2, rig.Calls.Count);
+
+        var stale = rig.Time.CreatedTimer(staleIndex);
+        stale.Callback(stale.State);
+        await Task.Delay(200);
+        Assert.Equal(2, rig.Calls.Count);
+
+        rig.Time.Advance(TimeSpan.FromSeconds(1));
+        await AllCompleteAsync([third]);
+        Assert.Equal(3, rig.Calls.Count);
+    }
+
+    [Fact(Timeout = 60000)]
+    public async Task A_trailing_refresh_is_full_when_any_request_it_replaces_was()
+    {
+        using var repo = Repo("trailing-full.txt");
+        await using var rig = await OpenRigAsync(repo.Path, TimeSpan.Zero);
+
+        var requests = new List<Task> { rig.Request() };
+        rig.Time.Advance(TimeSpan.FromMilliseconds(100));
+        requests.Add(rig.Request(full: true));
+        rig.Time.Advance(TimeSpan.FromMilliseconds(100));
+        requests.Add(rig.Request());
+        rig.Time.Advance(TimeSpan.FromSeconds(5));
+        await AllCompleteAsync(requests);
+
+        Assert.Equal(new[] { false, true }, rig.Calls.Select(c => c.Full));
+    }
+
+    [Fact(Timeout = 60000)]
+    public async Task While_the_window_is_active_the_pacing_floor_is_one_second()
+    {
+        using var repo = Repo("active-floor.txt");
+        await using var rig = await OpenRigAsync(repo.Path, TimeSpan.Zero);
+
+        var first = rig.Request();
+        rig.Time.Advance(TimeSpan.FromSeconds(0.9));
+        var tooSoon = rig.Request();
+        Assert.Single(rig.Calls);
+
+        rig.Time.Advance(TimeSpan.FromSeconds(0.2));
+        Assert.Equal(2, rig.Calls.Count);
+        await AllCompleteAsync([first, tooSoon]);
+    }
+
+    [Fact(Timeout = 60000)]
+    public async Task While_the_window_is_inactive_the_pacing_floor_is_three_seconds()
+    {
+        using var repo = Repo("inactive-floor.txt");
+        await using var rig = await OpenRigAsync(repo.Path, TimeSpan.Zero);
+        rig.Workspace.SetAppActive(false);
+        Assert.False(rig.Workspace.IsAppActive);
+
+        var first = rig.Request();
+        rig.Time.Advance(TimeSpan.FromSeconds(2.9));
+        var tooSoon = rig.Request();
+        Assert.Single(rig.Calls);
+
+        rig.Time.Advance(TimeSpan.FromSeconds(0.2));
+        Assert.Equal(2, rig.Calls.Count);
+        await AllCompleteAsync([first, tooSoon]);
+    }
+
+    [Fact(Timeout = 60000)]
+    public async Task Activation_refreshes_status_at_once_even_inside_the_pacing_window()
+    {
+        using var repo = Repo("activate.txt");
+        await using var rig = await OpenRigAsync(repo.Path, TimeSpan.FromSeconds(1.5));
+        rig.Workspace.SetAppActive(false);
+
+        var first = rig.Request();
+        rig.Time.Advance(TimeSpan.FromSeconds(1.5));
+        await first;
+        Assert.Single(rig.Calls);
+
+        var activatedAt = rig.Time.Now;
+        rig.Workspace.SetAppActive(true);
+        await rig.WaitForCallsAsync(2);
+
+        Assert.Equal(activatedAt, rig.Calls[1].At);
+        Assert.False(rig.Calls[1].Full);
+        Assert.True(rig.Workspace.IsAppActive);
+        rig.Time.Advance(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact(Timeout = 60000)]
+    public async Task Activation_gives_a_degraded_tab_a_full_refresh()
+    {
+        using var repo = Repo("degraded.txt");
+
+        // A header claiming a huge index makes the watcher watch .git only and mark itself degraded.
+        var index = Path.Combine(repo.Path, ".git", "index");
+        var bytes = File.ReadAllBytes(index);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(8, 4), 60_000);
+        File.WriteAllBytes(index, bytes);
+
+        await using var rig = await OpenRigAsync(repo.Path, TimeSpan.Zero);
+        Assert.True(rig.Context.Watcher.IsDegraded);
+
+        rig.Workspace.SetAppActive(true);
+        await rig.WaitForCallsAsync(1);
+
+        Assert.True(rig.Calls[0].Full);
+    }
+
+    [Fact(Timeout = 60000)]
+    public async Task Deactivation_does_not_refresh()
+    {
+        using var repo = Repo("deactivate.txt");
+        await using var rig = await OpenRigAsync(repo.Path, TimeSpan.Zero);
+
+        rig.Workspace.SetAppActive(false);
+        rig.Time.Advance(TimeSpan.FromSeconds(10));
+
+        Assert.Empty(rig.Calls);
     }
 }

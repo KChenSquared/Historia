@@ -192,6 +192,8 @@ public sealed partial class GraphLayoutService
             {
                 if (stream is null)
                     return -1;
+                // A background walk: it yields the CPU to interactive work.
+                stream.SetLowPriority(true);
                 while (stream.MoveNext())
                 {
                     ct.ThrowIfCancellationRequested();

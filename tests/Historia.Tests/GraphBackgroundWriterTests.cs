@@ -261,6 +261,14 @@ public sealed class GraphBackgroundWriterTests : IAsyncDisposable
             return Task.CompletedTask;
         });
 
+        // Job 1 has to be running before "job 2 hasn't started" means anything; a busy machine
+        // can take far longer than a fixed delay to get it going.
+        var started = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+        while (DateTime.UtcNow < started)
+        {
+            lock (sync) if (order.Count > 0) break;
+            await Task.Delay(20);
+        }
         await Task.Delay(200);
         lock (sync) Assert.Equal([1], order); // job 2 hasn't started — job 1 is still blocked
 
@@ -315,9 +323,14 @@ public sealed class GraphBackgroundWriterTests : IAsyncDisposable
         await using var ctxB = OpenOtherTab();
 
         var blockA = new TaskCompletionSource();
-        writer.EnqueueInactiveTab(ctxA, async ct => await blockA.Task.WaitAsync(ct));
+        var aStarted = new TaskCompletionSource();
+        writer.EnqueueInactiveTab(ctxA, async ct =>
+        {
+            aStarted.TrySetResult();
+            await blockA.Task.WaitAsync(ct);
+        });
 
-        await Task.Delay(150); // let A start running and occupy the drain loop
+        await aStarted.Task.WaitAsync(TimeSpan.FromSeconds(30)); // A is running and occupies the drain loop
 
         var bRuns = 0;
         writer.EnqueueInactiveTab(ctxB, ct => { Interlocked.Increment(ref bRuns); return Task.CompletedTask; });

@@ -5,6 +5,14 @@ public sealed partial class GitGateway
     private static readonly IReadOnlyDictionary<string, string> LiteralPathspecEnv =
         new Dictionary<string, string> { ["GIT_LITERAL_PATHSPECS"] = "1" };
 
+    private static readonly TimeSpan[] LockedIndexRetryDelays =
+    [
+        TimeSpan.FromMilliseconds(250),
+        TimeSpan.FromMilliseconds(500),
+        TimeSpan.FromMilliseconds(750),
+        TimeSpan.FromMilliseconds(1000),
+    ];
+
     public async Task StageAsync(IReadOnlyList<string> paths, CancellationToken ct = default)
     {
         if (paths.Count == 0)
@@ -25,18 +33,19 @@ public sealed partial class GitGateway
 
             var stdin = string.Join('\0', normalizedPaths) + '\0';
 
-            var result = await cli.RunAsync(new GitCliRequest
+            var result = await RunIndexWriterAsync(new GitCliRequest
             {
                 Arguments = ["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
                 WorkingDirectory = context.RepositoryPath,
                 StandardInput = stdin,
                 ExtraEnvironment = LiteralPathspecEnv,
-                Timeout = TimeSpan.FromMinutes(5),
+                // No wall clock: a writer killed mid-way leaves index.lock behind.
+                Timeout = Timeout.InfiniteTimeSpan,
             }, innerCt).ConfigureAwait(false);
 
             if (!result.IsSuccess && !(result.ExitCode == 1 && IsIgnoredAdviceOnly(result.StandardError)))
                 throw HistoriaGitException.FromCli(result, "Stage");
-        }, ct).ConfigureAwait(false);
+        }, ct, label: "Stage").ConfigureAwait(false);
     }
 
     public async Task UnstageAsync(IReadOnlyList<string> paths, CancellationToken ct = default)
@@ -62,13 +71,13 @@ public sealed partial class GitGateway
 
             if (!headCheck.IsSuccess)
             {
-                var result = await cli.RunAsync(new GitCliRequest
+                var result = await RunIndexWriterAsync(new GitCliRequest
                 {
                     Arguments = ["rm", "--cached", "-q", "--pathspec-from-file=-", "--pathspec-file-nul"],
                     WorkingDirectory = context.RepositoryPath,
                     StandardInput = stdin,
                     ExtraEnvironment = LiteralPathspecEnv,
-                    Timeout = TimeSpan.FromMinutes(5),
+                    Timeout = Timeout.InfiniteTimeSpan,
                 }, innerCt).ConfigureAwait(false);
 
                 if (!result.IsSuccess)
@@ -76,18 +85,18 @@ public sealed partial class GitGateway
                 return;
             }
 
-            var restoreResult = await cli.RunAsync(new GitCliRequest
+            var restoreResult = await RunIndexWriterAsync(new GitCliRequest
             {
                 Arguments = ["restore", "--staged", "--pathspec-from-file=-", "--pathspec-file-nul"],
                 WorkingDirectory = context.RepositoryPath,
                 StandardInput = stdin,
                 ExtraEnvironment = LiteralPathspecEnv,
-                Timeout = TimeSpan.FromMinutes(5),
+                Timeout = Timeout.InfiniteTimeSpan,
             }, innerCt).ConfigureAwait(false);
 
             if (!restoreResult.IsSuccess)
                 throw HistoriaGitException.FromCli(restoreResult, "Unstage");
-        }, ct).ConfigureAwait(false);
+        }, ct, label: "Unstage").ConfigureAwait(false);
     }
 
     public async Task DiscardAsync(IReadOnlyList<string> paths, CancellationToken ct = default)
@@ -243,7 +252,7 @@ public sealed partial class GitGateway
                     WorkingDirectory = context.RepositoryPath,
                     StandardInput = string.Join('\0', toRemove) + '\0',
                     ExtraEnvironment = LiteralPathspecEnv,
-                    Timeout = TimeSpan.FromMinutes(5),
+                    Timeout = Timeout.InfiniteTimeSpan,
                 }, innerCt).ConfigureAwait(false);
 
                 if (!rmResult.IsSuccess)
@@ -266,13 +275,13 @@ public sealed partial class GitGateway
                     WorkingDirectory = context.RepositoryPath,
                     StandardInput = string.Join('\0', toRestore) + '\0',
                     ExtraEnvironment = LiteralPathspecEnv,
-                    Timeout = TimeSpan.FromMinutes(5),
+                    Timeout = Timeout.InfiniteTimeSpan,
                 }, innerCt).ConfigureAwait(false);
 
                 if (!restoreResult.IsSuccess)
                     throw HistoriaGitException.FromCli(restoreResult, "Discard");
             }
-        }, ct).ConfigureAwait(false);
+        }, ct, label: "Discard").ConfigureAwait(false);
     }
 
     public async Task<GitObjectId> CommitAsync(CommitRequest request, CancellationToken ct = default)
@@ -301,7 +310,7 @@ public sealed partial class GitGateway
                 StandardInput = request.Message ?? "",
                 ExtraEnvironment = env,
                 // No wall clock: hooks (lint, tests) and a signing passphrase prompt can take
-                // minutes. The caller's token still cancels it.
+                // minutes. Cancelling stops it only before git starts; once running it is never killed.
                 Timeout = Timeout.InfiniteTimeSpan,
             }, innerCt).ConfigureAwait(false);
 
@@ -330,9 +339,14 @@ public sealed partial class GitGateway
                 throw HistoriaGitException.FromCli(revParse, "Commit rev-parse");
 
             return GitObjectId.Parse(revParse.StandardOutput.Trim());
-        }, ct).ConfigureAwait(false);
+        }, ct, label: "Commit").ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// The paths worth handing to <c>git add</c>: those on disk, plus those missing from disk that
+    /// the index still tracks (a deletion to stage). A path in neither place is skipped and logged.
+    /// A probe that fails throws rather than guessing, so a deletion is never dropped silently.
+    /// </summary>
     private async Task<IReadOnlyList<string>> FilterValidStagePathsAsync(
         IReadOnlyList<string> paths, CancellationToken ct)
     {
@@ -358,14 +372,24 @@ public sealed partial class GitGateway
             var args = new List<string>(chunk.Count + 3) { "ls-files", "-z", "--" };
             args.AddRange(chunk);
 
+            // Runs inside the write lock, so no wall clock: a probe stopped by a timeout would
+            // be the same silent drop this method exists to prevent.
             var result = await cli.RunAsync(new GitCliRequest
             {
                 Arguments = args,
                 WorkingDirectory = context.RepositoryPath,
                 ExtraEnvironment = LiteralPathspecEnv,
+                Timeout = Timeout.InfiniteTimeSpan,
             }, ct).ConfigureAwait(false);
 
-            if (result.IsSuccess && !string.IsNullOrEmpty(result.StandardOutput))
+            if (!result.IsSuccess)
+            {
+                if (result.ErrorKind == GitErrorKind.Cancelled)
+                    throw new OperationCanceledException(ct);
+                throw HistoriaGitException.FromCli(result, "Stage");
+            }
+
+            if (!string.IsNullOrEmpty(result.StandardOutput))
             {
                 var tracked = result.StandardOutput.Split('\0', StringSplitOptions.RemoveEmptyEntries);
                 foreach (var t in tracked)
@@ -374,13 +398,96 @@ public sealed partial class GitGateway
         }
 
         var resultList = new List<string>(paths.Count);
+        var skipped = new List<string>();
         foreach (var path in paths)
         {
             if (existingOnDisk.Contains(path) || trackedInIndex.Contains(path))
                 resultList.Add(path);
+            else
+                skipped.Add(path);
+        }
+
+        if (skipped.Count > 0)
+        {
+            const int logged = 10;
+            var names = string.Join(", ", skipped.Take(logged));
+            var more = skipped.Count > logged ? $" and {skipped.Count - logged} more" : "";
+            AppLog.Write(AppLogLevel.Info, "git",
+                $"Stage: skipped {skipped.Count} path(s) missing from both disk and index: {names}{more}.");
         }
 
         return resultList;
+    }
+
+    /// <summary>
+    /// Rewrites the index's cached stat data for files whose timestamps changed but whose content
+    /// did not, so the next status stops re-hashing them. <c>update-index --refresh</c> only
+    /// re-stats and re-hashes: an entry whose content differs from its blob is left as it is, and
+    /// an unmerged entry is skipped. It still writes <c>index</c>, so it runs as one of
+    /// Historia's own operations inside the write lock, at normal priority (a write must not
+    /// starve behind CPU load while user writes queue behind it), and is never killed once
+    /// started. It does nothing while another process holds <c>index.lock</c> or while
+    /// a merge, rebase, cherry-pick, revert or bisect is under way.
+    /// </summary>
+    public async Task RefreshIndexStatAsync(CancellationToken ct = default)
+    {
+        if (context.IsBare || !IsIndexStatRefreshSafe())
+            return;
+
+        using var _ = context.BeginSelfOperation();
+
+        await context.WithWriteLockAsync(async innerCt =>
+        {
+            // A writer queued behind this refresh is a user operation (or another upkeep pass)
+            // that must not wait for a full re-stat: give way, the next status will schedule again.
+            if (context.HasWaitingWriters || !IsIndexStatRefreshSafe())
+                return;
+
+            var result = await cli.RunAsync(new GitCliRequest
+            {
+                Arguments = ["update-index", "-q", "--refresh"],
+                WorkingDirectory = context.RepositoryPath,
+                Priority = GitCliPriority.Normal,
+                // No wall clock: a writer killed mid-way leaves index.lock behind.
+                Timeout = Timeout.InfiniteTimeSpan,
+                CancelPolicy = GitCliCancelPolicy.NeverAfterStart,
+            }, innerCt).ConfigureAwait(false);
+
+            // Exit 1 reports unmerged entries ("needs merge"), which refresh leaves as they are.
+            if (result.IsSuccess || result.ExitCode == 1 || result.ErrorKind == GitErrorKind.LockedIndex)
+                return;
+            if (result.ErrorKind == GitErrorKind.Cancelled)
+                innerCt.ThrowIfCancellationRequested();
+
+            throw HistoriaGitException.FromCli(result, "Refresh index");
+        }, ct, label: "Index refresh").ConfigureAwait(false);
+    }
+
+    private bool IsIndexStatRefreshSafe() =>
+        !File.Exists(Path.Combine(context.GitDirectory, "index.lock"))
+        && OperationMarkers.Detect(context.GitDirectory) == OperationState.None;
+
+    /// <summary>
+    /// Runs an idempotent index writer, retrying while another git process holds
+    /// <c>index.lock</c>: the lock is usually a status refresh or a fetch that finishes within a
+    /// second. The lock file is never removed here; when the retries run out the locked result is
+    /// returned for the caller to surface.
+    /// </summary>
+    private async Task<GitCliResult> RunIndexWriterAsync(GitCliRequest request, CancellationToken ct)
+    {
+        var result = await cli.RunAsync(request, ct).ConfigureAwait(false);
+        foreach (var delay in LockedIndexRetryDelays)
+        {
+            if (result.ErrorKind != GitErrorKind.LockedIndex)
+                break;
+
+            AppLog.Write(AppLogLevel.Info, "git",
+                $"{request.Arguments[0]}: index is locked, retrying in {delay.TotalMilliseconds:0} ms.");
+            await Task.Delay(delay, ct).ConfigureAwait(false);
+            result = await cli.RunAsync(request, ct).ConfigureAwait(false);
+        }
+
+        return result;
     }
 
     /// <summary>
@@ -429,7 +536,7 @@ public sealed partial class GitGateway
             Arguments = ["hash-object", "-w", "--stdin-paths"],
             WorkingDirectory = workDir,
             StandardInput = string.Join('\n', exact.Select(e => e.Path)) + '\n',
-            Timeout = TimeSpan.FromMinutes(5),
+            Timeout = Timeout.InfiniteTimeSpan,
         }, ct).ConfigureAwait(false);
 
         if (!hash.IsSuccess)
@@ -443,11 +550,12 @@ public sealed partial class GitGateway
         for (var i = 0; i < exact.Count; i++)
             indexInfo.Append(exact[i].Mode).Append(' ').Append(oids[i].Trim()).Append('\t').Append(exact[i].Path).Append('\0');
 
-        var update = await cli.RunAsync(new GitCliRequest
+        var update = await RunIndexWriterAsync(new GitCliRequest
         {
             Arguments = ["update-index", "-z", "--index-info"],
             WorkingDirectory = workDir,
             StandardInput = indexInfo.ToString(),
+            Timeout = Timeout.InfiniteTimeSpan,
         }, ct).ConfigureAwait(false);
 
         if (!update.IsSuccess)

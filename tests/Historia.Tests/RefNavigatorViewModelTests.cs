@@ -666,7 +666,7 @@ public sealed class RefNavigatorViewModelTests : IAsyncDisposable
 
         rig.Workspace.ChangeFocus(ctx);
 
-        Assert.Equal("Stashes (1)", rig.Vm.Stashes.Title);
+        await WaitForAsync(() => rig.Vm.Stashes.Title == "Stashes (1)", "the cached stash list");
         rig.Vm.Stashes.ToggleCommand.Execute(null);
         Assert.Equal(["1. cached"], Texts(rig.Vm.Stashes));
         await Task.Delay(100);
@@ -692,6 +692,218 @@ public sealed class RefNavigatorViewModelTests : IAsyncDisposable
         ctx.MarkFirstGraphPaintDone();
         await WaitForAsync(() => Texts(rig.Vm.Stashes).SequenceEqual(["No stashes."]), "the stash list");
         Assert.Equal("Stashes (0)", rig.Vm.Stashes.Title);
+    }
+
+    [Fact]
+    public async Task Binding_reads_the_cache_off_the_calling_thread_and_applies_it_afterwards()
+    {
+        var repo = NewRepo();
+        var ctx = await OpenAsync(repo, paintDone: false);
+        var rig = new Rig(null);
+        _vms.Add(rig.Vm);
+        rig.Cache.Snapshots[ctx.RepositoryPath] = new RepoStateSnapshot(null, null, null, [Stash(0, "cached", 'c')], [], []);
+        var gate = rig.Cache.BlockLoads();
+
+        rig.Workspace.ChangeFocus(ctx);
+
+        Assert.True(rig.Cache.LoadEntered.Wait(TimeSpan.FromSeconds(30)), "the cache was never read");
+        Assert.False(rig.Cache.GateTimedOut, "the bind waited for the cache read");
+        Assert.Equal(["main"], Texts(rig.Vm.Local));
+        Assert.Equal("Stashes", rig.Vm.Stashes.Title);
+
+        gate.Set();
+        await WaitForAsync(() => rig.Vm.Stashes.Title == "Stashes (1)", "the cached stash list");
+    }
+
+    [Fact]
+    public async Task Binding_reads_only_the_power_tools_half_of_the_cache()
+    {
+        var repo = NewRepo();
+        var ctx = await OpenAsync(repo, paintDone: false);
+        var rig = new Rig(null);
+        _vms.Add(rig.Vm);
+        rig.Cache.Snapshots[ctx.RepositoryPath] = new RepoStateSnapshot(null, null, null, [Stash(0, "cached", 'c')], [], []);
+
+        rig.Workspace.ChangeFocus(ctx);
+        await WaitForAsync(() => rig.Vm.Stashes.Title == "Stashes (1)", "the cached stash list");
+
+        Assert.Equal(0, rig.Cache.FullLoads);
+        Assert.True(rig.Cache.Loads > 0);
+    }
+
+    [Fact]
+    public async Task A_stash_change_during_the_bind_read_keeps_the_cached_submodules_and_worktrees()
+    {
+        var repo = NewRepo();
+        var ctx = await OpenAsync(repo, paintDone: false);
+        var rig = new Rig(null);
+        _vms.Add(rig.Vm);
+        var sm = new SubmoduleInfo { Name = "libs/core", Path = "libs/core", Url = "u", Status = SubmoduleStatus.Clean };
+        rig.Cache.Snapshots[ctx.RepositoryPath] = new RepoStateSnapshot(null, null, null, [Stash(0, "cached", 'c')], [sm], []);
+        var gate = rig.Cache.BlockLoads();
+
+        rig.Workspace.ChangeFocus(ctx);
+        Assert.True(rig.Cache.LoadEntered.Wait(TimeSpan.FromSeconds(30)), "the cache was never read");
+
+        // A stash-only change bumps the cache generation while the bind's read is still running.
+        rig.Vm.OnRefsChanged(ctx.State, new RefsChangedEventArgs(ctx.State.Branches, ctx.State.Tags, ctx.State.Remotes)
+        {
+            StashStamp = ctx.State.StashStamp + 1,
+        });
+        gate.Set();
+
+        await WaitForAsync(() => rig.Vm.Submodules.Title == "Submodules (1)", "the cached submodule list");
+        Assert.Equal("Stashes (1)", rig.Vm.Stashes.Title);
+    }
+
+    [Fact]
+    public async Task A_refs_change_reads_the_cache_off_the_calling_thread()
+    {
+        var repo = NewRepo();
+        var ctx = await OpenAsync(repo);
+        var ui = new RecordingUiDispatcher();
+        var rig = NewRig(ctx, ui);
+        ui.DrainPosted();
+        await WaitForAsync(() => rig.Stashes.ListCount == 1, "the first stash list");
+        var loads = rig.Cache.Loads;
+        var gate = rig.Cache.BlockLoads();
+
+        rig.Stashes.Entries = [Stash(0, "pushed", 'b')];
+        rig.Vm.OnRefsChanged(ctx.State, new RefsChangedEventArgs(ctx.State.Branches, ctx.State.Tags, ctx.State.Remotes)
+        {
+            StashStamp = ctx.State.StashStamp + 1,
+        });
+        ui.DrainPosted();
+
+        await WaitForAsync(() => rig.Cache.Loads > loads, "the cache read to start");
+        Assert.False(rig.Cache.GateTimedOut, "the refs change waited for the cache read");
+        Assert.Equal(1, rig.Stashes.ListCount);
+
+        gate.Set();
+        await WaitForAsync(() => rig.Stashes.ListCount == 2, "the relisted stashes");
+    }
+
+    [Fact]
+    public async Task Saving_the_power_tools_does_not_hold_up_the_rebuilt_rows()
+    {
+        var repo = NewRepo();
+        var ctx = await OpenAsync(repo, paintDone: false);
+        var rig = NewRig(ctx);
+        rig.Stashes.Entries = [Stash(0, "fresh", 'f')];
+        rig.Vm.Stashes.ToggleCommand.Execute(null);
+        var gate = rig.Cache.BlockSaves();
+
+        ctx.MarkFirstGraphPaintDone();
+
+        await WaitForAsync(() => Texts(rig.Vm.Stashes).SequenceEqual(["1. fresh"]), "the stash list");
+        Assert.True(rig.Cache.SaveEntered.Wait(TimeSpan.FromSeconds(30)), "the lists were never saved");
+        Assert.Empty(rig.Cache.Saved);
+
+        gate.Set();
+        await WaitForAsync(() => rig.Cache.Saved.Count > 0, "the save to finish");
+        Assert.False(rig.Cache.GateTimedOut);
+    }
+
+    [Fact]
+    public async Task A_cache_read_that_lands_after_a_rebind_is_not_applied_to_the_new_repository()
+    {
+        var repo = NewRepo();
+        var other = NewRepo();
+        var ctx = await OpenAsync(repo, paintDone: false);
+        var ctx2 = await OpenAsync(other, paintDone: false);
+        var rig = new Rig(null);
+        _vms.Add(rig.Vm);
+        rig.Cache.Snapshots[ctx.RepositoryPath] = new RepoStateSnapshot(null, null, null, [Stash(0, "stale", 'a')], [], []);
+        var gate = rig.Cache.BlockLoads();
+
+        rig.Workspace.ChangeFocus(ctx);
+        Assert.True(rig.Cache.LoadEntered.Wait(TimeSpan.FromSeconds(30)), "the cache was never read");
+        rig.Workspace.ChangeFocus(ctx2);
+        gate.Set();
+        await WaitForAsync(() => rig.Cache.Loads >= 2, "both cache reads");
+        await Task.Delay(100);
+
+        Assert.Equal("Stashes", rig.Vm.Stashes.Title);
+        Assert.Equal(ctx2, rig.Vm.Repository);
+    }
+
+    [Fact]
+    public async Task A_tags_only_change_rebuilds_only_the_tags_section()
+    {
+        var repo = NewRepo(r => r.Git("tag", "v1"));
+        var ctx = await OpenAsync(repo);
+        var rig = NewRig(ctx);
+        rig.Vm.Tags.ToggleCommand.Execute(null);
+        var rebuilt = TrackRowChanges(rig.Vm);
+
+        repo.Git("tag", "v2");
+        await ctx.State.RefreshRefsAsync();
+
+        Assert.Equal(["v2", "v1"], Texts(rig.Vm.Tags));
+        Assert.Equal(["Tags"], rebuilt.Distinct());
+    }
+
+    [Fact]
+    public async Task A_branch_only_change_leaves_the_tags_section_alone()
+    {
+        var repo = NewRepo(r => r.Git("tag", "v1"));
+        var ctx = await OpenAsync(repo);
+        var rig = NewRig(ctx);
+        rig.Vm.Tags.ToggleCommand.Execute(null);
+        var rebuilt = TrackRowChanges(rig.Vm);
+
+        repo.Git("branch", "topic");
+        await ctx.State.RefreshRefsAsync();
+
+        Assert.Equal(["main", "topic"], Texts(rig.Vm.Local));
+        Assert.DoesNotContain("Tags", rebuilt);
+    }
+
+    [Fact]
+    public async Task A_raise_that_changes_nothing_rebuilds_no_ref_section()
+    {
+        var repo = NewRepo(r => r.Git("tag", "v1"));
+        var ctx = await OpenAsync(repo);
+        var rig = NewRig(ctx);
+        rig.Vm.Tags.ToggleCommand.Execute(null);
+        var rebuilt = TrackRowChanges(rig.Vm);
+
+        rig.Vm.OnRefsChanged(ctx.State, new RefsChangedEventArgs(ctx.State.Branches, ctx.State.Tags, ctx.State.Remotes)
+        {
+            StashStamp = ctx.State.StashStamp,
+        });
+
+        Assert.Empty(rebuilt);
+    }
+
+    [Fact]
+    public async Task Tags_sort_by_name_ignoring_case_then_ordinal()
+    {
+        var repo = NewRepo(r =>
+        {
+            r.Git("tag", "b-1");
+            r.Git("tag", "B-2");
+        });
+        var rig = NewRig(await OpenAsync(repo));
+        rig.Vm.Tags.ToggleCommand.Execute(null);
+
+        // Case-insensitive first (descending, like the other tag orders), ordinal as the tie-break.
+        Assert.Equal(["B-2", "b-1"], Texts(rig.Vm.Tags));
+    }
+
+    private static List<string> TrackRowChanges(RefNavigatorViewModel vm)
+    {
+        var rebuilt = new List<string>();
+        foreach (var section in new[] { vm.Local, vm.Remotes, vm.Tags })
+        {
+            var name = section.Kind.ToString();
+            section.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName == nameof(RefSectionViewModel.Rows))
+                    rebuilt.Add(name);
+            };
+        }
+        return rebuilt;
     }
 
     [Fact]
@@ -999,14 +1211,57 @@ public sealed class RefNavigatorViewModelTests : IAsyncDisposable
 
     private sealed class StubRepoStateCache : IRepoStateCache
     {
-        public Dictionary<string, RepoStateSnapshot> Snapshots { get; } = new(StringComparer.Ordinal);
-        public List<(IReadOnlyList<StashEntry>? Stashes, IReadOnlyList<SubmoduleInfo>? Submodules, IReadOnlyList<WorktreeInfo>? Worktrees)> Saved { get; } = [];
+        private readonly ConcurrentQueue<(IReadOnlyList<StashEntry>? Stashes, IReadOnlyList<SubmoduleInfo>? Submodules, IReadOnlyList<WorktreeInfo>? Worktrees)> _saved = new();
+        private ManualResetEventSlim? _loadGate;
+        private ManualResetEventSlim? _saveGate;
+        private int _loads;
+        private int _fullLoads;
+        private int _gateTimedOut;
 
-        public RepoStateSnapshot? TryLoad(string repoPath) => Snapshots.GetValueOrDefault(repoPath);
+        public ConcurrentDictionary<string, RepoStateSnapshot> Snapshots { get; } = new(StringComparer.Ordinal);
+        public ManualResetEventSlim LoadEntered { get; } = new();
+        public ManualResetEventSlim SaveEntered { get; } = new();
+
+        public IReadOnlyList<(IReadOnlyList<StashEntry>? Stashes, IReadOnlyList<SubmoduleInfo>? Submodules, IReadOnlyList<WorktreeInfo>? Worktrees)> Saved => [.. _saved];
+
+        public int Loads => Volatile.Read(ref _loads);
+
+        /// <summary>True when a blocked read or save waited out its safety timeout, meaning the caller was waiting for it.</summary>
+        public bool GateTimedOut => Volatile.Read(ref _gateTimedOut) != 0;
+
+        /// <summary>Makes every read wait until the returned gate is set.</summary>
+        public ManualResetEventSlim BlockLoads() => _loadGate = new ManualResetEventSlim();
+
+        /// <summary>Makes every save wait until the returned gate is set.</summary>
+        public ManualResetEventSlim BlockSaves() => _saveGate = new ManualResetEventSlim();
+
+        /// <summary>How many times the whole snapshot (refs included) was read; the sidebar only needs the power tools.</summary>
+        public int FullLoads => Volatile.Read(ref _fullLoads);
+
+        public RepoStateSnapshot? TryLoad(string repoPath)
+        {
+            Interlocked.Increment(ref _fullLoads);
+            return Snapshots.TryGetValue(repoPath, out var snapshot) ? snapshot : null;
+        }
+
+        public RepoStateSnapshot? TryLoadPowerTools(string repoPath)
+        {
+            Interlocked.Increment(ref _loads);
+            LoadEntered.Set();
+            if (_loadGate is { } gate && !gate.Wait(TimeSpan.FromSeconds(10)))
+                Volatile.Write(ref _gateTimedOut, 1);
+            return Snapshots.TryGetValue(repoPath, out var snapshot) ? snapshot : null;
+        }
+
         public void SaveRefs(string repoPath, IReadOnlyList<BranchInfo> branches, IReadOnlyList<TagInfo> tags, IReadOnlyList<RemoteInfo> remotes) { }
 
         public void SavePowerTools(string repoPath, IReadOnlyList<StashEntry>? stashes, IReadOnlyList<SubmoduleInfo>? submodules, IReadOnlyList<WorktreeInfo>? worktrees)
-            => Saved.Add((stashes, submodules, worktrees));
+        {
+            SaveEntered.Set();
+            if (_saveGate is { } gate && !gate.Wait(TimeSpan.FromSeconds(10)))
+                Volatile.Write(ref _gateTimedOut, 1);
+            _saved.Enqueue((stashes, submodules, worktrees));
+        }
 
         public int WipeAll() => 0;
     }

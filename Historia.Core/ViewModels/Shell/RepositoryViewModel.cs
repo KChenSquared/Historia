@@ -139,7 +139,13 @@ public sealed partial class RepositoryViewModel : ViewModelBase
                 Bind(e.New);
         });
 
-    private void OnStatusChanged(object? sender, StatusChangedEventArgs e) => _ui.Post(Refresh);
+    private void OnStatusChanged(object? sender, StatusChangedEventArgs e)
+    {
+        if (_ui.CheckAccess())
+            Refresh();
+        else
+            _ui.Post(Refresh);
+    }
 
     private void OnResolverClosedChanged(object? sender, EventArgs e) => _ui.Post(Refresh);
 
@@ -151,14 +157,21 @@ public sealed partial class RepositoryViewModel : ViewModelBase
 
     // Mirrors the runner's progress into the inline box, but only while it reports for the
     // repository shown here; the runner keeps running Fetch / Pull / Push whether or not a pane
-    // is mounted.
+    // is mounted. Applied in place when already on the UI thread.
     private void OnNetworkProgressChanged(object? sender, RepoNetworkProgress e)
-        => _ui.Post(() =>
-        {
-            if (IsDisposed || _repo is null || !ReferenceEquals(e.Repo, _repo))
-                return;
-            ShowNetworkProgress(e.Progress);
-        });
+    {
+        if (_ui.CheckAccess())
+            ApplyNetworkProgress(e);
+        else
+            _ui.Post(() => ApplyNetworkProgress(e));
+    }
+
+    private void ApplyNetworkProgress(RepoNetworkProgress e)
+    {
+        if (IsDisposed || _repo is null || !ReferenceEquals(e.Repo, _repo))
+            return;
+        ShowNetworkProgress(e.Progress);
+    }
 
     private void Bind(RepositoryContext? ctx)
     {

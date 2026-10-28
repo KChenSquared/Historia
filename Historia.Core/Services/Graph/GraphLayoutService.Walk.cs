@@ -4,28 +4,26 @@ public sealed partial class GraphLayoutService
 {
     private RepoCache GetOrResetCache(RepositoryContext context, GraphQuery query, bool force)
     {
+        RepoCache? stale;
+        RepoCache fresh;
         lock (_sync)
         {
             if (!force && _caches.TryGetValue(context, out var existing) && SameWalkShape(existing.Query, query))
                 return existing;
 
-            // A forced reset (stale fingerprint) discards a cache that may have a background
-            // spill task and an open on-disk store still live — tear those down explicitly,
-            // the same as Forget(), or the old task keeps writing to a now-orphaned RepoCache
-            // and its DiskCommitStore file handle never closes.
-            if (_caches.TryGetValue(context, out var stale))
-            {
-                try { stale.Cts.Cancel(); } catch (ObjectDisposedException) { }
-                stale.Cts.Dispose();
-                stale.MetaStore?.Dispose();
-                stale.DisposeLiveWalkWhenFree(); // disposed once no pull holds WalkLock
-            }
-
+            _caches.TryGetValue(context, out stale);
             _caches.Remove(context);
-            var fresh = new RepoCache { Query = query };
+            fresh = new RepoCache { Query = query };
             _caches.Add(context, fresh);
-            return fresh;
         }
+
+        // A forced reset (stale fingerprint) discards a cache that may have a background
+        // spill task and an open on-disk store still live — tear those down explicitly, the
+        // same as DropCache, or the old task keeps writing to a now-orphaned RepoCache and its
+        // DiskCommitStore file handle never closes.
+        if (stale is not null)
+            TearDown(stale);
+        return fresh;
     }
 
     /// <summary>True when two queries walk the same history — every knob that changes the tip
@@ -45,9 +43,7 @@ public sealed partial class GraphLayoutService
         if (cache.Exhausted || cache.WalkHalted || TotalWalked(cache) >= wantCount)
             return;
 
-        DecoCache? deco;
-        lock (_sync)
-            _decoByPath.TryGetValue(context.RepositoryPath, out deco);
+        var deco = GetDecoCache(context.RepositoryPath);
 
         Diagnostics.PerfLog.Mark($"EnsureWalked need {wantCount}, have {TotalWalked(cache)}, decoFp={deco?.Fingerprint ?? 0}");
         var repoPath = context.RepositoryPath;
@@ -136,8 +132,8 @@ public sealed partial class GraphLayoutService
         // Step 2 — off the gate: prime or resume the walk.
         WalkResult walked = prep.Kind switch
         {
-            GatePrepKind.PrimeCli => await PrimeCliWalkAsync(context, cache, query, prep, allowPrefix: !background, ct).ConfigureAwait(false),
-            GatePrepKind.ResumeCli => await ResumeCliWalkAsync(context, cache, prep, ct).ConfigureAwait(false),
+            GatePrepKind.PrimeCli => await PrimeCliWalkAsync(context, cache, query, prep, allowPrefix: !background, background, ct).ConfigureAwait(false),
+            GatePrepKind.ResumeCli => await ResumeCliWalkAsync(context, cache, prep, background, ct).ConfigureAwait(false),
             _ => prep.Result,
         };
 
@@ -173,14 +169,7 @@ public sealed partial class GraphLayoutService
         }
 
         if (walked.DecosFresh && walked.Fingerprint != 0)
-        {
-            lock (_sync)
-            {
-                if (_decoByPath.Count >= DecoCacheCap && !_decoByPath.ContainsKey(repoPath))
-                    _decoByPath.Remove(_decoByPath.Keys.First());
-                _decoByPath[repoPath] = new DecoCache(walked.Fingerprint, walked.Decorations);
-            }
-        }
+            StoreDecoCache(repoPath, walked.Fingerprint, walked.Decorations);
 
         // Persist a freshly-walked window for the next launch (best-effort, off the gate). Only
         // the bounded foreground walks do this — a background spill chunk's rows already reach
@@ -419,9 +408,12 @@ public sealed partial class GraphLayoutService
     /// the lock next already sees it. The result carries none for the caller to merge.</para>
     /// <para>A foreground first prime may paint from a proven prefix instead
     /// (<see cref="TryPrefixPrime"/>), leaving no live walk; the next prime is then the full
-    /// walk, skipping and checking the proven rows.</para></summary>
+    /// walk, skipping and checking the proven rows.</para>
+    /// <para>The git process starts on a pool thread and runs at below-normal priority while
+    /// <paramref name="background"/> is true.</para></summary>
     private async Task<WalkResult> PrimeCliWalkAsync(
-        RepositoryContext context, RepoCache cache, GraphQuery query, GatePrep prep, bool allowPrefix, CancellationToken ct)
+        RepositoryContext context, RepoCache cache, GraphQuery query, GatePrep prep, bool allowPrefix, bool background,
+        CancellationToken ct)
     {
         await cache.WalkLock.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -443,8 +435,8 @@ public sealed partial class GraphLayoutService
                 return new WalkResult([], prep.Decorations, Exhausted: false, prep.Fingerprint, prep.DecosFresh,
                     WalkKey: prep.WalkKey, CarriesRefState: false);
 
-            var stream = GitLogStream.TryStart(
-                _locator, context.RepositoryPath, prep.Tips!, context.ActiveProfile, query.PathFilter);
+            var stream = await Task.Run(() => GitLogStream.TryStart(
+                _locator, context.RepositoryPath, prep.Tips!, context.ActiveProfile, query.PathFilter)).ConfigureAwait(false);
 
             if (stream is null)
             {
@@ -464,6 +456,7 @@ public sealed partial class GraphLayoutService
             // prep.Have rows may already be resident from a partial on-disk cache (a
             // non-exhausted .gz or .meta store), so the fresh walk re-skips them or its rows
             // [0, need) would land duplicated after the cached ones.
+            stream.SetLowPriority(background);
             var exhausted = PumpCommits(stream, delta, skip: prep.Have, want: need, cache, ct);
 
             if (cache.PrefixRejected)
@@ -515,9 +508,10 @@ public sealed partial class GraphLayoutService
 
     /// <summary>Resumes an already-primed <see cref="GitLogStream"/>, so a
     /// scroll Extend or the background spill's next chunk never queues behind status/diff
-    /// work on this repo.</summary>
+    /// work on this repo. The live walk may serve a foreground pull after a background one, so its
+    /// process priority is set on every pull from <paramref name="background"/>.</summary>
     private static async Task<WalkResult> ResumeCliWalkAsync(
-        RepositoryContext context, RepoCache cache, GatePrep prep, CancellationToken ct)
+        RepositoryContext context, RepoCache cache, GatePrep prep, bool background, CancellationToken ct)
     {
         await cache.WalkLock.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -549,6 +543,8 @@ public sealed partial class GraphLayoutService
             // stream discards them. The reorder pass clears cache.Commits per batch, so its `have`
             // is 0 and nothing is skipped there.
             var delta = new List<RawCommit>(Math.Min(need, 8192));
+            if (live is GitLogStream liveStream)
+                liveStream.SetLowPriority(background);
             var exhausted = PumpCommits(live, delta, skip: have, want: need, cache, ct);
             if (cache.PrefixRejected)
             {
@@ -709,9 +705,10 @@ public sealed partial class GraphLayoutService
         var sw = Stopwatch.StartNew();
         void Report(PrefixWalkOutcome outcome)
         {
-            Diagnostics.PerfLog.Mark(outcome.Proven
-                ? $"graph prefix walk: {outcome.RecentTips} of {outcome.TotalTips} tips, proof ok, {outcome.Rows} rows in {sw.Elapsed.TotalMilliseconds:F0} ms"
-                : $"graph prefix walk: {outcome.RecentTips} of {outcome.TotalTips} tips, full walk instead ({outcome.FallbackReason}) after {sw.Elapsed.TotalMilliseconds:F0} ms");
+            if (outcome.Proven)
+                Diagnostics.PerfLog.Mark($"graph prefix walk: {outcome.RecentTips} of {outcome.TotalTips} tips, proof ok, {outcome.Rows} rows in {sw.Elapsed.TotalMilliseconds:F0} ms");
+            else
+                Diagnostics.PerfLog.Mark($"graph prefix walk: {outcome.RecentTips} of {outcome.TotalTips} tips, full walk instead ({outcome.FallbackReason}) after {sw.Elapsed.TotalMilliseconds:F0} ms");
             TestPrefixWalkObserved?.Invoke(outcome);
         }
 

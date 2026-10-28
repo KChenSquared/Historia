@@ -27,7 +27,8 @@ public sealed class StashService(IGitCliService cli) : IStashService
         }
 
         // No wall clock: hooks and large tree updates run long, and a kill midway leaves a
-        // half-updated tree and a stale index.lock. The caller's token still cancels it.
+        // half-updated tree and a stale index.lock.
+        // Cancelling stops it only before git starts; once running it is never killed.
         var result = await context.WithWriteLockAsync(innerCt => cli.RunAsync(new GitCliRequest
         {
             Arguments = args,

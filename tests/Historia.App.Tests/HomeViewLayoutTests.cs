@@ -241,4 +241,25 @@ public sealed class HomeViewLayoutTests
             TestScratch.Delete(repoPath);
         }
     }
+
+    [AvaloniaFact]
+    public async Task LogoMark_IsTheSameBitmapAcrossHomeNavigations()
+    {
+        var (first, firstServices) = await CreateAsync();
+        var (second, secondServices) = await CreateAsync();
+        try
+        {
+            var firstSource = Assert.IsAssignableFrom<Avalonia.Media.Imaging.Bitmap>(first.MarkImage.Source);
+            var secondSource = Assert.IsAssignableFrom<Avalonia.Media.Imaging.Bitmap>(second.MarkImage.Source);
+
+            Assert.Same(firstSource, secondSource);
+        }
+        finally
+        {
+            first.Dispose();
+            second.Dispose();
+            await firstServices.DisposeAsync();
+            await secondServices.DisposeAsync();
+        }
+    }
 }

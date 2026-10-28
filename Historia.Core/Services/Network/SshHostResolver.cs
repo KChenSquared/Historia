@@ -12,8 +12,9 @@ public interface ISshHostResolver
 /// <summary>
 /// Runs <c>ssh -G &lt;host&gt;</c>, which prints the configuration after evaluating
 /// <c>Host</c> and <c>Match</c> blocks and exits without connecting, and reads its
-/// <c>hostname</c> line. Results are cached per host for the session. Any failure — no
-/// <c>ssh</c> on PATH, a non-zero exit, a config it cannot parse, the timeout — yields null.
+/// <c>hostname</c> line. Definite results are cached per host for the session; a lookup that
+/// timed out is not, so the next call asks again. Any failure — no <c>ssh</c> on PATH, a
+/// non-zero exit, a config it cannot parse, the timeout — yields null.
 /// </summary>
 public sealed class SshHostResolver : ISshHostResolver
 {
@@ -21,17 +22,30 @@ public sealed class SshHostResolver : ISshHostResolver
 
     private static readonly TimeSpan ResolveTimeout = TimeSpan.FromSeconds(5);
 
+    /// <summary>The outcome of one lookup: <see cref="Definite"/> is false when the answer is
+    /// only "unknown for now" (the lookup timed out), which must not be remembered.</summary>
+    internal readonly record struct Lookup(string? HostName, bool Definite);
+
     private readonly string? _configPath;
+    private readonly Func<string, CancellationToken, Task<Lookup>> _lookup;
     private readonly ConcurrentDictionary<string, string?> _cache = new(StringComparer.OrdinalIgnoreCase);
     private int _processLaunches;
 
     public SshHostResolver()
     {
+        _lookup = RunSshAsync;
     }
 
     /// <summary>Reads <paramref name="configPath"/> (<c>ssh -F</c>) instead of the user's and
     /// the system's config files.</summary>
-    internal SshHostResolver(string configPath) => _configPath = configPath;
+    internal SshHostResolver(string configPath)
+    {
+        _configPath = configPath;
+        _lookup = RunSshAsync;
+    }
+
+    /// <summary>Resolves through <paramref name="lookup"/> instead of running <c>ssh</c>.</summary>
+    internal SshHostResolver(Func<string, CancellationToken, Task<Lookup>> lookup) => _lookup = lookup;
 
     internal int ProcessLaunches => Volatile.Read(ref _processLaunches);
 
@@ -64,18 +78,19 @@ public sealed class SshHostResolver : ISshHostResolver
         if (_cache.TryGetValue(host, out var cached))
             return cached;
 
-        var resolved = await RunSshAsync(host, ct).ConfigureAwait(false);
-        _cache[host] = resolved;
-        return resolved;
+        var lookup = await _lookup(host, ct).ConfigureAwait(false);
+        if (lookup.Definite)
+            _cache[host] = lookup.HostName;
+        return lookup.HostName;
     }
 
-    private async Task<string?> RunSshAsync(string host, CancellationToken ct)
+    private async Task<Lookup> RunSshAsync(string host, CancellationToken ct)
     {
         var ssh = FindSshOnPath();
         if (ssh is null)
         {
             AppLog.Write(AppLogLevel.Info, "network", $"ssh -G {host}: no ssh on PATH");
-            return null;
+            return new Lookup(null, true);
         }
 
         var psi = new ProcessStartInfo(ssh)
@@ -107,7 +122,7 @@ public sealed class SshHostResolver : ISshHostResolver
         catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
         {
             AppLog.Write(AppLogLevel.Info, "network", $"ssh -G {host}: could not start {ssh}: {ex.Message}");
-            return null;
+            return new Lookup(null, true);
         }
 
         Interlocked.Increment(ref _processLaunches);
@@ -116,30 +131,39 @@ public sealed class SshHostResolver : ISshHostResolver
             try
             {
                 process.StandardInput.Close();
-                var stdout = process.StandardOutput.ReadToEndAsync(timeout.Token);
-                var stderr = process.StandardError.ReadToEndAsync(timeout.Token);
-                await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
+                // Dedicated threads: the pipes are read synchronously, so no thread-pool thread is
+                // parked on them while ssh runs.
+                var stdout = ReadToEndOnDedicatedThread(process.StandardOutput);
+                var stderr = ReadToEndOnDedicatedThread(process.StandardError);
                 await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+                await Task.WhenAll(stdout, stderr).WaitAsync(timeout.Token).ConfigureAwait(false);
 
                 if (process.ExitCode != 0)
                 {
                     AppLog.Write(AppLogLevel.Info, "network", $"ssh -G {host} via {ssh}: exit {process.ExitCode}");
-                    return null;
+                    return new Lookup(null, true);
                 }
 
                 var hostName = ParseHostName(stdout.Result);
                 AppLog.Write(AppLogLevel.Info, "network", $"ssh -G {host} via {ssh}: hostname {hostName ?? "(none)"}");
-                return hostName;
+                return new Lookup(hostName, true);
             }
             catch (OperationCanceledException)
             {
                 TryKill(process);
                 ct.ThrowIfCancellationRequested();
                 AppLog.Write(AppLogLevel.Info, "network", $"ssh -G {host} via {ssh}: timed out");
-                return null;
+                return new Lookup(null, false);
             }
         }
     }
+
+    private static Task<string> ReadToEndOnDedicatedThread(StreamReader reader)
+        => Task.Factory.StartNew(() =>
+        {
+            try { return reader.ReadToEnd(); }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException) { return ""; } // killed mid-read
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
     internal static string? ParseHostName(string output)
     {

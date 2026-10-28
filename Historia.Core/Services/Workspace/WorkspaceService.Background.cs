@@ -32,6 +32,19 @@ public sealed partial class WorkspaceService
     /// <inheritdoc/>
     public Task RequestBackgroundRefreshAsync(RepositoryContext context, bool full = false, CancellationToken ct = default)
     {
+        bool isFocused;
+        lock (_sync)
+            isFocused = ReferenceEquals(_focused, context);
+
+        return isFocused
+            ? RequestPacedRefreshAsync(context, full, ct)
+            : RequestRefreshAsync(context, full, ct);
+    }
+
+    /// <summary>Runs the refresh now: at once for the focused tab, through the background queue for
+    /// every other one. No pacing — <see cref="RequestPacedRefreshAsync"/> decides when to call it.</summary>
+    private Task RequestRefreshAsync(RepositoryContext context, bool full, CancellationToken ct)
+    {
         Task? taskToAwait = null;
         bool startPump = false;
         bool isFocused;
@@ -81,7 +94,7 @@ public sealed partial class WorkspaceService
         // run synchronously up to their first await, and _sync must be held only across queue
         // mutation.
         if (isFocused)
-            return RefreshFocusedAsync(context, full, focus, ct);
+            return FocusedRefreshForTesting?.Invoke(context, full) ?? RefreshFocusedAsync(context, full, focus, ct);
 
         return TaskGate.WaitWithCancellationAsync(taskToAwait!, ct);
     }
@@ -123,7 +136,238 @@ public sealed partial class WorkspaceService
             }
         }
 
-        await RequestBackgroundRefreshAsync(context, full, ct).ConfigureAwait(false);
+        await RequestRefreshAsync(context, full, ct).ConfigureAwait(false);
+    }
+
+    // Watcher-driven refreshes of the focused tab follow the cost of status: the next one starts no
+    // sooner than twice the last status duration (at least a second, three while the window is
+    // inactive) after the previous one ended. A request that comes sooner, or while one runs,
+    // joins a single trailing refresh armed for that moment.
+    private static readonly TimeSpan ActivePaceFloor = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan InactivePaceFloor = TimeSpan.FromSeconds(3);
+    private const double PaceStatusCostFactor = 2;
+
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<RepositoryContext, RefreshPacing> _pacing = new();
+    private int _appActive = 1;
+
+    /// <summary>The pacing clock; tests substitute a manual one.</summary>
+    internal TimeProvider TimeSource { get; set; } = TimeProvider.System;
+
+    /// <summary>Test seam: the last status duration pacing reads, instead of the tab's own.</summary>
+    internal Func<RepositoryContext, TimeSpan>? StatusDurationForTesting { get; set; }
+
+    /// <summary>Test seam: replaces the focused tab's refresh, so tests count refreshes without
+    /// running git.</summary>
+    internal Func<RepositoryContext, bool, Task>? FocusedRefreshForTesting { get; set; }
+
+    /// <summary>Test seam: whether a paced refresh of <paramref name="context"/> is in flight.</summary>
+    internal bool IsPacedRefreshRunningForTesting(RepositoryContext context)
+    {
+        if (!_pacing.TryGetValue(context, out var pacing))
+            return false;
+        lock (pacing)
+            return pacing.Running;
+    }
+
+    /// <summary>One tab's pacing state; every field is guarded by the instance's own lock.</summary>
+    private sealed class RefreshPacing
+    {
+        public bool Running;
+        public bool HasEnded;
+        public long EndedAt;
+        public PendingRefresh? Pending;
+        public ITimer? Timer;
+    }
+
+    private sealed class PendingRefresh
+    {
+        public bool Full;
+        public TaskCompletionSource Done { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    /// <inheritdoc/>
+    public bool IsAppActive => Volatile.Read(ref _appActive) != 0;
+
+    /// <inheritdoc/>
+    public void SetAppActive(bool active)
+    {
+        bool collect = false;
+        lock (_idleGcSync)
+        {
+            Volatile.Write(ref _appActive, active ? 1 : 0);
+            if (!active && _idleGcPending)
+            {
+                _idleGcPending = false;
+                collect = true;
+            }
+        }
+
+        if (active)
+            _ = Task.Run(RefreshFocusedOnActivationAsync);
+        if (collect)
+            IdleCollectTask = Task.Run(CollectGarbageNow);
+    }
+
+    /// <summary>The focused tab's status right away, ignoring pacing — and a full refresh when its
+    /// watcher is degraded, since that watcher misses file events and activation is when it catches
+    /// up. A tab still loading is skipped: its own first status follows the load.</summary>
+    private async Task RefreshFocusedOnActivationAsync()
+    {
+        var focused = Focused;
+        if (focused is null || !focused.FirstFullLoad.IsCompleted)
+            return;
+
+        try
+        {
+            await RefreshUnpacedAsync(focused, focused.Watcher.IsDegraded, focused.Lifetime).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Tab closed.
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write(AppLogLevel.Warn, "workspace", $"Failed to refresh on activation: {focused.DisplayName}", ex);
+        }
+    }
+
+    private TimeSpan PaceInterval(RepositoryContext context)
+    {
+        var floor = IsAppActive ? ActivePaceFloor : InactivePaceFloor;
+        var cost = StatusDurationForTesting?.Invoke(context) ?? context.State.LastStatusDuration;
+        var scaled = cost * PaceStatusCostFactor;
+        return scaled > floor ? scaled : floor;
+    }
+
+    private Task RequestPacedRefreshAsync(RepositoryContext context, bool full, CancellationToken ct)
+    {
+        var pacing = _pacing.GetValue(context, static _ => new RefreshPacing());
+        var interval = PaceInterval(context);
+        Task? wait = null;
+        PendingRefresh? claimed = null;
+        lock (pacing)
+        {
+            var sinceEnd = pacing.HasEnded ? TimeSource.GetElapsedTime(pacing.EndedAt) : TimeSpan.MaxValue;
+            if (pacing.Running || sinceEnd < interval)
+            {
+                var pending = pacing.Pending ??= new PendingRefresh();
+                pending.Full |= full;
+                wait = pending.Done.Task;
+                if (!pacing.Running && pacing.Timer is null)
+                    ArmTrailingRefreshLocked(pacing, context, interval - sinceEnd);
+            }
+            else
+            {
+                pacing.Running = true;
+                claimed = pacing.Pending;
+                pacing.Pending = null;
+                pacing.Timer?.Dispose();
+                pacing.Timer = null;
+            }
+        }
+
+        if (wait is not null)
+            return TaskGate.WaitWithCancellationAsync(wait, ct);
+
+        return RunPacedAsync(pacing, context, full || claimed?.Full == true, claimed, ct);
+    }
+
+    /// <summary>Runs a refresh the caller marked as running; completes <paramref name="satisfies"/>
+    /// (the waiters it replaces) with the outcome and opens the next pacing window when it ends.</summary>
+    private async Task RunPacedAsync(RefreshPacing pacing, RepositoryContext context, bool full,
+        PendingRefresh? satisfies, CancellationToken ct)
+    {
+        try
+        {
+            await RequestRefreshAsync(context, full, ct).ConfigureAwait(false);
+            satisfies?.Done.TrySetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            satisfies?.Done.TrySetCanceled();
+            throw;
+        }
+        catch (Exception ex)
+        {
+            satisfies?.Done.TrySetException(ex);
+            throw;
+        }
+        finally
+        {
+            var interval = PaceInterval(context);
+            lock (pacing)
+            {
+                pacing.Running = false;
+                pacing.HasEnded = true;
+                pacing.EndedAt = TimeSource.GetTimestamp();
+                if (pacing.Pending is not null && pacing.Timer is null)
+                    ArmTrailingRefreshLocked(pacing, context, interval);
+            }
+        }
+    }
+
+    /// <summary>Caller holds the pacing lock. The callback gets its own timer as state and acts only
+    /// while that timer is still the pacing one, so a late callback of a timer already replaced or
+    /// cancelled cannot dispose its successor.</summary>
+    private void ArmTrailingRefreshLocked(RefreshPacing pacing, RepositoryContext context, TimeSpan delay)
+    {
+        var slot = new TimerSlot();
+        slot.Timer = TimeSource.CreateTimer(state => OnTrailingRefreshDue(pacing, context, (TimerSlot)state!), slot, delay, Timeout.InfiniteTimeSpan);
+        pacing.Timer = slot.Timer;
+    }
+
+    private sealed class TimerSlot
+    {
+        public ITimer? Timer;
+    }
+
+    private void OnTrailingRefreshDue(RefreshPacing pacing, RepositoryContext context, TimerSlot self)
+    {
+        PendingRefresh pending;
+        lock (pacing)
+        {
+            if (!ReferenceEquals(pacing.Timer, self.Timer))
+                return;
+            pacing.Timer?.Dispose();
+            pacing.Timer = null;
+            if (pacing.Pending is not { } due || pacing.Running)
+                return; // a running refresh arms the next trailing one when it ends
+            pending = due;
+            pacing.Pending = null;
+            pacing.Running = true;
+        }
+
+        _ = RunTrailingAsync(pacing, context, pending);
+    }
+
+    private async Task RunTrailingAsync(RefreshPacing pacing, RepositoryContext context, PendingRefresh pending)
+    {
+        try
+        {
+            await RunPacedAsync(pacing, context, pending.Full, pending, context.Lifetime).ConfigureAwait(false);
+        }
+        catch
+        {
+            // The requests waiting on this refresh hold its outcome.
+        }
+    }
+
+    /// <summary>A refresh that is not paced (activation); it still opens the next pacing window.</summary>
+    private async Task RefreshUnpacedAsync(RepositoryContext context, bool full, CancellationToken ct)
+    {
+        var pacing = _pacing.GetValue(context, static _ => new RefreshPacing());
+        try
+        {
+            await RequestRefreshAsync(context, full, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (pacing)
+            {
+                pacing.HasEnded = true;
+                pacing.EndedAt = TimeSource.GetTimestamp();
+            }
+        }
     }
 
     /// <summary>Initialises and refreshes the queued background tabs one at a time in app-band tab order,
@@ -328,28 +572,76 @@ public sealed partial class WorkspaceService
             _ = QueueInitialInactiveTabPipelineAsync(context);
     }
 
-    // An aggressive, blocking, compacting GC.Collect after every tab switch pays a
-    // full-heap pause and (LargeObjectHeapCompactionMode.CompactOnce) a LOH compaction even when
-    // the outgoing tab held only a few MB, and Aggressive also decommits, so the next tab pays to
-    // re-commit. Only worth it once the heap has actually grown enough to matter.
+    // Trap: an aggressive, blocking, compacting GC.Collect after every tab switch paid a full-heap
+    // pause and a large-object-heap compaction even when the outgoing tab held only a few MB, and
+    // Aggressive also decommits, so the next tab paid to re-commit. The collection is a
+    // non-blocking request, made only once the heap has grown enough to matter and only while the
+    // window is inactive, so it never lands while the user is interacting.
     private const long CompactHeapThresholdBytes = 1L * 1024 * 1024 * 1024; // 1 GiB
     private const long CompactLohThresholdBytes = 256L * 1024 * 1024; // 256 MiB
 
+    private readonly object _idleGcSync = new();
+    private bool _idleGcPending;
+
+    /// <summary>The collection the idle reclaim requests; tests substitute a recording one so no
+    /// real collection runs.</summary>
+    internal Action<int, GCCollectionMode, bool> CollectGarbage { get; set; } = GC.Collect;
+
+    /// <summary>Test seam: the collection started by the last deactivation that found a request
+    /// pending.</summary>
+    internal Task IdleCollectTask { get; private set; } = Task.CompletedTask;
+
     /// <summary>Whether the managed heap (or the large-object heap alone) is big
-    /// enough to justify the blocking, compacting GC in <see cref="HibernateAndReclaimAsync"/>.
-    /// A small heap gains nothing from the pause and just pays the decommit-then-recommit cost on
+    /// enough to justify the full collection requested by <see cref="ReclaimIfHeapGrown"/>.
+    /// A small heap gains nothing from it and just pays the decommit-then-recommit cost on
     /// the next tab switch.</summary>
     internal static bool ShouldCompactAfterHibernate(long heapBytes, long lohBytes) =>
         heapBytes >= CompactHeapThresholdBytes || lohBytes >= CompactLohThresholdBytes;
+
+    /// <summary>Requests the idle collection when the heap is big enough. While the window is
+    /// active the request is only recorded (one at most) and runs when the window next becomes
+    /// inactive; a reactivation before then leaves it pending. While inactive it runs now.</summary>
+    internal void ReclaimIfHeapGrown(long heapBytes, long lohBytes)
+    {
+        static long Mb(long bytes) => bytes / (1024 * 1024);
+        if (!ShouldCompactAfterHibernate(heapBytes, lohBytes))
+        {
+            Historia.Diagnostics.PerfLog.Mark(
+                $"tab-switch GC skipped (heap={Mb(heapBytes)}MB, loh={Mb(lohBytes)}MB)");
+            return;
+        }
+
+        bool collectNow;
+        lock (_idleGcSync)
+        {
+            collectNow = !IsAppActive;
+            _idleGcPending = !collectNow;
+        }
+
+        if (collectNow)
+            CollectGarbageNow();
+        else
+            Historia.Diagnostics.PerfLog.Mark(
+                $"tab-switch GC deferred until inactive (heap={Mb(heapBytes)}MB, loh={Mb(lohBytes)}MB)");
+    }
+
+    /// <summary>A full, non-blocking collection in <see cref="GCCollectionMode.Optimized"/> mode:
+    /// the runtime requests a background collection and decides whether the moment is right, so
+    /// this never forces a compacting pause.</summary>
+    private void CollectGarbageNow()
+    {
+        Historia.Diagnostics.PerfLog.Memory("before tab-switch GC");
+        CollectGarbage(GC.MaxGeneration, GCCollectionMode.Optimized, false);
+        Historia.Diagnostics.PerfLog.Memory("after tab-switch GC request");
+    }
 
     /// <summary>Releases everything the outgoing tab's graph held in memory (cancels its
     /// background spill, disposes its live walk, drops its resident commit list). Once
     /// the newly focused tab's background-write gate opens (so the pause never lands inside its
     /// own first paint) and focus has been stable for 2s (so a burst of switches triggers one
-    /// collection, not several), runs a compacting GC to actually shrink the working set — below
-    /// ~90% memory load the GC prefers background collections that free live objects without
-    /// returning the heap size to the OS. Skipped when neither the managed heap nor
-    /// the LOH has grown past its threshold — see <see cref="ShouldCompactAfterHibernate"/>.</summary>
+    /// collection, not several), requests an idle collection to shrink the working set — see
+    /// <see cref="ReclaimIfHeapGrown"/>, which skips it unless the managed heap or the LOH has
+    /// grown past its threshold.</summary>
     private async Task HibernateAndReclaimAsync(RepositoryContext old, RepositoryContext newContext)
     {
         if (_services.GetService(typeof(Historia.Services.Graph.IGraphLayoutService))
@@ -374,31 +666,14 @@ public sealed partial class WorkspaceService
                 return; // focus moved again right at the debounce boundary
         }
 
-        // Gate the blocking, compacting collection on actual heap growth. Verified
-        // against this repo's own PerfLog.Memory (Historia.Core/Diagnostics/PerfLog.cs): .NET's
-        // GCMemoryInfo.GenerationInfo is a GCGenerationInfo[] indexed by generation, where index 3
-        // is the large object heap (index 4 is the pinned object heap; absent on runtimes too old
-        // to report it, hence the length check) and HeapSizeBytes is the managed heap's total size
-        // as of the end of the last GC.
+        // Gate the collection on actual heap growth. .NET's GCMemoryInfo.GenerationInfo is a
+        // GCGenerationInfo[] indexed by generation, where index 3 is the large object heap (index 4
+        // is the pinned object heap; absent on runtimes too old to report it, hence the length
+        // check) and HeapSizeBytes is the managed heap's total size as of the end of the last GC.
         var info = GC.GetGCMemoryInfo();
         var gen = info.GenerationInfo;
         var lohBytes = gen.Length > 3 ? gen[3].SizeAfterBytes : 0L;
-        if (!ShouldCompactAfterHibernate(info.HeapSizeBytes, lohBytes))
-        {
-            static long Mb(long bytes) => bytes / (1024 * 1024);
-            Historia.Diagnostics.PerfLog.Mark(
-                $"tab-switch GC compaction skipped (heap={Mb(info.HeapSizeBytes)}MB, loh={Mb(lohBytes)}MB)");
-        }
-        else
-        {
-            Historia.Diagnostics.PerfLog.Memory("before tab-switch GC compaction");
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true, compacting: true);
-            sw.Stop();
-            Historia.Diagnostics.PerfLog.Memory("after tab-switch GC compaction");
-            Historia.Diagnostics.PerfLog.Mark($"tab-switch GC compaction: {sw.Elapsed.TotalMilliseconds:F1}ms");
-        }
+        ReclaimIfHeapGrown(info.HeapSizeBytes, lohBytes);
 
         // Once the active tab is settled (gate open, focus stable, its own reclaim done),
         // queue every OTHER open tab for the headless commit-graph + disk-cache pipeline.

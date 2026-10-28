@@ -45,9 +45,14 @@ public static class DefaultProfileFlow
     {
         var recents = sp.GetRequiredService<IRecentRepositoryService>();
         var identity = sp.GetRequiredService<IRepoIdentityService>();
-        foreach (var entry in recents.Items)
+        // One concurrent, timeout-guarded check per entry; a folder that is missing or does not
+        // answer is skipped.
+        var entries = recents.Items;
+        var stale = await Task.WhenAll(entries.Select(e => recents.IsStaleAsync(e.Path)));
+        for (var i = 0; i < entries.Count; i++)
         {
-            if (entry.IsStale)
+            var entry = entries[i];
+            if (stale[i] is not false)
                 continue;
             try
             {

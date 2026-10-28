@@ -73,7 +73,9 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
     {
         await using var ctx = _host.Open(_repo.Path);
         var fakeWs = new FakeWorkspace();
-        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs);
+        // No operating-system watchers: the context's own git status rewrites .git/index, and that
+        // real event would race the injected one.
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs, watchFilesystem: false);
 
         var onRawEvent = typeof(Historia.Services.Watching.FileWatcherService)
             .GetMethod("OnRawEvent", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
@@ -87,6 +89,105 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
         Assert.False(fakeWs.LastFull);
     }
 
+    private static void RaiseRawEvent(Historia.Services.Watching.FileWatcherService watcher, string fullPath, bool isGitDir)
+        => typeof(Historia.Services.Watching.FileWatcherService)
+            .GetMethod("OnRawEvent", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .Invoke(watcher, [fullPath, isGitDir]);
+
+    [Fact]
+    public async Task An_index_change_publishes_a_status_refresh_and_no_full_refresh()
+    {
+        await using var ctx = _host.Open(_repo.Path);
+        var fakeWs = new FakeWorkspace();
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs, watchFilesystem: false);
+
+        RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "index"), isGitDir: true);
+        await WaitForRefreshesAsync(fakeWs, 1);
+        await Task.Delay(400);
+
+        Assert.Equal(1, fakeWs.RefreshCalls);
+        Assert.False(fakeWs.LastFull);
+    }
+
+    [Theory]
+    [InlineData("HEAD")]
+    [InlineData("ORIG_HEAD")]
+    [InlineData("packed-refs")]
+    [InlineData("config")]
+    [InlineData("MERGE_HEAD")]
+    [InlineData("rebase-merge/head-name")]
+    [InlineData("refs/heads/topic")]
+    public async Task Ref_and_sequencer_changes_in_the_git_directory_publish_a_full_refresh(string relPath)
+    {
+        await using var ctx = _host.Open(_repo.Path);
+        var fakeWs = new FakeWorkspace();
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs, watchFilesystem: false);
+
+        RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, relPath.Replace('/', Path.DirectorySeparatorChar)), isGitDir: true);
+        await WaitForRefreshesAsync(fakeWs, 1);
+
+        Assert.True(fakeWs.LastFull);
+    }
+
+    [Fact]
+    public async Task An_index_change_beside_a_ref_change_still_publishes_one_full_refresh()
+    {
+        await using var ctx = _host.Open(_repo.Path);
+        var fakeWs = new FakeWorkspace();
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs, watchFilesystem: false);
+
+        RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "index"), isGitDir: true);
+        RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "refs", "heads", "topic"), isGitDir: true);
+        await WaitForRefreshesAsync(fakeWs, 1);
+        await Task.Delay(400);
+
+        Assert.Equal(1, fakeWs.RefreshCalls);
+        Assert.True(fakeWs.LastFull);
+    }
+
+    [Fact]
+    public async Task The_index_lock_file_and_other_git_directory_noise_queue_nothing()
+    {
+        await using var ctx = _host.Open(_repo.Path);
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace(), watchFilesystem: false);
+
+        RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "index.lock"), isGitDir: true);
+        RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "sharedindex.abc"), isGitDir: true);
+        RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "logs", "HEAD"), isGitDir: true);
+        RaiseRawEvent(watcher, Path.Combine(_repo.Path, ".git", "objects", "ab", "cdef"), isGitDir: false);
+        RaiseRawEvent(watcher, Path.Combine(Path.GetDirectoryName(_repo.Path)!, "elsewhere", "file.txt"), isGitDir: false);
+
+        Assert.Equal(0, PendingPaths(watcher));
+    }
+
+    [Fact]
+    public async Task Build_output_beside_a_project_file_queues_nothing_for_any_separator()
+    {
+        Directory.CreateDirectory(Path.Combine(_repo.Path, "src", "App", "bin", "Debug"));
+        File.WriteAllText(Path.Combine(_repo.Path, "src", "App", "App.csproj"), "<Project />");
+        await using var ctx = _host.Open(_repo.Path);
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace(), watchFilesystem: false);
+
+        RaiseRawEvent(watcher, Path.Combine(_repo.Path, "src", "App", "bin", "Debug", "App.dll"), isGitDir: false);
+        RaiseRawEvent(watcher, Path.Combine(_repo.Path, "src", "App", "bin", "Debug", "App.dll"), isGitDir: false);
+        RaiseRawEvent(watcher, _repo.Path + "/src/App/obj/Debug/App.dll", isGitDir: false);
+
+        Assert.Equal(0, PendingPaths(watcher));
+    }
+
+    [Fact]
+    public async Task A_path_longer_than_the_stack_buffer_still_publishes_a_status_refresh()
+    {
+        await using var ctx = _host.Open(_repo.Path);
+        var fakeWs = new FakeWorkspace();
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs, watchFilesystem: false);
+
+        RaiseRawEvent(watcher, Path.Combine(_repo.Path, new string('a', 300), new string('b', 300) + ".txt"), isGitDir: false);
+        await WaitForRefreshesAsync(fakeWs, 1);
+
+        Assert.False(fakeWs.LastFull);
+    }
+
     private static int PendingPaths(Historia.Services.Watching.FileWatcherService watcher)
         => ((HashSet<string>)typeof(Historia.Services.Watching.FileWatcherService)
             .GetField("_pendingPaths", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
@@ -96,7 +197,7 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
     public async Task Ignored_and_uninteresting_git_paths_queue_no_refresh()
     {
         await using var ctx = _host.Open(_repo.Path);
-        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace());
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace(), watchFilesystem: false);
         var onRawEvent = typeof(Historia.Services.Watching.FileWatcherService)
             .GetMethod("OnRawEvent", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
 
@@ -155,6 +256,167 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
 
         await Task.Delay(250);
         Assert.Equal(0, fakeWs.RefreshCalls);
+    }
+
+    private static void RaiseWatcherError(Historia.Services.Watching.FileWatcherService watcher)
+    {
+        var onError = typeof(Historia.Services.Watching.FileWatcherService)
+            .GetMethod("OnWatcherError", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        onError.Invoke(watcher, [watcher, new ErrorEventArgs(new InternalBufferOverflowException("too many changes"))]);
+    }
+
+    [Fact]
+    public async Task A_burst_of_overflows_logs_one_warning_per_window_with_the_suppressed_count()
+    {
+        using var dir = new StateDir();
+        // Flow-local: the process-wide log would also capture every test running in parallel.
+        using var session = AppLog.StartSessionForTesting(dir.Path);
+        await using var ctx = _host.Open(_repo.Path);
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace());
+
+        watcher.OverflowLogWindow = TimeSpan.FromHours(1);
+        RaiseWatcherError(watcher);
+        RaiseWatcherError(watcher);
+        RaiseWatcherError(watcher);
+
+        watcher.OverflowLogWindow = TimeSpan.Zero;
+        RaiseWatcherError(watcher);
+
+        session.Dispose(); // close the session writer before reading the file back
+        var lines = File.ReadAllLines(session.SessionPath)
+            .Where(l => l.Contains("[watcher]") && l.Contains("overflowed"))
+            .ToList();
+
+        Assert.Equal(2, lines.Count);
+        Assert.Contains("WARN", lines[0]);
+        Assert.Contains("InternalBufferOverflowException", lines[0]);
+        Assert.DoesNotContain("not logged", lines[0]);
+        Assert.Contains("2 further overflow(s)", lines[1]);
+    }
+
+    [Fact]
+    public async Task Overflows_suppressed_after_the_last_logged_one_are_reported_on_dispose()
+    {
+        using var dir = new StateDir();
+        using var session = AppLog.StartSessionForTesting(dir.Path);
+        await using var ctx = _host.Open(_repo.Path);
+        var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace(), watchFilesystem: false);
+
+        watcher.OverflowLogWindow = TimeSpan.FromHours(1);
+        RaiseWatcherError(watcher);
+        RaiseWatcherError(watcher);
+        RaiseWatcherError(watcher);
+        await watcher.DisposeAsync();
+
+        session.Dispose();
+        var lines = File.ReadAllLines(session.SessionPath).Where(l => l.Contains("[watcher]")).ToList();
+
+        Assert.Single(lines, l => l.Contains("overflowed"));
+        var flushed = Assert.Single(lines, l => l.Contains("not logged"));
+        Assert.Contains("2 further overflow(s)", flushed);
+        Assert.Contains("WARN", flushed);
+    }
+
+    [Fact]
+    public async Task A_flush_that_fires_before_the_window_ends_is_retried_for_the_rest_of_it()
+    {
+        using var dir = new StateDir();
+        using var session = AppLog.StartSessionForTesting(dir.Path);
+        await using var ctx = _host.Open(_repo.Path);
+        var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace(), watchFilesystem: false);
+
+        // The flush timer is armed for the end of an hour-long window; shortening the window and
+        // firing the flush stands in for a timer that wakes a tick before its window ends.
+        watcher.OverflowLogWindow = TimeSpan.FromHours(1);
+        RaiseWatcherError(watcher);
+        RaiseWatcherError(watcher);
+        watcher.OverflowLogWindow = TimeSpan.FromMilliseconds(300);
+        typeof(Historia.Services.Watching.FileWatcherService)
+            .GetMethod("FlushSuppressedOverflows", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .Invoke(watcher, [false]);
+
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        var logged = false;
+        while (!logged && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(50);
+            session.Flush(TimeSpan.FromSeconds(1));
+            logged = File.Exists(session.SessionPath)
+                && ReadSharedText(session.SessionPath).Contains("1 further overflow(s)");
+        }
+
+        await watcher.DisposeAsync();
+        Assert.True(logged);
+    }
+
+    private static string ReadSharedText(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+
+    [Fact]
+    public async Task Entering_degraded_mode_logs_the_reason()
+    {
+        // Rewrite only the header's entry count: the watcher decides from the header alone.
+        var index = Path.Combine(_repo.Path, ".git", "index");
+        var bytes = File.ReadAllBytes(index);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(8, 4), 60_000);
+        File.WriteAllBytes(index, bytes);
+
+        using var dir = new StateDir();
+        using var session = AppLog.StartSessionForTesting(dir.Path);
+        await using var ctx = _host.Open(_repo.Path);
+
+        Assert.True(ctx.Watcher.IsDegraded);
+        session.Dispose();
+        var line = Assert.Single(File.ReadAllLines(session.SessionPath), l => l.Contains("[watcher]") && l.Contains("degraded"));
+        Assert.Contains("WARN", line);
+        Assert.Contains(ctx.Watcher.DegradedReason!, line);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Each_full_refresh_marks_its_trigger_in_the_perf_log()
+    {
+        // Flow-local: setting PerfLog.Enabled would turn on perf logging for every parallel test.
+        PerfLog.OverrideEnabledForTesting(true);
+        try
+        {
+            await using var ctx = _host.Open(_repo.Path);
+            var fakeWs = new FakeWorkspace();
+            // Built inside the override: the debounce timer's callback captures this flow.
+            // No operating-system watchers: real .git events would add refreshes of their own.
+            await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs, watchFilesystem: false);
+
+            PerfLog.Flush(TimeSpan.FromSeconds(10));
+            var startLineCount = File.Exists(PerfLog.LogPath) ? File.ReadAllLines(PerfLog.LogPath).Length : 0;
+
+            var onRawEvent = typeof(Historia.Services.Watching.FileWatcherService)
+                .GetMethod("OnRawEvent", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+            onRawEvent.Invoke(watcher, [Path.Combine(_repo.Path, ".git", "refs", "heads", "trigger-probe"), true]);
+            await WaitForRefreshesAsync(fakeWs, 1);
+
+            RaiseWatcherError(watcher);
+            await WaitForRefreshesAsync(fakeWs, 2);
+
+            Assert.True(PerfLog.Flush(TimeSpan.FromSeconds(10)));
+            var lines = File.ReadAllLines(PerfLog.LogPath).Skip(startLineCount).ToList();
+            Assert.Contains(lines, l => l.Contains("watcher full refresh") && l.Contains("trigger refs:refs/heads/trigger-probe"));
+            Assert.Contains(lines, l => l.Contains("watcher full refresh") && l.Contains("trigger overflow"));
+        }
+        finally
+        {
+            PerfLog.OverrideEnabledForTesting(null);
+        }
+    }
+
+    private static async Task WaitForRefreshesAsync(FakeWorkspace ws, int count)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while (ws.RefreshCalls < count && DateTime.UtcNow < deadline)
+            await Task.Delay(25);
+        Assert.True(ws.RefreshCalls >= count, $"expected {count} refreshes, saw {ws.RefreshCalls}");
     }
 
     private sealed class FakeWorkspace : IWorkspaceService

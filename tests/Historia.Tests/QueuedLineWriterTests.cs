@@ -1,6 +1,9 @@
 namespace Historia.Tests;
 
+/// <summary>Serial: the memory-retention checks read the process-wide GC total, which tests running
+/// alongside would inflate.</summary>
 [Trait("tier", "unit")]
+[Collection("serial")]
 public sealed class QueuedLineWriterTests : IDisposable
 {
     private readonly string _dir = TestScratch.NewDirectory("queued-writer-");
@@ -39,6 +42,23 @@ public sealed class QueuedLineWriterTests : IDisposable
             if (disposing) inner.Dispose();
             base.Dispose(disposing);
         }
+    }
+
+    /// <summary>Heap growth since <paramref name="before"/>, taking the lowest of a few forced-GC
+    /// readings. The heap is process-wide, so tests running in parallel add transient garbage and
+    /// live data of their own; a queue that really retains the backlog stays above the limit in
+    /// every reading, noise does not.</summary>
+    private static long LowestRetained(long before, long limit)
+    {
+        var lowest = long.MaxValue;
+        for (var attempt = 0; attempt < 30 && lowest >= limit; attempt++)
+        {
+            if (attempt > 0)
+                Thread.Sleep(200);
+            lowest = Math.Min(lowest, GC.GetTotalMemory(forceFullCollection: true) - before);
+        }
+
+        return lowest;
     }
 
     internal static Stream Append(string path) => new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
@@ -129,6 +149,169 @@ public sealed class QueuedLineWriterTests : IDisposable
         Assert.Contains(lines, l => l.Contains("15 log lines dropped"));
         Assert.Contains("queued 9", lines);
         Assert.DoesNotContain("queued 10", lines);
+    }
+
+    [Fact]
+    public void A_line_over_the_cap_is_written_cut_with_a_marker_saying_how_much_was_left_out()
+    {
+        var path = Path.Combine(_dir, "long.log");
+        using var writer = QueuedLineWriter.OpenPerBatch("test-writer");
+        writer.Enqueue(path, new string('a', 20_000));
+        writer.Enqueue(path, "short");
+        Assert.True(writer.Flush(TimeSpan.FromSeconds(10)));
+
+        var lines = ReadShared(path);
+        Assert.Equal(2, lines.Length);
+        Assert.Equal(new string('a', QueuedLineWriter.MaxLineChars) + "… [4000 more characters not logged]", lines[0]);
+        Assert.Equal("short", lines[1]);
+    }
+
+    [Fact]
+    public void A_line_exactly_at_the_cap_is_written_whole()
+    {
+        var path = Path.Combine(_dir, "exact.log");
+        using var writer = QueuedLineWriter.OpenPerBatch("test-writer");
+        writer.Enqueue(path, new string('b', QueuedLineWriter.MaxLineChars));
+        Assert.True(writer.Flush(TimeSpan.FromSeconds(10)));
+
+        Assert.Equal([new string('b', QueuedLineWriter.MaxLineChars)], ReadShared(path));
+    }
+
+    [Fact]
+    public void A_cut_never_leaves_half_a_surrogate_pair()
+    {
+        var path = Path.Combine(_dir, "surrogate.log");
+        // The emoji's high surrogate is the last character that would be kept.
+        var line = new string('a', QueuedLineWriter.MaxLineChars - 1) + "\U0001F600" + new string('b', 100);
+        using var writer = QueuedLineWriter.OpenPerBatch("test-writer");
+        writer.Enqueue(path, line);
+        Assert.True(writer.Flush(TimeSpan.FromSeconds(10)));
+
+        var written = Assert.Single(ReadShared(path));
+        Assert.DoesNotContain('\uFFFD', written);
+        Assert.Equal(new string('a', QueuedLineWriter.MaxLineChars - 1) + $"… [{line.Length - (QueuedLineWriter.MaxLineChars - 1)} more characters not logged]", written);
+    }
+
+    [Fact]
+    public void A_stalled_disk_does_not_let_huge_lines_pile_up_in_memory()
+    {
+        var path = Path.Combine(_dir, "memory.log");
+        using var release = new ManualResetEventSlim();
+        using var entered = new ManualResetEventSlim();
+        var writer = QueuedLineWriter.OpenPerBatch("test-writer",
+            p => new StallingStream(Append(p), release, entered));
+        try
+        {
+            writer.Enqueue(path, "first");
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(10)), "the writer thread never reached the sink");
+
+            var before = GC.GetTotalMemory(forceFullCollection: true);
+            // Each line is a fresh megacharacter string: kept whole, 100 of them would hold 200 MB.
+            for (var i = 0; i < 100; i++)
+                writer.Enqueue(path, new string('x', 1_000_000));
+            var retained = LowestRetained(before, 40L * 1024 * 1024);
+
+            Assert.True(retained < 40L * 1024 * 1024, $"the queue retained {retained / (1024 * 1024)} MB behind a stalled write");
+        }
+        finally
+        {
+            release.Set();
+            writer.Dispose();
+        }
+
+        var lines = ReadShared(path);
+        Assert.Equal(101, lines.Length);
+        Assert.All(lines.Skip(1), l => Assert.Equal(QueuedLineWriter.MaxLineChars + "… [984000 more characters not logged]".Length, l.Length));
+    }
+
+    [Fact]
+    public void A_stalled_disk_does_not_let_many_line_cap_sized_lines_pile_up_in_memory()
+    {
+        var path = Path.Combine(_dir, "memory-chars.log");
+        using var release = new ManualResetEventSlim();
+        using var entered = new ManualResetEventSlim();
+        var writer = QueuedLineWriter.OpenPerBatch("test-writer",
+            p => new StallingStream(Append(p), release, entered));
+        try
+        {
+            writer.Enqueue(path, "first");
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(10)), "the writer thread never reached the sink");
+
+            var before = GC.GetTotalMemory(forceFullCollection: true);
+            // 1,000 lines, far fewer than the line cap and each under the line-length cap: only the
+            // character backlog can stop them. Kept whole they would hold about 30 MB.
+            for (var i = 0; i < 1_000; i++)
+                writer.Enqueue(path, new string('z', 15_000));
+            var retained = LowestRetained(before, 12L * 1024 * 1024);
+
+            Assert.True(retained < 12L * 1024 * 1024, $"the queue retained {retained / (1024 * 1024)} MB behind a stalled write");
+        }
+        finally
+        {
+            release.Set();
+            writer.Dispose();
+        }
+    }
+
+    [Fact]
+    public void A_refused_oversized_line_is_counted_by_its_cut_length_and_leaves_no_drift()
+    {
+        var path = Path.Combine(_dir, "refused.log");
+        using var release = new ManualResetEventSlim();
+        using var entered = new ManualResetEventSlim();
+        var writer = QueuedLineWriter.OpenPerBatch("test-writer",
+            p => new StallingStream(Append(p), release, entered));
+
+        writer.Enqueue(path, "first");
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(10)));
+        // Oversized lines cost their cut length (about 16 k each), so 250 fill the character cap.
+        for (var i = 0; i < 400; i++)
+            writer.Enqueue(path, new string('w', 1_000_000));
+        release.Set();
+        Assert.True(writer.Flush(TimeSpan.FromSeconds(30)));
+
+        // Everything drained: a counter that drifted would refuse this line or the next ones.
+        for (var i = 0; i < 5; i++)
+            writer.Enqueue(path, "after " + i);
+        Assert.True(writer.Flush(TimeSpan.FromSeconds(30)));
+        writer.Dispose();
+
+        var lines = ReadShared(path);
+        var cutLength = QueuedLineWriter.MaxLineChars + "… [984000 more characters not logged]".Length;
+        var written = lines.Count(l => l.Length == cutLength && l[0] == 'w');
+        Assert.InRange(written, 1, 400 - 1);
+        Assert.True((long)written * cutLength <= QueuedLineWriter.MaxBacklogChars);
+        Assert.Equal(Enumerable.Range(0, 5).Select(i => "after " + i), lines.TakeLast(5));
+    }
+
+    [Fact]
+    public void A_full_character_backlog_drops_lines_and_the_note_names_characters()
+    {
+        var path = Path.Combine(_dir, "chars.log");
+        using var release = new ManualResetEventSlim();
+        using var entered = new ManualResetEventSlim();
+        var writer = QueuedLineWriter.OpenPerBatch("test-writer",
+            p => new StallingStream(Append(p), release, entered));
+
+        writer.Enqueue(path, "first");
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(10)));
+        const int count = 400;
+        const int lineChars = 15_000; // under the line cap, so only the character backlog can refuse them
+        for (var i = 0; i < count; i++)
+            writer.Enqueue(path, new string('y', lineChars));
+        release.Set();
+        Assert.True(writer.Flush(TimeSpan.FromSeconds(30)));
+        writer.Dispose();
+
+        var lines = ReadShared(path);
+        var note = Assert.Single(lines, l => l.Contains("log lines dropped"));
+        Assert.Contains($"({QueuedLineWriter.DefaultMaxBacklog} lines or {QueuedLineWriter.MaxBacklogChars} characters)", note);
+        var dropped = int.Parse(Regex.Match(note, @"(\d+) log lines dropped").Groups[1].Value);
+        var written = lines.Count(l => l.Length == lineChars && l[0] == 'y');
+
+        Assert.True(dropped > 0, "the character backlog never refused a line");
+        Assert.Equal(count, written + dropped);
+        Assert.True((long)written * lineChars <= QueuedLineWriter.MaxBacklogChars, $"{written} lines of {lineChars} characters passed the backlog cap");
     }
 
     [Fact]

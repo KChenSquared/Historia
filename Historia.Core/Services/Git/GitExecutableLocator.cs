@@ -3,6 +3,15 @@ namespace Historia.Services.Git;
 /// <inheritdoc cref="IGitExecutableLocator"/>
 public sealed partial class GitExecutableLocator : IGitExecutableLocator
 {
+    /// <summary>How long a git probe (<c>--version</c>, <c>--exec-path</c>) may run before it is killed.</summary>
+    internal static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// The per-architecture directories of a Git for Windows install that hold the real
+    /// <c>bin\git.exe</c>, in the order they are preferred.
+    /// </summary>
+    private static readonly string[] DirectGitPrefixes = ["ucrt64", "mingw64", "clangarm64"];
+
     private readonly object _sync = new();
     private readonly TaskCompletionSource<GitExecutableInfo> _resolvedTcs =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -40,16 +49,17 @@ public sealed partial class GitExecutableLocator : IGitExecutableLocator
 
     private async Task<GitExecutableInfo> ResolveCoreAsync(string? userOverridePath, CancellationToken ct)
     {
-        var path = await Task.Run(() => Discover(userOverridePath), ct).ConfigureAwait(false);
+        var discovered = await Task.Run(() => Discover(userOverridePath), ct).ConfigureAwait(false);
         GitExecutableInfo info;
 
-        if (path is null)
+        if (discovered is null)
         {
             info = GitExecutableInfo.NotFound;
         }
         else
         {
-            var version = await Task.Run(() => CaptureVersion(path), ct).ConfigureAwait(false);
+            var path = await ChooseGitPathAsync(discovered.Value.LauncherPath, discovered.Value.Path, ProbeTimeout, ct).ConfigureAwait(false);
+            var version = await CaptureVersionAsync(path, ProbeTimeout, ct).ConfigureAwait(false);
             if (version is null || version < GitExecutableInfo.MinimumVersion)
             {
                 var reason = version is null
@@ -76,29 +86,95 @@ public sealed partial class GitExecutableLocator : IGitExecutableLocator
         return info;
     }
 
-    private static string? Discover(string? userOverridePath)
+    /// <summary>A discovered git: the path to run and the path it was derived from.</summary>
+    private readonly record struct DiscoveredGit(string Path, string LauncherPath);
+
+    private static DiscoveredGit? Discover(string? userOverridePath)
     {
-        // 1. Explicit user override.
+        // 1. Explicit user override; used exactly as given.
         if (!string.IsNullOrWhiteSpace(userOverridePath) && File.Exists(userOverridePath))
-            return userOverridePath;
+            return new DiscoveredGit(userOverridePath, userOverridePath);
 
         // 2. PATH.
         var onPath = FindOnPath(Environment.GetEnvironmentVariable("PATH"));
         if (onPath is not null)
-            return onPath;
+            return Direct(onPath);
 
         // 3. Well-known install locations.
         foreach (var candidate in WellKnownLocations())
         {
             if (File.Exists(candidate))
-                return candidate;
+                return Direct(candidate);
         }
 
         // 4. Git for Windows registry key.
         if (OperatingSystem.IsWindows())
-            return DiscoverFromWindowsRegistry();
+        {
+            var fromRegistry = DiscoverFromWindowsRegistry();
+            return fromRegistry is null ? null : Direct(fromRegistry);
+        }
 
         return null;
+
+        static DiscoveredGit Direct(string launcher) => new(PreferDirectGit(launcher), launcher);
+    }
+
+    /// <summary>
+    /// The real git binary behind a Git for Windows launcher. <c>cmd\git.exe</c> and <c>bin\git.exe</c>
+    /// start the real <c>&lt;prefix&gt;\bin\git.exe</c> as a child process; when the install holds
+    /// <c>ucrt64</c>, <c>mingw64</c> or <c>clangarm64</c> (checked in that order) with one, that path is
+    /// returned so each call runs a single process. Any other path is returned unchanged.
+    /// </summary>
+    internal static string PreferDirectGit(string path)
+    {
+        try
+        {
+            if (!string.Equals(Path.GetFileName(path), "git.exe", StringComparison.OrdinalIgnoreCase))
+                return path;
+
+            var directory = Path.GetDirectoryName(path);
+            var directoryName = Path.GetFileName(directory);
+            if (!string.Equals(directoryName, "cmd", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(directoryName, "bin", StringComparison.OrdinalIgnoreCase))
+                return path;
+
+            var installRoot = Path.GetDirectoryName(directory);
+            if (installRoot is null)
+                return path;
+
+            foreach (var prefix in DirectGitPrefixes)
+            {
+                var candidate = Path.Combine(installRoot, prefix, "bin", "git.exe");
+                if (File.Exists(candidate))
+                    return candidate;
+            }
+        }
+        catch (ArgumentException)
+        {
+            // Malformed path; leave it as discovered.
+        }
+
+        return path;
+    }
+
+    /// <summary>
+    /// <paramref name="candidatePath"/> when it differs from <paramref name="launcherPath"/> and answers
+    /// <c>--exec-path</c>; otherwise <paramref name="launcherPath"/>, with the reason logged.
+    /// </summary>
+    internal static async Task<string> ChooseGitPathAsync(string launcherPath, string candidatePath, TimeSpan timeout, CancellationToken ct = default)
+    {
+        if (string.Equals(launcherPath, candidatePath, StringComparison.OrdinalIgnoreCase))
+            return launcherPath;
+
+        var probe = await RunProbeAsync(candidatePath, "--exec-path", timeout, ct).ConfigureAwait(false);
+        if (probe is { ExitCode: 0 } && !string.IsNullOrWhiteSpace(probe.Value.Output))
+            return candidatePath;
+
+        var why = probe is null
+            ? "did not answer in time or could not start"
+            : $"exited with code {probe.Value.ExitCode}";
+        AppLog.Write(AppLogLevel.Info, "git", $"Direct git '{candidatePath}' {why} for --exec-path; using '{launcherPath}'.");
+        return launcherPath;
     }
 
     /// <summary>The git binary's file name: <c>git.exe</c> on Windows, <c>git</c> elsewhere.</summary>
@@ -174,8 +250,22 @@ public sealed partial class GitExecutableLocator : IGitExecutableLocator
         return null;
     }
 
-    private static Version? CaptureVersion(string gitPath)
+    /// <summary>The version <c>git --version</c> reports, or null when it fails, is unparsable or exceeds <paramref name="timeout"/>.</summary>
+    internal static async Task<Version?> CaptureVersionAsync(string gitPath, TimeSpan timeout, CancellationToken ct = default)
     {
+        var probe = await RunProbeAsync(gitPath, "--version", timeout, ct).ConfigureAwait(false);
+        return probe is null ? null : ParseVersion(probe.Value.Output);
+    }
+
+    /// <summary>
+    /// Runs git with one argument and returns its exit code and standard output, or null when it cannot
+    /// start or does not finish within <paramref name="timeout"/>; the process tree is then killed.
+    /// </summary>
+    private static async Task<(int ExitCode, string Output)?> RunProbeAsync(string gitPath, string argument, TimeSpan timeout, CancellationToken ct)
+    {
+        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutSource.CancelAfter(timeout);
+        Process? process = null;
         try
         {
             var psi = new ProcessStartInfo(gitPath)
@@ -185,21 +275,45 @@ public sealed partial class GitExecutableLocator : IGitExecutableLocator
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             };
-            psi.ArgumentList.Add("--version");
+            psi.ArgumentList.Add(argument);
+            GitCliProcessSetup.ComposeEnvironment(psi, null, null);
 
-            using var process = Process.Start(psi);
+            process = Process.Start(psi);
             if (process is null)
                 return null;
 
-            var output = process.StandardOutput.ReadToEnd();
-            process.WaitForExit(5000);
-            return ParseVersion(output);
+            // Both pipes drain while git runs; stderr is read only so it can never fill.
+            var outputTask = process.StandardOutput.ReadToEndAsync(timeoutSource.Token);
+            var errorTask = process.StandardError.ReadToEndAsync(timeoutSource.Token);
+            await process.WaitForExitAsync(timeoutSource.Token).ConfigureAwait(false);
+            var output = await outputTask.WaitAsync(timeoutSource.Token).ConfigureAwait(false);
+            await errorTask.WaitAsync(timeoutSource.Token).ConfigureAwait(false);
+            return (process.ExitCode, output);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            await KillBeforeDisposeAsync(process).ConfigureAwait(false);
+            AppLog.Write(AppLogLevel.Warn, "git", $"'{gitPath} {argument}' did not finish within {timeout.TotalSeconds:0.#} s and was stopped.");
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            await KillBeforeDisposeAsync(process).ConfigureAwait(false);
+            throw;
         }
         catch (Exception ex) when (ex is IOException or InvalidOperationException or System.ComponentModel.Win32Exception)
         {
             return null;
         }
+        finally
+        {
+            process?.Dispose();
+        }
     }
+
+    // A disposed Process can no longer be killed, so the kill is attempted first.
+    private static Task KillBeforeDisposeAsync(Process? process) =>
+        process is null ? Task.CompletedTask : ProcessKiller.KillAsync(process);
 
     internal static Version? ParseVersion(string output)
     {

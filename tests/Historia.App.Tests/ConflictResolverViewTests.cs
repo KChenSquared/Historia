@@ -1457,13 +1457,16 @@ public class ConflictResolverViewTests : IDisposable
         };
 
         // Status changes reach the view through a coalescing timer; counting the raised events
-        // makes each step wait for delivery instead of for a fixed delay.
+        // makes each step wait for delivery instead of for a fixed delay. The state service raises
+        // only when the status differs from the last raise, so each step first changes the
+        // working tree: an untracked file adds an entry the previous status did not have.
         var raised = 0;
         EventHandler<StatusChangedEventArgs> countRaised = (_, _) => raised++;
         _context.State.StatusChanged += countRaised;
         try
         {
             // Fire status change 1 and wait for it to be delivered
+            await File.WriteAllTextAsync(System.IO.Path.Combine(_fixture.Path, "change1.txt"), "1");
             await _context.State.RefreshStatusAsync();
             await PumpUntilAsync(() => raised >= 1 && callCount >= 1, "the first conflict refresh");
 
@@ -1471,9 +1474,11 @@ public class ConflictResolverViewTests : IDisposable
             Assert.Equal(1, callCount);
 
             // Fire status changes 2 and 3 while 1 is in-flight, each delivered before the next
+            await File.WriteAllTextAsync(System.IO.Path.Combine(_fixture.Path, "change2.txt"), "2");
             await _context.State.RefreshStatusAsync();
             await PumpUntilAsync(() => raised >= 2, "the second status change");
 
+            await File.WriteAllTextAsync(System.IO.Path.Combine(_fixture.Path, "change3.txt"), "3");
             await _context.State.RefreshStatusAsync();
             await PumpUntilAsync(() => raised >= 3, "the third status change");
             Dispatcher.UIThread.RunJobs();

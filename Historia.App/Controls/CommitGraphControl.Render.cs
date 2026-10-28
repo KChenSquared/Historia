@@ -10,8 +10,10 @@ public sealed partial class CommitGraphControl
 
     /// <summary>
     /// Row → decorations, built once per layout rather than re-scanned every frame. Keyed on
-    /// the <see cref="GraphLayout.Decorations"/> array identity, which Compute / Recompute /
-    /// Extend all replace. Frequent repaints (hover, selection, scroll) reuse it untouched.
+    /// the <see cref="GraphLayout.Decorations"/> array identity: Compute and Recompute build a
+    /// new array, and an Extend builds one whenever it added decorations (an Extend that added
+    /// none reuses the array, whose contents are unchanged). Frequent repaints (hover,
+    /// selection, scroll) reuse the index untouched.
     /// </summary>
     private Dictionary<int, List<GraphDecoration>> DecorationsByRow(GraphLayout layout)
     {
@@ -211,16 +213,10 @@ public sealed partial class CommitGraphControl
                         DrawRefsColumn(dc, decosByRow, first, last, x, col.Width);
                         break;
                     case GraphColumnKind.Message:
-                        DrawTextColumn(dc, layout, first, last, x, col.Width, m => m.MessageShort, _text);
-                        break;
                     case GraphColumnKind.Author:
-                        DrawTextColumn(dc, layout, first, last, x, col.Width, m => m.AuthorName, _textMuted);
-                        break;
                     case GraphColumnKind.Date:
-                        DrawTextColumn(dc, layout, first, last, x, col.Width, m => DateCell(CommitDateDisplay.Pick(m.AuthorWhen, m.CommitWhen, _showAuthorDate)), _textMuted);
-                        break;
                     case GraphColumnKind.Sha:
-                        DrawTextColumn(dc, layout, first, last, x, col.Width, m => m.Id.ToShortString(7), _textMuted);
+                        DrawTextColumn(dc, layout, first, last, x, col.Width, col.Kind);
                         break;
                 }
             }
@@ -253,8 +249,8 @@ public sealed partial class CommitGraphControl
         if (RevealBlanking || _graphColWidth <= 0 || _resolvedColumns.Length == 0)
             return;
 
-        var refsIdx = Array.FindIndex(_resolvedColumns, c => c.Kind == GraphColumnKind.Refs);
-        var graphIdx = Array.FindIndex(_resolvedColumns, c => c.Kind == GraphColumnKind.Graph);
+        var refsIdx = Array.FindIndex(_resolvedColumns, static c => c.Kind == GraphColumnKind.Refs);
+        var graphIdx = Array.FindIndex(_resolvedColumns, static c => c.Kind == GraphColumnKind.Graph);
         if (refsIdx < 0 || graphIdx != refsIdx + 1)
             return;
 
@@ -283,7 +279,7 @@ public sealed partial class CommitGraphControl
                     continue;
 
                 var y = RowY(row) + _rowHeight / 2;
-                var isHead = (gr.Flags & RowFlags.IsHead) != 0 || decos.Any(d => d.IsHead);
+                var isHead = (gr.Flags & RowFlags.IsHead) != 0 || AnyHead(decos);
                 var pen = isHead ? LanePen(gr.ColorIndex) : FaintConnectorPen(gr.ColorIndex);
                 dc.DrawLine(pen, new Point(startX, y), new Point(endX, y));
             }
@@ -426,14 +422,26 @@ public sealed partial class CommitGraphControl
         sub.Draw(dc, new Point((size.Width - sub.Width) / 2, RowsTop + rowAreaH * 0.70));
     }
 
+    /// <summary>The row HEAD sits on, or -1. A lookup that missed (HEAD's commit is not among the
+    /// loaded rows) is remembered for that layout snapshot and HEAD's commit, so a frame does not
+    /// take the layout's row-map lock again for an answer that cannot have changed.</summary>
     private int ResolveHeadRow(GraphLayout layout)
     {
         if (layout.HeadRow >= 0 && layout.HeadRow < layout.RowCount)
             return layout.HeadRow;
 
-        if (_state?.CurrentBranch?.TipCommitId is { } tip && layout.TryGetRow(tip, out var r))
+        if (_state?.CurrentBranch?.TipCommitId is not { } tip)
+            return -1;
+        if (_headRowMissed && ReferenceEquals(_headRowMissLayout, layout) && _headRowMissTip.Equals(tip))
+            return -1;
+
+        _headRowLookups++;
+        if (layout.TryGetRow(tip, out var r))
             return r;
 
+        _headRowMissed = true;
+        _headRowMissLayout = layout;
+        _headRowMissTip = tip;
         return -1;
     }
 
@@ -634,7 +642,22 @@ public sealed partial class CommitGraphControl
     }
 
     private static string? BadgePlusText(GraphDecoration d) =>
-        d.SiblingsOrNull is { Length: > 0 } sibs ? $"+{sibs.Length + 1}" : null;
+        d.SiblingsOrNull is { Length: > 0 } sibs ? PlusLabel(sibs.Length + 1) : null;
+
+    private static readonly string[] PlusLabels =
+        Enumerable.Range(0, 256).Select(i => "+" + i.ToString(CultureInfo.InvariantCulture)).ToArray();
+
+    /// <summary>The "+N" overflow text; a table lookup, so a badge costs no string per frame.</summary>
+    private static string PlusLabel(int n) =>
+        (uint)n < (uint)PlusLabels.Length ? PlusLabels[n] : "+" + n.ToString(CultureInfo.InvariantCulture);
+
+    private static bool AnyHead(List<GraphDecoration> decos)
+    {
+        foreach (var d in decos)
+            if (d.IsHead)
+                return true;
+        return false;
+    }
 
     private (double RightExtras, double Natural, double Min) BadgeMetrics(GraphDecoration d)
     {
@@ -689,7 +712,8 @@ public sealed partial class CommitGraphControl
             var top = RowY(row) + (_rowHeight - h) / 2;
             var midY = top + h / 2;
 
-            var drawn = new List<(GraphDecoration D, double W)>();
+            var drawn = _drawnBadges;
+            drawn.Clear();
             var x = startX;
             for (var i = 0; i < decos.Count; i++)
             {
@@ -721,8 +745,10 @@ public sealed partial class CommitGraphControl
 
             if (drawn.Count < decos.Count)
             {
-                var hidden = decos.GetRange(drawn.Count, decos.Count - drawn.Count);
-                var ft = Text($"+{hidden.Count}", _textMuted, size: BadgeLabelSize);
+                var hidden = RentOverflowList(_overflowChips.Count);
+                for (var i = drawn.Count; i < decos.Count; i++)
+                    hidden.Add(decos[i]);
+                var ft = Text(PlusLabel(hidden.Count), _textMuted, size: BadgeLabelSize);
                 var chipW = ft.Width + 10;
                 var chipX = colX + colWidth - 4 - chipW;
                 var chipRect = new Rect(chipX, top, chipW, h);
@@ -730,6 +756,69 @@ public sealed partial class CommitGraphControl
                 ft.Draw(dc, new Point(chipX + 5, CenteredTextY(ft, top, h, BadgeLabelSize)));
                 _overflowChips.Add((chipRect, row, hidden));
             }
+        }
+    }
+
+    private const int CellTextCapacity = 2048;
+
+    private readonly record struct DateCellKey(GitObjectId Id, long Minute, bool AuthorDate);
+
+    // Date and SHA cell strings, built once per commit (and per minute for the relative date)
+    // instead of once per row per frame. Each miss is counted.
+    private readonly CellTextCache<DateCellKey> _dateCells = new(CellTextCapacity);
+    private readonly CellTextCache<GitObjectId> _shaCells = new(CellTextCapacity);
+    private int _cellTextMisses;
+
+    private string DateCellText(CommitMetadata meta, long minute)
+    {
+        var key = new DateCellKey(meta.Id, minute, _showAuthorDate);
+        if (_dateCells.TryGet(key, out var text))
+            return text;
+        _cellTextMisses++;
+        text = DateCell(CommitDateDisplay.Pick(meta.AuthorWhen, meta.CommitWhen, _showAuthorDate));
+        _dateCells.Add(key, text);
+        return text;
+    }
+
+    private string ShaCellText(GitObjectId id)
+    {
+        if (_shaCells.TryGet(id, out var text))
+            return text;
+        _cellTextMisses++;
+        text = id.ToShortString(7);
+        _shaCells.Add(id, text);
+        return text;
+    }
+
+    /// <summary>A two-generation string cache: a lookup that misses the current generation but
+    /// hits the previous one is promoted, and once the current generation is full it becomes the
+    /// previous one. Whatever the last frames drew survives a rollover, and nothing is allocated
+    /// when the generations swap.</summary>
+    private sealed class CellTextCache<TKey>(int capacity) where TKey : notnull
+    {
+        private Dictionary<TKey, string> _current = [];
+        private Dictionary<TKey, string> _previous = [];
+
+        public bool TryGet(TKey key, out string text)
+        {
+            if (_current.TryGetValue(key, out text!))
+                return true;
+            if (_previous.TryGetValue(key, out text!))
+            {
+                Add(key, text);
+                return true;
+            }
+            return false;
+        }
+
+        public void Add(TKey key, string text)
+        {
+            if (_current.Count >= capacity)
+            {
+                (_previous, _current) = (_current, _previous);
+                _current.Clear();
+            }
+            _current[key] = text;
         }
     }
 
@@ -855,14 +944,44 @@ public sealed partial class CommitGraphControl
             dc.DrawGeometry(ink, null, g);
     }
 
+    // Badges drawn on the row being laid out, and the per-chip hidden-badge lists: reused every
+    // frame, so a row with overflow allocates nothing.
+    private readonly List<(GraphDecoration D, double W)> _drawnBadges = [];
+    private readonly List<List<GraphDecoration>> _overflowLists = [];
+
+    private List<GraphDecoration> RentOverflowList(int index)
+    {
+        if (index < _overflowLists.Count)
+        {
+            var list = _overflowLists[index];
+            list.Clear();
+            return list;
+        }
+        _poolMisses++;
+        var created = new List<GraphDecoration>();
+        _overflowLists.Add(created);
+        return created;
+    }
+
     private void DrawTextColumn(DrawingContext dc, GraphLayout layout, int first, int last,
-        double colX, double colWidth, Func<CommitMetadata, string> select, IBrush brush)
+        double colX, double colWidth, GraphColumnKind kind)
     {
         var maxW = Math.Max(20, colWidth - 12);
+        var brush = kind == GraphColumnKind.Message ? _text : _textMuted;
+        // The relative date changes with the minute, so a cached date cell is valid for one. The
+        // bucket is the UTC minute, so a cell can lag the commit's true age by up to 59 seconds.
+        var minute = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMinute;
         for (var row = first; row <= last; row++)
         {
             var meta = layout.Commits[row];
-            var text = select(meta);
+            var text = kind switch
+            {
+                GraphColumnKind.Message => meta.MessageShort,
+                GraphColumnKind.Author => meta.AuthorName,
+                GraphColumnKind.Date => DateCellText(meta, minute),
+                GraphColumnKind.Sha => ShaCellText(meta.Id),
+                _ => "",
+            };
             var ft = Text(text, brush, maxW);
             var midY = RowY(row) + (_rowHeight - ft.Height) / 2;
             ft.Draw(dc, new Point(colX + 8, midY));

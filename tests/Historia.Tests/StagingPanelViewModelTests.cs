@@ -42,6 +42,71 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
         }
     }
 
+    /// <summary>A dispatcher whose posts wait for <see cref="DrainPosted"/> and whose timers tick
+    /// only when <see cref="FireTimers"/> says so, so a test controls the busy indicator's delay
+    /// without waiting on a clock.</summary>
+    private sealed class ScriptedUiDispatcher : IUiDispatcher
+    {
+        private readonly object _sync = new();
+        private readonly Queue<Action> _posted = new();
+        private readonly List<(TimeSpan Interval, ScriptedTimer Timer)> _timers = [];
+
+        public bool OnUiThread { get; set; } = true;
+        public int PostCount { get; private set; }
+
+        public bool CheckAccess() => OnUiThread;
+
+        public void Post(Action action)
+        {
+            lock (_sync)
+            {
+                PostCount++;
+                _posted.Enqueue(action);
+            }
+        }
+
+        public void DrainPosted()
+        {
+            while (true)
+            {
+                Action? next;
+                lock (_sync)
+                    next = _posted.Count > 0 ? _posted.Dequeue() : null;
+                if (next is null)
+                    return;
+                next();
+            }
+        }
+
+        public IUiTimer CreateTimer(TimeSpan interval, Action tick)
+        {
+            var timer = new ScriptedTimer(tick);
+            lock (_sync)
+                _timers.Add((interval, timer));
+            return timer;
+        }
+
+        /// <summary>Ticks every running timer created with <paramref name="interval"/>; returns how many ticked.</summary>
+        public int FireTimers(TimeSpan interval)
+        {
+            List<ScriptedTimer> running;
+            lock (_sync)
+                running = [.. _timers.Where(t => t.Interval == interval && t.Timer.IsRunning).Select(t => t.Timer)];
+            foreach (var timer in running)
+                timer.Fire();
+            return running.Count;
+        }
+
+        private sealed class ScriptedTimer(Action tick) : IUiTimer
+        {
+            public bool IsRunning { get; private set; }
+            public void Start() => IsRunning = true;
+            public void Stop() => IsRunning = false;
+            public void Dispose() => IsRunning = false;
+            public void Fire() => tick();
+        }
+    }
+
     private sealed class FakeGenerator : ICommitMessageGenerator
     {
         public int Calls { get; private set; }
@@ -334,7 +399,7 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
         var repo = NewRepo();
         var ctx = Open(repo);
         await ctx.State.RefreshStatusAsync();
-        var ui = new RecordingUiDispatcher();
+        var ui = new ScriptedUiDispatcher { OnUiThread = false };
         var vm = NewViewModel(ctx, ui);
         ui.DrainPosted();
 
@@ -346,6 +411,23 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
 
         ui.DrainPosted();
 
+        Assert.Equal(["a.txt"], Rows(vm.Changes).Select(r => r.Path));
+    }
+
+    [Fact]
+    public async Task A_status_change_on_the_ui_thread_renders_without_another_hop()
+    {
+        if (GitMissing) return;
+        var repo = NewRepo();
+        var ctx = Open(repo);
+        await ctx.State.RefreshStatusAsync();
+        var ui = new ScriptedUiDispatcher { OnUiThread = true };
+        var vm = NewViewModel(ctx, ui);
+
+        repo.WriteFile("a.txt", "one\ntwo\n");
+        await RefreshUntilAsync(ctx, () => ctx.State.Status.Unstaged.Count == 1);
+
+        Assert.Equal(0, ui.PostCount);
         Assert.Equal(["a.txt"], Rows(vm.Changes).Select(r => r.Path));
     }
 
@@ -467,6 +549,377 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
         Assert.Empty(ctx.State.Status.Unstaged);
     }
 
+    // ── Busy state, fresh list, no silent no-op ──
+
+    private static bool IsStatusRun(GitCliRequest request) => request.Arguments[0] == "status";
+
+    private TestRepositoryBuilder ModifiedRepo()
+    {
+        var repo = NewRepo();
+        repo.WriteFile("a.txt", "one\ntwo\n");
+        repo.WriteFile("b.txt", "bee\nbop\n");
+        return repo;
+    }
+
+    private RepositoryContext OpenWith(TestRepositoryBuilder repo, IGitCliService cli)
+    {
+        var ctx = _host.Open(repo.Path, cli);
+        ctx.MarkFirstGraphPaintDone();
+        ctx.MarkFirstFullLoadDone();
+        return ctx;
+    }
+
+    /// <summary>A CLI that holds the second status run after <paramref name="armed"/> is set: the
+    /// first is the one Stage all and Commit start with, the second the refresh that follows the change.</summary>
+    private BlockingGitCliService HoldSecondStatusRun(Func<bool> armed)
+    {
+        var statusRuns = 0;
+        return new BlockingGitCliService(_host.Cli, r => armed() && IsStatusRun(r) && Interlocked.Increment(ref statusRuns) == 2);
+    }
+
+    [Fact]
+    public async Task Stage_all_shows_the_file_count_while_busy_and_clears_the_state_afterwards()
+    {
+        if (GitMissing) return;
+        var (_, _, vm) = await ModifiedAsync();
+        var texts = new List<string>();
+        var shown = new List<bool>();
+        vm.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(StagingPanelViewModel.BusyText)) texts.Add(vm.BusyText);
+            if (e.PropertyName == nameof(StagingPanelViewModel.ShowBusyIndicator)) shown.Add(vm.ShowBusyIndicator);
+        };
+
+        await vm.StageAllChangesCommand.ExecuteAsync(null);
+
+        Assert.Contains("Staging 2 files…", texts);
+        Assert.Contains(true, shown);
+        Assert.False(vm.IsStagingBusy);
+        Assert.False(vm.ShowBusyIndicator);
+        Assert.Equal("", vm.BusyText);
+    }
+
+    [Theory]
+    [InlineData("Commit", "Commit")]
+    [InlineData("GitGateway.WorkingTree.CommitAsync", "Commit")]
+    [InlineData("Index refresh", "Index refresh")]
+    public async Task The_indicator_waits_for_its_delay_and_names_the_operation_holding_the_write_lock(string holderLabel, string shownName)
+    {
+        if (GitMissing) return;
+        var (_, ctx, _) = await ModifiedAsync();
+        var ui = new ScriptedUiDispatcher();
+        var vm = NewViewModel(ctx, ui);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holder = ctx.WithWriteLockAsync(async ct =>
+        {
+            entered.SetResult();
+            await release.Task.WaitAsync(ct);
+        }, label: holderLabel);
+        await entered.Task;
+
+        var stage = vm.StageAllChangesCommand.ExecuteAsync(null);
+
+        Assert.True(vm.IsStagingBusy);
+        Assert.False(vm.ShowBusyIndicator);
+
+        Assert.Equal(1, ui.FireTimers(StagingPanelViewModel.BusyIndicatorDelay));
+
+        Assert.True(vm.ShowBusyIndicator);
+        Assert.Equal($"Waiting for {shownName}…", vm.BusyText);
+
+        release.SetResult();
+        await holder;
+        await stage;
+
+        Assert.False(vm.IsStagingBusy);
+        Assert.False(vm.ShowBusyIndicator);
+        Assert.Equal("", vm.BusyText);
+        Assert.Equal(0, ui.FireTimers(StagingPanelViewModel.BusyIndicatorDelay));
+        await WaitUntilAsync(() => Rows(vm.Staged).Count == 2, "both staged rows");
+    }
+
+    [Theory]
+    [InlineData("GitGateway.WorkingTree.CommitAsync", "Commit")]
+    [InlineData("GitGateway.WorkingTree.StageAsync", "Stage")]
+    [InlineData("GitGateway.WorkingTree.RefreshIndexStatAsync", "Refresh index stat")]
+    [InlineData("Index refresh", "Index refresh")]
+    [InlineData("Commit", "Commit")]
+    [InlineData("StageAllChangesAsync", "Stage all changes")]
+    [InlineData("GPGSignAsync", "GPGSign")]
+    [InlineData("Async", "Async")]
+    [InlineData("unknown", "unknown")]
+    public void A_write_lock_holder_label_reads_as_words(string label, string expected)
+        => Assert.Equal(expected, StagingPanelViewModel.DescribeHolder(label));
+
+    [Fact]
+    public async Task The_waiting_text_names_a_holder_that_took_its_label_from_the_call_site()
+    {
+        if (GitMissing) return;
+        var (_, ctx, _) = await ModifiedAsync();
+        var ui = new ScriptedUiDispatcher();
+        var vm = NewViewModel(ctx, ui);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holder = HoldWithCallSiteLabelAsync(ctx, entered, release);
+        await entered.Task;
+        Assert.Contains(".", ctx.CurrentWriteHolder!.Value.Label);
+
+        var stage = vm.StageAllChangesCommand.ExecuteAsync(null);
+        ui.FireTimers(StagingPanelViewModel.BusyIndicatorDelay);
+
+        Assert.Equal("Waiting for Hold with call site label…", vm.BusyText);
+
+        release.SetResult();
+        await holder;
+        await stage;
+    }
+
+    [Fact]
+    public async Task The_waiting_text_names_a_holder_that_took_the_lock_after_the_busy_state_began()
+    {
+        if (GitMissing) return;
+        var armed = false;
+        var statusRuns = 0;
+        var cli = new BlockingGitCliService(_host.Cli, r => armed && IsStatusRun(r) && Interlocked.Increment(ref statusRuns) == 1);
+        var ctx = OpenWith(ModifiedRepo(), cli);
+        await RefreshUntilAsync(ctx, () => ctx.State.Status.Unstaged.Count == 2);
+        var ui = new ScriptedUiDispatcher();
+        var vm = NewViewModel(ctx, ui);
+        armed = true;
+
+        // Stage all begins its busy state, then waits on the status run it starts with.
+        var stage = vm.StageAllChangesCommand.ExecuteAsync(null);
+        await cli.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.True(vm.IsStagingBusy);
+        Assert.Null(ctx.CurrentWriteHolder);
+
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holder = ctx.WithWriteLockAsync(async ct =>
+        {
+            entered.SetResult();
+            await release.Task.WaitAsync(ct);
+        }, label: "Index refresh");
+        await entered.Task;
+
+        ui.FireTimers(StagingPanelViewModel.BusyIndicatorDelay);
+
+        Assert.True(vm.ShowBusyIndicator);
+        Assert.Equal("Waiting for Index refresh…", vm.BusyText);
+
+        release.SetResult();
+        await holder;
+        cli.Release.SetResult();
+        await stage;
+        Assert.Equal("", vm.BusyText);
+    }
+
+    [Theory]
+    [InlineData("Stage")]
+    [InlineData("Unstage")]
+    [InlineData("Discard")]
+    public async Task The_waiting_text_does_not_name_a_holder_that_is_one_of_the_panels_own_writes(string label)
+    {
+        if (GitMissing) return;
+        var armed = false;
+        var statusRuns = 0;
+        var cli = new BlockingGitCliService(_host.Cli, r => armed && IsStatusRun(r) && Interlocked.Increment(ref statusRuns) == 1);
+        var ctx = OpenWith(ModifiedRepo(), cli);
+        await RefreshUntilAsync(ctx, () => ctx.State.Status.Unstaged.Count == 2);
+        var ui = new ScriptedUiDispatcher();
+        var vm = NewViewModel(ctx, ui);
+        armed = true;
+
+        var stage = vm.StageAllChangesCommand.ExecuteAsync(null);
+        await cli.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holder = ctx.WithWriteLockAsync(async ct =>
+        {
+            entered.SetResult();
+            await release.Task.WaitAsync(ct);
+        }, label: label);
+        await entered.Task;
+
+        ui.FireTimers(StagingPanelViewModel.BusyIndicatorDelay);
+
+        Assert.Equal("Staging 2 files…", vm.BusyText);
+
+        release.SetResult();
+        await holder;
+        cli.Release.SetResult();
+        await stage;
+    }
+
+    private static Task HoldWithCallSiteLabelAsync(RepositoryContext ctx, TaskCompletionSource entered, TaskCompletionSource release)
+        => ctx.WithWriteLockAsync(async ct =>
+        {
+            entered.SetResult();
+            await release.Task.WaitAsync(ct);
+        });
+
+    [Fact]
+    public async Task The_staging_commands_are_disabled_while_a_stage_is_busy_and_enabled_afterwards()
+    {
+        if (GitMissing) return;
+        var (_, ctx, vm) = await ModifiedAsync();
+        await ctx.Gateway.StageAsync(["a.txt"]);
+        await RefreshUntilAsync(ctx, () => ctx.State.Status.Staged.Count == 1);
+        vm.SelectAllChangesCommand.Execute(true);
+        Row(vm.Staged, "a.txt").IsChecked = true;
+        Assert.True(vm.StageAllChangesCommand.CanExecute(null));
+        Assert.True(vm.UnstageAllCommand.CanExecute(null));
+        Assert.True(vm.StageCheckedCommand.CanExecute(null));
+        Assert.True(vm.UnstageCheckedCommand.CanExecute(null));
+        var raised = new List<System.Windows.Input.ICommand>();
+        foreach (var command in new System.Windows.Input.ICommand[] { vm.StageAllChangesCommand, vm.UnstageAllCommand, vm.StageCheckedCommand, vm.UnstageCheckedCommand })
+            command.CanExecuteChanged += (_, _) => raised.Add(command);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holder = ctx.WithWriteLockAsync(async ct =>
+        {
+            entered.SetResult();
+            await release.Task.WaitAsync(ct);
+        }, label: "Commit");
+        await entered.Task;
+
+        var stage = vm.StageCheckedCommand.ExecuteAsync(null);
+
+        Assert.True(vm.IsStagingBusy);
+        Assert.False(vm.StageAllChangesCommand.CanExecute(null));
+        Assert.False(vm.UnstageAllCommand.CanExecute(null));
+        Assert.False(vm.StageCheckedCommand.CanExecute(null));
+        Assert.False(vm.UnstageCheckedCommand.CanExecute(null));
+        Assert.Equal(4, raised.Distinct().Count());
+
+        release.SetResult();
+        await holder;
+        await stage;
+
+        Assert.False(vm.IsStagingBusy);
+        Assert.True(vm.StageAllChangesCommand.CanExecute(null));
+        Assert.True(vm.UnstageAllCommand.CanExecute(null));
+        await WaitUntilAsync(() => Rows(vm.Staged).Count == 2, "both staged rows");
+        Row(vm.Staged, "a.txt").IsChecked = true;
+        Assert.True(vm.UnstageCheckedCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public async Task The_command_ends_when_git_returns_and_the_refresh_continues_without_it()
+    {
+        if (GitMissing) return;
+        var armed = false;
+        var cli = HoldSecondStatusRun(() => armed);
+        var ctx = OpenWith(ModifiedRepo(), cli);
+        await RefreshUntilAsync(ctx, () => ctx.State.Status.Unstaged.Count == 2);
+        var vm = NewViewModel(ctx);
+        armed = true;
+
+        await vm.StageAllChangesCommand.ExecuteAsync(null);
+
+        await cli.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.False(vm.IsStagingBusy);
+        Assert.False(vm.ShowBusyIndicator);
+        Assert.Empty(Rows(vm.Staged));
+
+        cli.Release.SetResult();
+        await WaitUntilAsync(() => Rows(vm.Staged).Count == 2, "both staged rows");
+    }
+
+    [Fact]
+    public async Task A_failing_refresh_after_the_change_is_still_reported()
+    {
+        if (GitMissing) return;
+        var armed = false;
+        var statusRuns = 0;
+        var cli = new InterceptingGitCliService(_host.Cli)
+        {
+            Intercept = r => armed && IsStatusRun(r) && Interlocked.Increment(ref statusRuns) > 1
+                ? InterceptingGitCliService.Failure()
+                : null,
+        };
+        var ctx = OpenWith(ModifiedRepo(), cli);
+        await RefreshUntilAsync(ctx, () => ctx.State.Status.Unstaged.Count == 2);
+        var vm = NewViewModel(ctx);
+        armed = true;
+
+        await vm.StageAllChangesCommand.ExecuteAsync(null);
+
+        await WaitUntilAsync(() => Notifications.Published.Any(n => n.Severity == NotificationSeverity.Error), "the refresh error");
+        Assert.False(vm.IsStagingBusy);
+    }
+
+    [Fact]
+    public async Task Stage_all_stages_what_a_status_run_already_in_flight_will_report()
+    {
+        if (GitMissing) return;
+        var repo = ModifiedRepo();
+        var armed = false;
+        var statusRuns = 0;
+        var cli = new BlockingGitCliService(_host.Cli, r => armed && IsStatusRun(r) && Interlocked.Increment(ref statusRuns) == 1);
+        var ctx = OpenWith(repo, cli);
+        await RefreshUntilAsync(ctx, () => ctx.State.Status.Unstaged.Count == 2);
+        var vm = NewViewModel(ctx);
+        armed = true;
+        repo.WriteFile("c.txt", "new\n");
+        var inFlight = ctx.State.RefreshStatusAsync();
+        await cli.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(2, Rows(vm.Changes).Count);
+
+        var stage = vm.StageAllChangesCommand.ExecuteAsync(null);
+        cli.Release.SetResult();
+        await inFlight;
+        await stage;
+
+        await WaitUntilAsync(() => Rows(vm.Staged).Count == 3, "all three staged rows");
+        Assert.Equal(["a.txt", "b.txt", "c.txt"], Rows(vm.Staged).Select(r => r.Path));
+    }
+
+    [Fact]
+    public async Task Stage_all_and_unstage_all_say_so_when_there_is_nothing_to_move()
+    {
+        if (GitMissing) return;
+        var ctx = Open(NewRepo());
+        await ctx.State.RefreshStatusAsync();
+        var vm = NewViewModel(ctx);
+
+        await vm.StageAllChangesCommand.ExecuteAsync(null);
+        await vm.UnstageAllCommand.ExecuteAsync(null);
+
+        Assert.Contains(Notifications.Published, n => n.Severity == NotificationSeverity.Info && n.Message == "Nothing to stage");
+        Assert.Contains(Notifications.Published, n => n.Severity == NotificationSeverity.Info && n.Message == "Nothing to unstage");
+        Assert.False(vm.IsStagingBusy);
+    }
+
+    [Fact]
+    public async Task A_commit_after_stage_all_waits_for_the_refresh_and_sees_the_staged_files()
+    {
+        if (GitMissing) return;
+        var repo = ModifiedRepo();
+        var armed = false;
+        var cli = HoldSecondStatusRun(() => armed);
+        var ctx = OpenWith(repo, cli);
+        await RefreshUntilAsync(ctx, () => ctx.State.Status.Unstaged.Count == 2);
+        var vm = NewViewModel(ctx);
+        armed = true;
+        await vm.StageAllChangesCommand.ExecuteAsync(null);
+        await cli.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var before = Head(repo);
+        vm.MessageText = "feat: both files";
+
+        var commit = vm.CommitCommand.ExecuteAsync(null);
+
+        Assert.False(commit.IsCompleted);
+        cli.Release.SetResult();
+        await commit;
+
+        Assert.NotEqual(before, Head(repo));
+        Assert.Equal("feat: both files", repo.Git("log", "-1", "--format=%s").Trim());
+        Assert.DoesNotContain(Notifications.Published, n => n.Severity == NotificationSeverity.Warning);
+    }
+
     // ── Rows ──
 
     [Fact]
@@ -527,6 +980,7 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
 
         Assert.Equal("one\n", File.ReadAllText(System.IO.Path.Combine(repo.Path, "a.txt")).ReplaceLineEndings("\n"));
         Assert.Equal("bee\nbop\n", File.ReadAllText(System.IO.Path.Combine(repo.Path, "b.txt")).ReplaceLineEndings("\n"));
+        await RefreshUntilAsync(ctx, () => ctx.State.Status.Unstaged.Count == 1);
         Assert.Equal(["b.txt"], ctx.State.Status.Unstaged.Select(f => f.Path));
     }
 
@@ -571,7 +1025,7 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
 
         Assert.Equal("one\n", File.ReadAllText(System.IO.Path.Combine(repo.Path, "a.txt")).ReplaceLineEndings("\n"));
         Assert.Equal("bee\n", File.ReadAllText(System.IO.Path.Combine(repo.Path, "b.txt")).ReplaceLineEndings("\n"));
-        Assert.False(ctx.State.Status.IsDirty);
+        await RefreshUntilAsync(ctx, () => !ctx.State.Status.IsDirty);
     }
 
     [Fact]

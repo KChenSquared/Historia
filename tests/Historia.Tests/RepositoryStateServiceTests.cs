@@ -694,6 +694,279 @@ public class RepositoryStateServiceTests : IAsyncDisposable
         Assert.Equal(headId2, state.Repository.HeadCommitId);
     }
 
+    // ── Status raises ──
+
+    private static FileStatusEntry Entry(string path, long size = 0) => new()
+    {
+        Path = path,
+        Kind = FileChangeKind.Modified,
+        IsBinary = false,
+        IsSubmodule = false,
+        SizeBytes = size,
+    };
+
+    private static Historia.Models.RepositoryStatus StatusOf(params FileStatusEntry[] unstaged) =>
+        Historia.Models.RepositoryStatus.Empty with
+        {
+            Unstaged = unstaged,
+            IsDirty = unstaged.Length > 0,
+            ComputedAt = DateTimeOffset.UtcNow,
+        };
+
+    private (RepositoryStateService State, FakeGateway Gateway, ScriptedUi Ui, ManualTime Time, List<(long At, Historia.Models.RepositoryStatus Status)> Raised) NewRaiseState(bool onUiThread)
+    {
+        var gateway = new FakeGateway();
+        var time = new ManualTime();
+        var ui = new ScriptedUi(time) { OnUiThread = onUiThread };
+        var state = new RepositoryStateService(_host.Open(_repo.Path), ui, gateway: gateway, time: time);
+        var raised = new List<(long At, Historia.Models.RepositoryStatus Status)>();
+        state.StatusChanged += (_, e) => raised.Add((time.Ms, e.Status));
+        return (state, gateway, ui, time, raised);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task An_unchanged_status_raises_once()
+    {
+        var (state, gateway, _, time, raised) = NewRaiseState(onUiThread: true);
+
+        gateway.StatusToReturn = StatusOf(Entry("a.txt", 10));
+        await state.RefreshStatusAsync();
+        time.Advance(1000);
+        // A new object equal in value, computed later.
+        gateway.StatusToReturn = StatusOf(Entry("a.txt", 10));
+        await state.RefreshStatusAsync();
+
+        Assert.Single(raised);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task A_conflicted_status_raises_every_time_even_when_unchanged()
+    {
+        var (state, gateway, _, time, raised) = NewRaiseState(onUiThread: true);
+        var conflicted = StatusOf(Entry("a.txt", 10)) with
+        {
+            Conflicted = [new FileStatusEntry { Path = "c.txt", Kind = FileChangeKind.Conflicted, IsBinary = false, IsSubmodule = false, SizeBytes = 20 }],
+        };
+
+        for (var i = 0; i < 3; i++)
+        {
+            gateway.StatusToReturn = conflicted;
+            await state.RefreshStatusAsync();
+            time.Advance(1000);
+        }
+
+        Assert.Equal(3, raised.Count);
+
+        gateway.StatusToReturn = StatusOf(Entry("a.txt", 10));
+        await state.RefreshStatusAsync();
+        time.Advance(1000);
+        gateway.StatusToReturn = StatusOf(Entry("a.txt", 10));
+        await state.RefreshStatusAsync();
+
+        Assert.Equal(4, raised.Count);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task A_size_change_raises()
+    {
+        var (state, gateway, _, time, raised) = NewRaiseState(onUiThread: true);
+
+        gateway.StatusToReturn = StatusOf(Entry("a.txt", 10));
+        await state.RefreshStatusAsync();
+        time.Advance(1000);
+        gateway.StatusToReturn = StatusOf(Entry("a.txt", 11));
+        await state.RefreshStatusAsync();
+
+        Assert.Equal(2, raised.Count);
+        Assert.Equal(11, raised[1].Status.Unstaged[0].SizeBytes);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task An_operation_state_change_raises_even_when_the_status_is_unchanged()
+    {
+        var (state, gateway, _, time, raised) = NewRaiseState(onUiThread: true);
+        var mergeHead = Path.Combine(_repo.Path, ".git", "MERGE_HEAD");
+
+        gateway.StatusToReturn = StatusOf(Entry("a.txt", 10));
+        await state.RefreshStatusAsync();
+        time.Advance(1000);
+
+        await File.WriteAllTextAsync(mergeHead, "1234567890123456789012345678901234567890\n");
+        try
+        {
+            gateway.StatusToReturn = StatusOf(Entry("a.txt", 10));
+            await state.RefreshStatusAsync();
+            time.Advance(1000);
+        }
+        finally
+        {
+            File.Delete(mergeHead);
+        }
+
+        gateway.StatusToReturn = StatusOf(Entry("a.txt", 10));
+        await state.RefreshStatusAsync();
+
+        Assert.Equal(3, raised.Count);
+    }
+
+    [Fact]
+    public void Equivalence_compares_sizes_kinds_sections_and_counts()
+    {
+        var a = StatusOf(Entry("a.txt", 10));
+        Assert.True(RepositoryStatusEquivalence.Equivalent(a, StatusOf(Entry("a.txt", 10))));
+        Assert.False(RepositoryStatusEquivalence.Equivalent(a, StatusOf(Entry("a.txt", 11))));
+        Assert.False(RepositoryStatusEquivalence.Equivalent(a, StatusOf(Entry("a.txt", 10) with { Kind = FileChangeKind.Deleted })));
+        Assert.False(RepositoryStatusEquivalence.Equivalent(a, a with { Unstaged = [], Staged = [Entry("a.txt", 10)] }));
+        Assert.False(RepositoryStatusEquivalence.Equivalent(a, a with { AheadBy = 1 }));
+        Assert.False(RepositoryStatusEquivalence.Equivalent(a, a with { BehindBy = 1 }));
+        Assert.False(RepositoryStatusEquivalence.Equivalent(a, a with { HiddenCaseCollisions = ["A.txt"] }));
+    }
+
+    [Fact]
+    public void Equivalence_compares_the_branch()
+    {
+        var status = StatusOf();
+        var info = new RepositoryInfo
+        {
+            WorkingDirectory = "w",
+            GitDirectory = "g",
+            DisplayName = "d",
+            IsBare = false,
+            IsHeadDetached = false,
+            IsHeadUnborn = false,
+            CurrentBranchName = "main",
+        };
+
+        Assert.True(RepositoryStatusEquivalence.Equivalent(status, info, status, info with { }));
+        Assert.False(RepositoryStatusEquivalence.Equivalent(status, info, status, info with { CurrentBranchName = "feature" }));
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task The_first_raise_after_idle_is_one_hop_without_the_timer()
+    {
+        var (state, gateway, ui, _, raised) = NewRaiseState(onUiThread: false);
+
+        gateway.StatusToReturn = StatusOf(Entry("a.txt"));
+        await state.RefreshStatusAsync();
+
+        var post = Assert.Single(ui.Posted);
+        Assert.Equal(UiPriority.Normal, post.Priority);
+        Assert.Empty(raised);
+        ui.DrainPosted();
+
+        Assert.Single(raised);
+        Assert.Equal(0, ui.Timer!.StartCount);
+        Assert.Equal(UiPriority.Normal, ui.Timer.Priority);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task A_raise_on_the_ui_thread_posts_nothing()
+    {
+        var (state, gateway, ui, _, raised) = NewRaiseState(onUiThread: true);
+
+        gateway.StatusToReturn = StatusOf(Entry("a.txt"));
+        await state.RefreshStatusAsync();
+
+        Assert.Empty(ui.Posted);
+        Assert.Single(raised);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task A_status_within_the_window_of_a_raise_waits_for_the_trailing_timer()
+    {
+        var (state, gateway, ui, time, raised) = NewRaiseState(onUiThread: true);
+
+        gateway.StatusToReturn = StatusOf(Entry("a.txt"));
+        await state.RefreshStatusAsync();
+        time.Advance(20);
+        gateway.StatusToReturn = StatusOf(Entry("b.txt"));
+        await state.RefreshStatusAsync();
+
+        Assert.Single(raised);
+        Assert.True(ui.Timer!.IsRunning);
+
+        time.Advance(50);
+        ui.PumpTimers();
+
+        Assert.Equal(2, raised.Count);
+        Assert.Equal("b.txt", raised[1].Status.Unstaged[0].Path);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task A_burst_never_leaves_a_status_waiting_over_150_ms()
+    {
+        var (state, gateway, ui, time, raised) = NewRaiseState(onUiThread: true);
+        var arrivals = new List<long>();
+
+        // One new status every 10 ms for 600 ms.
+        for (int i = 0; i < 60; i++)
+        {
+            gateway.StatusToReturn = StatusOf(Entry($"f{i:D3}.txt"));
+            arrivals.Add(time.Ms);
+            await state.RefreshStatusAsync();
+            time.Advance(10);
+            ui.PumpTimers();
+        }
+
+        for (int i = 0; i < 20; i++)
+        {
+            time.Advance(10);
+            ui.PumpTimers();
+        }
+
+        Assert.Equal("f059.txt", raised[^1].Status.Unstaged[0].Path);
+        // Coalesced: far fewer raises than statuses, and more than the leading one alone.
+        Assert.InRange(raised.Count, 4, 30);
+
+        var firstUnraised = 0;
+        foreach (var (at, status) in raised)
+        {
+            var index = int.Parse(status.Unstaged[0].Path.AsSpan(1, 3));
+            var waited = at - arrivals[firstUnraised];
+            Assert.True(waited <= 150, $"status {firstUnraised} waited {waited} ms");
+            firstUnraised = index + 1;
+        }
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task Status_duration_is_recorded_after_each_run()
+    {
+        var (state, gateway, _, time, _) = NewRaiseState(onUiThread: true);
+        Assert.Equal(TimeSpan.Zero, state.LastStatusDuration);
+        Assert.Null(state.LastStatusCompletedAt);
+
+        gateway.OnStatusRead = () => time.Advance(700);
+        await state.RefreshStatusAsync();
+
+        Assert.Equal(TimeSpan.FromMilliseconds(700), state.LastStatusDuration);
+        Assert.NotNull(state.LastStatusCompletedAt);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task Unchanged_refs_do_not_save_the_ref_cache()
+    {
+        var gateway = new FakeGateway();
+        var cache = new RecordingRepoStateCache();
+        var state = new RepositoryStateService(_host.Open(_repo.Path), ui: null, repoCache: cache, gateway: gateway);
+        var main = new BranchInfo { Name = "main", CanonicalName = "refs/heads/main", IsRemote = false, IsCurrent = true, TipCommitId = null };
+        var tag = new TagInfo { Name = "v1", TargetCommitId = new GitObjectId("0123456789012345678901234567890123456789"), IsAnnotated = false };
+
+        gateway.BranchesToReturn = [main];
+        await state.RefreshAllAsync();
+        Assert.Single(cache.SavedRefs);
+
+        await state.RefreshAllAsync();
+        Assert.Single(cache.SavedRefs);
+
+        gateway.TagsToReturn = [tag];
+        await state.RefreshAllAsync();
+        Assert.Equal(2, cache.SavedRefs.Count);
+
+        gateway.BranchesToReturn = [main, main with { Name = "dev", CanonicalName = "refs/heads/dev", IsCurrent = false }];
+        await state.RefreshAllAsync();
+        Assert.Equal(3, cache.SavedRefs.Count);
+    }
+
     public async ValueTask DisposeAsync()
     {
         await _host.DisposeAsync();
@@ -716,10 +989,19 @@ public class RepositoryStateServiceTests : IAsyncDisposable
             CurrentBranchName = "main",
         };
 
-        public Task<Historia.Models.RepositoryStatus> GetStatusAsync(CancellationToken ct = default) => Task.FromResult(StatusToReturn);
+        public IReadOnlyList<BranchInfo> BranchesToReturn { get; set; } = [];
+        public IReadOnlyList<TagInfo> TagsToReturn { get; set; } = [];
+        public Action? OnStatusRead { get; set; }
+
+        public Task<Historia.Models.RepositoryStatus> GetStatusAsync(CancellationToken ct = default)
+        {
+            OnStatusRead?.Invoke();
+            return Task.FromResult(StatusToReturn);
+        }
+
         public Task<RepositoryInfo> GetRepositoryInfoAsync(CancellationToken ct = default) => Task.FromResult(InfoToReturn);
-        public Task<IReadOnlyList<BranchInfo>> GetBranchesAsync(CancellationToken ct = default) => Task.FromResult<IReadOnlyList<BranchInfo>>([]);
-        public Task<IReadOnlyList<TagInfo>> GetTagsAsync(CancellationToken ct = default) => Task.FromResult<IReadOnlyList<TagInfo>>([]);
+        public Task<IReadOnlyList<BranchInfo>> GetBranchesAsync(CancellationToken ct = default) => Task.FromResult(BranchesToReturn);
+        public Task<IReadOnlyList<TagInfo>> GetTagsAsync(CancellationToken ct = default) => Task.FromResult(TagsToReturn);
         public Task<IReadOnlyList<RemoteInfo>> GetRemotesAsync(CancellationToken ct = default) => Task.FromResult<IReadOnlyList<RemoteInfo>>([]);
         public Task<AheadBehind?> GetDivergenceAsync(string local, string remote, CancellationToken ct = default) => Task.FromResult<AheadBehind?>(null);
         public Task<CommitDetail> GetCommitDetailAsync(GitObjectId id, CancellationToken ct = default) => throw new NotImplementedException();
@@ -757,6 +1039,77 @@ public class RepositoryStateServiceTests : IAsyncDisposable
         public Task PushAsync(string remote, PushSpec spec, IProgress<GitProgress>? progress, CancellationToken ct = default) => throw new NotImplementedException();
         public Task DeleteRemoteBranchAsync(string remote, string branch, IProgress<GitProgress>? progress, CancellationToken ct = default) => throw new NotImplementedException();
         public Task PruneRemoteAsync(string name, IProgress<GitProgress>? progress, CancellationToken ct = default) => throw new NotImplementedException();
+    }
+
+    /// <summary>A clock the test advances by hand, in milliseconds.</summary>
+    private sealed class ManualTime : TimeProvider
+    {
+        private long _ms;
+        public long Ms => Interlocked.Read(ref _ms);
+        public void Advance(long ms) => Interlocked.Add(ref _ms, ms);
+        public override long TimestampFrequency => 1000;
+        public override long GetTimestamp() => Ms;
+        public override DateTimeOffset GetUtcNow() => new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero).AddMilliseconds(Ms);
+    }
+
+    /// <summary>A dispatcher whose posts and timer the test drives; the timer is due on the manual clock.</summary>
+    private sealed class ScriptedUi(ManualTime time) : IUiDispatcher
+    {
+        private readonly Queue<Action> _queue = new();
+
+        public bool OnUiThread { get; init; }
+        public List<(Action Action, UiPriority? Priority)> Posted { get; } = [];
+        public ScriptedTimer? Timer { get; private set; }
+
+        public bool CheckAccess() => OnUiThread;
+
+        public void Post(Action action)
+        {
+            Posted.Add((action, null));
+            _queue.Enqueue(action);
+        }
+
+        public void Post(Action action, UiPriority priority)
+        {
+            Posted.Add((action, priority));
+            _queue.Enqueue(action);
+        }
+
+        public IUiTimer CreateTimer(TimeSpan interval, Action tick) => Timer = new ScriptedTimer(time, interval, tick, null);
+
+        public IUiTimer CreateTimer(TimeSpan interval, Action tick, UiPriority priority) => Timer = new ScriptedTimer(time, interval, tick, priority);
+
+        public void DrainPosted()
+        {
+            while (_queue.Count > 0)
+                _queue.Dequeue()();
+        }
+
+        /// <summary>Fires the timer when it is running and its interval has passed on the manual clock.</summary>
+        public void PumpTimers()
+        {
+            if (Timer is { IsRunning: true } t && time.Ms >= t.DueAt)
+                t.Fire();
+        }
+    }
+
+    private sealed class ScriptedTimer(ManualTime time, TimeSpan interval, Action tick, UiPriority? priority) : IUiTimer
+    {
+        public bool IsRunning { get; private set; }
+        public int StartCount { get; private set; }
+        public long DueAt { get; private set; }
+        public UiPriority? Priority { get; } = priority;
+
+        public void Start()
+        {
+            StartCount++;
+            IsRunning = true;
+            DueAt = time.Ms + (long)interval.TotalMilliseconds;
+        }
+
+        public void Stop() => IsRunning = false;
+        public void Dispose() => IsRunning = false;
+        public void Fire() => tick();
     }
 
     private sealed class RecordingRepoStateCache : IRepoStateCache

@@ -117,6 +117,16 @@ public sealed partial class CommitGraphControl : Control
     private bool _refsRecomputeInFlight;
     private bool _refsPendingRecompute;
     private bool _detachedSinceAttach;
+    // Fires when the bound repository's tab closes; held only while the control is off the visual
+    // tree, where nothing else would notice and the control would keep the closed repository alive.
+    private CancellationTokenRegistration _closeRegistration;
+    private CloseWatch? _closeWatch;
+    // A HEAD lookup that found no row, valid only for the layout snapshot and HEAD commit it ran
+    // against.
+    private bool _headRowMissed;
+    private GraphLayout? _headRowMissLayout;
+    private GitObjectId _headRowMissTip;
+    private int _headRowLookups;
     internal int RefsRecomputeCount => _refsRecomputeCount;
     private int _refsRecomputeCount;
     internal Task? ActiveRefsRecomputeTask { get; private set; }
@@ -138,6 +148,9 @@ public sealed partial class CommitGraphControl : Control
     internal TextBox SearchBoxForTesting => _searchBox;
     internal void StepMatchForTesting(int direction) => StepMatch(direction);
     internal int CurrentMatchRowForTesting => _matches.CurrentRow;
+    internal IReadOnlyList<int> MatchRowsForTesting => _matches.Rows;
+    internal int ResolveHeadRowForTesting(GraphLayout layout) => ResolveHeadRow(layout);
+    internal int HeadRowLookupsForTesting => _headRowLookups;
     private Func<RepositoryContext, Task>? _recomputeOverrideForTesting;
     private GraphLayoutResult? _layout;
     // The commit store behind _layout. A disk-backed store holds an open file handle that
@@ -307,6 +320,7 @@ public sealed partial class CommitGraphControl : Control
     internal int LaneRunGrowthsForTesting => _laneRuns.Growths;
     internal void ResetLaneRunCountersForTesting() => _laneRuns.ResetCounters();
     internal int PoolMissesForTesting => _poolMisses;
+    internal int CellTextMissesForTesting => _cellTextMisses;
     internal int TextMissesForTesting => _textCache.Misses;
     internal int TextCacheCountForTesting => _textCache.Count;
     internal IReadOnlyList<(Rect Rect, string Tip)> IconRectsForTesting => _iconRects;
@@ -317,6 +331,7 @@ public sealed partial class CommitGraphControl : Control
     internal void ResetMissCountersForTesting()
     {
         _poolMisses = 0;
+        _cellTextMisses = 0;
         _textCache.ResetCounters();
     }
     internal ScrollBar VerticalScrollBarForTesting => _scrollBar;
@@ -677,6 +692,8 @@ public sealed partial class CommitGraphControl : Control
 
     private void Attach()
     {
+        StopWatchingClose();
+
         _workspace.FocusedRepositoryChanged -= OnFocusedRepositoryChanged;
         _workspace.FocusedRepositoryChanged += OnFocusedRepositoryChanged;
 
@@ -779,6 +796,7 @@ public sealed partial class CommitGraphControl : Control
 
         CancelHoverDwell();
         CancelAndDisposeLayoutCts();
+        ResetFind();
         SetLayout(null);               // release the commit-store lease before switching repos
         ClearReveal();                 // a running pump exits when it sees _revealTarget == null
         _revealUserTookOver = false;
@@ -853,6 +871,68 @@ public sealed partial class CommitGraphControl : Control
         // itself is kept so that round-trip doesn't blank the graph.
         _leasedStore?.Dispose();
         _leasedStore = null;
+
+        // Off screen nothing else notices the repository closing, and this control would keep
+        // the closed context, its state and its layout alive. A tab switch that leaves the
+        // repository open keeps all of it for a fast reattach.
+        StopWatchingClose();
+        if (_context is { } bound)
+        {
+            var watch = _closeWatch = new CloseWatch(this, bound);
+            _closeRegistration = bound.Lifetime.Register(static state => ((CloseWatch)state!).Fire(), watch);
+        }
+    }
+
+    private void StopWatchingClose()
+    {
+        _closeRegistration.Dispose();
+        _closeRegistration = default;
+        _closeWatch?.Clear();
+        _closeWatch = null;
+    }
+
+    /// <summary>What a repository's lifetime token calls back into. A cancelled token's callback
+    /// nodes stay linked to each other, so a node that outlives the cancellation (the token's
+    /// other users keep timers pending) would keep whatever it was registered with alive; this
+    /// holder lets go of the repository as soon as it has fired or been cleared and reaches the
+    /// control only weakly, since the control keeps the holder and the token's list must not keep
+    /// the control.</summary>
+    private sealed class CloseWatch(CommitGraphControl graph, RepositoryContext context)
+    {
+        private readonly WeakReference<CommitGraphControl> _graph = new(graph);
+        private RepositoryContext? _context = context;
+
+        public void Fire()
+        {
+            var c = Interlocked.Exchange(ref _context, null);
+            if (c is not null && _graph.TryGetTarget(out var g))
+                Dispatcher.UIThread.Post(() => g.ReleaseClosedContext(c));
+        }
+
+        public void Clear() => _context = null;
+    }
+
+    /// <summary>Lets go of a repository that closed while the control was off the visual tree:
+    /// cancels its work, drops the layout and its store lease, and forgets the context, so the
+    /// closed repository can be collected. Does nothing when the control is back on screen or is
+    /// bound to something else by now.</summary>
+    private void ReleaseClosedContext(RepositoryContext closed)
+    {
+        if (!ReferenceEquals(_context, closed) || this.IsAttachedToVisualTree())
+            return;
+
+        StopWatchingClose();
+        CancelHoverDwell();
+        CancelAndDisposeLayoutCts();
+        ResetFind();
+        ClearReveal();
+        SetLayout(null);
+        _selectedRow = -1;
+        _hoverRow = -1;
+        _multiSelect.Clear();
+        ActiveRefsRecomputeTask = null;
+        _state = null;
+        _context = null;
     }
 
     private void OnSettingsChanged(object? sender, SettingsChangedEventArgs e)
@@ -1299,7 +1379,7 @@ public sealed partial class CommitGraphControl : Control
         }
         _layoutQuery = query;
         _selectedRow = ResolveRow(_state?.SelectedCommitId);
-        RecomputeMatches();
+        RecomputeMatches(debounce: false);
         InvalidateMeasure();
         // TotalLaneCount drives the auto Graph width — re-arrange, not just re-paint.
         InvalidateArrange();
@@ -1317,6 +1397,15 @@ public sealed partial class CommitGraphControl : Control
     /// and neither it nor the lease is adopted; the caller keeps whatever it had.</para></summary>
     private bool SetLayout(GraphLayoutResult? result)
     {
+        // The remembered HEAD miss holds a whole layout snapshot (its state and store), so it ends
+        // with the layout lineage it was made for. An extend keeps the lineage's state, so the
+        // once-per-batch retry still runs.
+        if (result is null || !ReferenceEquals(result.State, _layout?.State))
+        {
+            _headRowMissed = false;
+            _headRowMissLayout = null;
+        }
+
         var next = result?.Layout.Commits;
         if (ReferenceEquals(next, _leasedStore))
         {
@@ -1445,6 +1534,9 @@ public sealed partial class CommitGraphControl : Control
                         var extended = await _layoutService.ExtendLayoutAsync(req.Context, current, batch, ct, req.Background).ConfigureAwait(false);
                         if (extended.Layout.RowCount > current.Layout.RowCount && ReferenceEquals(req.Context, _context))
                         {
+                            // A silent-crawl batch yields to input and painting, and repaints only
+                            // when it changes what the viewport shows.
+                            var quiet = req.Background;
                             await Dispatcher.UIThread.InvokeAsync(() =>
                             {
                                 if (ct.IsCancellationRequested || !ReferenceEquals(req.Context, _context))
@@ -1455,10 +1547,15 @@ public sealed partial class CommitGraphControl : Control
                                     return;
 
                                 SetLayout(extended);
+                                if (quiet)
+                                {
+                                    NoteQuietExtend(current.Layout, extended.Layout);
+                                    return;
+                                }
                                 InvalidateMeasure();
                                 InvalidateArrange(); // lane count can grow -> auto Graph width
                                 InvalidateVisual();
-                            });
+                            }, quiet ? DispatcherPriority.Background : DispatcherPriority.Default);
                         }
                         req.Completion?.TrySetResult();
                     }
@@ -1488,6 +1585,31 @@ public sealed partial class CommitGraphControl : Control
         catch (OperationCanceledException) { }
         catch { }
     }
+
+    /// <summary>After a silent-crawl batch: re-arrange for the new scroll extent (the arrange pass
+    /// also resolves the auto Graph width), and repaint only when the batch can change what is on
+    /// screen: it reaches the viewport, adds a lane, places HEAD, or the graph is showing the
+    /// reveal placeholder with its row count. HEAD that an earlier lookup missed is looked up
+    /// again once per batch, in the new layout. Returns whether it asked for a repaint.</summary>
+    private bool NoteQuietExtend(GraphLayout previous, GraphLayout next)
+    {
+        InvalidateArrange();
+        var rowArea = Bounds.Height - RowsTop;
+        var lastDrawn = (int)((_scrollOffset + rowArea) / _rowHeight) + 2;
+        if (!(RevealBlanking
+            || previous.RowCount <= lastDrawn + 1
+            || next.TotalLaneCount != previous.TotalLaneCount
+            || (previous.HeadRow < 0 && next.HeadRow >= 0)
+            || (_headRowMissed && ResolveHeadRow(next) >= 0)))
+            return false;
+
+        InvalidateVisual();
+        return true;
+    }
+
+    internal bool NoteQuietExtendForTesting(GraphLayout previous, GraphLayout next) => NoteQuietExtend(previous, next);
+
+    internal bool SetLayoutForTesting(GraphLayoutResult? result) => SetLayout(result);
 
     private async Task EnsureExtendedAsync(int neededRow)
     {

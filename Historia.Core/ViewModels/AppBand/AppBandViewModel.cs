@@ -239,8 +239,13 @@ public sealed partial class AppBandViewModel : ViewModelBase
     private void OnFocusedRepositoryChanged(object? sender, FocusedRepositoryChangedEventArgs e)
         => _ui.Post(() =>
         {
-            if (!IsDisposed)
-                RebuildTabs();
+            if (IsDisposed)
+                return;
+            RebuildTabs();
+            // The workspace raises this before it waits for a running write on the closed tab, so
+            // the detail pane leaves the repository route as soon as the last tab is gone.
+            if (e.New is null && _workspace.OpenRepositories.Count == 0)
+                _navigation.RequestNavigate("");
         });
 
     private void OnProfilesChanged(object? sender, EventArgs e)
@@ -419,8 +424,6 @@ public sealed partial class AppBandViewModel : ViewModelBase
             }
 
             await _workspace.CloseAsync(context);
-            if (_workspace.Focused is null)
-                _navigation.RequestNavigate("");
         }
         catch (Exception ex)
         {

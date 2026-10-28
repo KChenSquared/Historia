@@ -1,7 +1,7 @@
 namespace Historia.Tests;
 
 /// <summary>Behaviour of a single <see cref="TerminalSession"/> against a fake pty — OSC
-/// hardening, the UTF-8 decoder, the damage layer, exit handling.</summary>
+/// hardening, the UTF-8 decoder, exit handling, resize.</summary>
 [Trait("tier", "unit")]
 public class TerminalSessionTests
 {
@@ -214,21 +214,57 @@ public class TerminalSessionTests
     }
 
     [Fact]
-    public void DirtyRows_ReportedAfterOutput_ThenCleared()
-    {
-        using var session = NewSession(out var pty);
-        pty.EmitOutput("hello\r\nworld\r\n");
-
-        Assert.NotEmpty(session.TakeDirtyRows());
-        Assert.Empty(session.TakeDirtyRows()); // cleared by the take
-    }
-
-    [Fact]
     public void Resize_ForwardsToPty()
     {
         using var session = NewSession(out var pty);
         session.Resize(100, 40);
         Assert.Contains((100, 40), pty.Resizes);
+    }
+
+    [Fact]
+    public void Resize_WhenThePtyThrows_DoesNotEscapeAndStillReflowsTheEmulator()
+    {
+        var pty = new ThrowingResizePty();
+        using var session = new TerminalSession(
+            TerminalOrigin.Home("/home/me"), pty, new ImmediateUiDispatcher(), 80, 24, 1000);
+
+        var ex = Record.Exception(() => session.Resize(100, 40));
+
+        Assert.Null(ex);
+        Assert.Equal(1, pty.ResizeCalls);
+        Assert.Equal(100, session.ReadBuffer(v => v.Columns));
+        Assert.Equal(40, session.ReadBuffer(v => v.Rows));
+    }
+
+    [Fact]
+    public void Resize_AfterDispose_IsIgnored()
+    {
+        var session = NewSession(out var pty);
+        session.Dispose();
+
+        session.Resize(100, 40);
+
+        Assert.Empty(pty.Resizes);
+    }
+
+    /// <summary>A pty whose resize always fails, as a pty that has already gone away would.</summary>
+    private sealed class ThrowingResizePty : IPtyConnection
+    {
+        public int ResizeCalls { get; private set; }
+
+        public event Action<ReadOnlyMemory<byte>>? OutputReceived { add { } remove { } }
+        public event Action<int>? Exited { add { } remove { } }
+
+        public void Write(ReadOnlySpan<byte> data) { }
+
+        public void Resize(int columns, int rows)
+        {
+            ResizeCalls++;
+            throw new InvalidOperationException("pty is gone");
+        }
+
+        public void Kill() { }
+        public void Dispose() { }
     }
 
     [Fact]

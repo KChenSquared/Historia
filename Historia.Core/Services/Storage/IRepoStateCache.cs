@@ -25,6 +25,12 @@ public interface IRepoStateCache
     /// <summary>Merged snapshot for <paramref name="repoPath"/>, or null when nothing is cached.</summary>
     RepoStateSnapshot? TryLoad(string repoPath);
 
+    /// <summary>Like <see cref="TryLoad"/> but only the stashes, submodules and worktrees; the
+    /// branch, tag and remote lists of the snapshot are null. The default projects
+    /// <see cref="TryLoad"/>.</summary>
+    RepoStateSnapshot? TryLoadPowerTools(string repoPath)
+        => TryLoad(repoPath) is { } s ? new RepoStateSnapshot(null, null, null, s.Stashes, s.Submodules, s.Worktrees) : null;
+
     void SaveRefs(string repoPath, IReadOnlyList<BranchInfo> branches, IReadOnlyList<TagInfo> tags, IReadOnlyList<RemoteInfo> remotes);
 
     void SavePowerTools(string repoPath, IReadOnlyList<StashEntry>? stashes, IReadOnlyList<SubmoduleInfo>? submodules, IReadOnlyList<WorktreeInfo>? worktrees);

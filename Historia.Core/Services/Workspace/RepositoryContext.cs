@@ -17,6 +17,17 @@ public enum NetworkOperationOwner
 /// user-facing name ("Fetch", "Auto-fetch", "Lock cleanup").</summary>
 public sealed record NetworkOperationInfo(NetworkOperationOwner Owner, string Label);
 
+/// <summary>What the file watcher drops while one of Historia's own Git operations runs.</summary>
+public enum SelfOperationKind
+{
+    /// <summary>Every watcher event: the operation rewrites the working tree, the index and refs.</summary>
+    Full,
+
+    /// <summary>Only events under the git directory: the operation writes refs and objects there
+    /// and leaves the working tree alone, so edits made while it runs still show.</summary>
+    GitDirectoryOnly,
+}
+
 /// <summary>
 /// Per-repository-tab handle. Owns the reactive state service, the gateway, the file watcher,
 /// write lock, and a lifetime cancellation scope.
@@ -29,6 +40,8 @@ public sealed class RepositoryContext : IAsyncDisposable
     private readonly SemaphoreSlim _networkGate = new(1, 1);
     private NetworkOperationInfo? _networkOp;
     private int _selfOperationDepth;
+    private int _gitDirectoryOperationDepth;
+    private int _anySelfOperationDepth;
     private long _completedOperations;
 
     // Signaled once the graph control's first paint for this context lands (success, failure,
@@ -254,6 +267,35 @@ public sealed class RepositoryContext : IAsyncDisposable
     }
 
     private const double WriteLockLogThresholdMs = 5.0;
+    private const double CloseWaitLogThresholdMs = 50.0;
+
+    /// <summary>The write-lock holder's label and acquisition time. Immutable and swapped whole, so
+    /// a reader on another thread never sees a label from one holder and a time from another.</summary>
+    private sealed record WriteHolder(string Label, long StartTimestamp);
+
+    private WriteHolder? _writeHolder;
+    private int _waitingWriters;
+
+    /// <summary>Another caller of <see cref="WithWriteLockAsync{T}"/> is waiting for the lock.
+    /// Read inside the lock, it means a writer queued behind the current holder; background
+    /// upkeep uses it to give way.</summary>
+    internal bool HasWaitingWriters => WaitingWriters > 0;
+
+    /// <summary>How many callers are waiting for the write lock right now.</summary>
+    internal int WaitingWriters => Volatile.Read(ref _waitingWriters);
+
+    /// <summary>The operation holding the write lock and how long it has held it, or null while the
+    /// lock is free. Safe to read from any thread; the value is a snapshot.</summary>
+    public (string Label, TimeSpan Held)? CurrentWriteHolder
+    {
+        get
+        {
+            var holder = Volatile.Read(ref _writeHolder);
+            return holder is null
+                ? null
+                : (holder.Label, System.Diagnostics.Stopwatch.GetElapsedTime(holder.StartTimestamp));
+        }
+    }
 
     private static string ResolveCallerLabel(string? label, string callerMember, string callerFile)
     {
@@ -281,20 +323,47 @@ public sealed class RepositoryContext : IAsyncDisposable
         if (_isHoldingWriteLock.Value)
             throw new InvalidOperationException("Nested or re-entrant write lock acquisition is not permitted.");
 
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, Lifetime);
-        var waitStart = System.Diagnostics.Stopwatch.GetTimestamp();
-        await _writeLock.WaitAsync(linked.Token).ConfigureAwait(false);
-        var waitMs = System.Diagnostics.Stopwatch.GetElapsedTime(waitStart).TotalMilliseconds;
-        if (waitMs > WriteLockLogThresholdMs && PerfLog.Enabled)
-        {
-            PerfLog.Mark($"write lock wait {waitMs:F1}ms ({DisplayName})");
-        }
+        // The pre-checks and Process.Start in the work delegate must not run on a UI thread.
+        // Everything below, including the wait timing and the holder bookkeeping, therefore runs
+        // after the hop, and the AsyncLocal below is set after it.
+        await ThreadHop.LeaveUiThreadAsync().ConfigureAwait(false);
 
-        var resolvedLabel = ResolveCallerLabel(label, callerMember, callerFile);
-        _isHoldingWriteLock.Value = true;
-        var holdStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, Lifetime);
+        var holderAtWaitStart = Volatile.Read(ref _writeHolder);
+        var waitStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        Interlocked.Increment(ref _waitingWriters);
         try
         {
+            await _writeLock.WaitAsync(linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            Interlocked.Decrement(ref _waitingWriters);
+            var cancelledMs = System.Diagnostics.Stopwatch.GetElapsedTime(waitStart).TotalMilliseconds;
+            if (cancelledMs > WriteLockLogThresholdMs && PerfLog.Enabled)
+            {
+                var holder = holderAtWaitStart is null ? "" : $" behind {holderAtWaitStart.Label}";
+                PerfLog.Mark($"write lock wait {cancelledMs:F1}ms ({DisplayName}){holder}, cancelled");
+            }
+            throw;
+        }
+        Interlocked.Decrement(ref _waitingWriters);
+        var waitMs = System.Diagnostics.Stopwatch.GetElapsedTime(waitStart).TotalMilliseconds;
+        var resolvedLabel = ResolveCallerLabel(label, callerMember, callerFile);
+        var holdStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        Volatile.Write(ref _writeHolder, new WriteHolder(resolvedLabel, holdStart));
+        if (waitMs > WriteLockLogThresholdMs && PerfLog.Enabled)
+        {
+            var behind = holderAtWaitStart is null ? "" : $" behind {holderAtWaitStart.Label}";
+            PerfLog.Mark($"write lock wait {waitMs:F1}ms ({DisplayName}){behind}");
+        }
+
+        _isHoldingWriteLock.Value = true;
+        try
+        {
+            // A git process started by the work is never killed once it has started, so a
+            // cancellation (tab close) cannot leave index.lock behind or a half-applied change.
+            using var writeScope = GitWriteScope.Enter();
             return await work(linked.Token).ConfigureAwait(false);
         }
         finally
@@ -305,6 +374,7 @@ public sealed class RepositoryContext : IAsyncDisposable
                 PerfLog.Mark($"write lock hold {resolvedLabel} {holdMs:F1}ms ({DisplayName})");
             }
             _isHoldingWriteLock.Value = false;
+            Volatile.Write(ref _writeHolder, null);
             _writeLock.Release();
         }
     }
@@ -320,14 +390,24 @@ public sealed class RepositoryContext : IAsyncDisposable
     /// <summary>
     /// Marks a scope as one of Historia's own Git operations so the watcher suppresses the
     /// self-triggered refresh storm and issues one explicit refresh on completion.
+    /// <see cref="SelfOperationKind.Full"/> drops every watcher event for the scope;
+    /// <see cref="SelfOperationKind.GitDirectoryOnly"/>, for an operation that writes only inside
+    /// the git directory and may run for minutes, drops only the git-directory events so edits to
+    /// the working tree still show while it runs. The refresh fires when the last scope of either
+    /// kind ends.
     /// </summary>
-    public IDisposable BeginSelfOperation()
+    public IDisposable BeginSelfOperation(SelfOperationKind kind = SelfOperationKind.Full)
     {
-        Interlocked.Increment(ref _selfOperationDepth);
-        return new SelfOperationScope(this);
+        Interlocked.Increment(ref kind == SelfOperationKind.Full ? ref _selfOperationDepth : ref _gitDirectoryOperationDepth);
+        Interlocked.Increment(ref _anySelfOperationDepth);
+        return new SelfOperationScope(this, kind);
     }
 
+    /// <summary>A <see cref="SelfOperationKind.Full"/> scope is open.</summary>
     public bool IsSelfOperationInProgress => Volatile.Read(ref _selfOperationDepth) > 0;
+
+    /// <summary>A <see cref="SelfOperationKind.GitDirectoryOnly"/> scope is open.</summary>
+    public bool IsGitDirectoryOperationInProgress => Volatile.Read(ref _gitDirectoryOperationDepth) > 0;
 
     /// <summary>
     /// Counts Historia's own operations that have ended on this tab. A refresh whose work started
@@ -385,12 +465,24 @@ public sealed class RepositoryContext : IAsyncDisposable
         }
     }
 
-    private sealed class SelfOperationScope(RepositoryContext owner) : IDisposable
+    private sealed class SelfOperationScope(RepositoryContext owner, SelfOperationKind kind) : IDisposable
     {
+        private int _disposed;
+
         public void Dispose()
         {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                return;
+
             var operationEnd = Interlocked.Increment(ref owner._completedOperations);
-            if (Interlocked.Decrement(ref owner._selfOperationDepth) == 0)
+            if (kind == SelfOperationKind.Full)
+                Interlocked.Decrement(ref owner._selfOperationDepth);
+            else
+                Interlocked.Decrement(ref owner._gitDirectoryOperationDepth);
+
+            // One counter across both kinds, so exactly one ending scope sees zero and fires the
+            // refresh even when scopes of different kinds end on different threads at once.
+            if (Interlocked.Decrement(ref owner._anySelfOperationDepth) == 0)
                 _ = RefreshQuietlyAsync(owner, operationEnd);
         }
 
@@ -457,6 +549,19 @@ public sealed class RepositoryContext : IAsyncDisposable
         using var perfScope = Historia.Diagnostics.PerfLog.Scope($"RepositoryContext.DisposeAsync({DisplayName})");
         AppLog.Write(AppLogLevel.Info, "repo", $"Close({DisplayName})");
         try { _lifetimeCts.Cancel(); } catch { /* ignore */ }
+
+        // A write that already holds the lock finishes before the watcher and state go away; the
+        // cancelled lifetime stops writes that are still waiting. A close requested from inside a
+        // write would wait for itself, so that flow skips the wait.
+        if (!_isHoldingWriteLock.Value)
+        {
+            var waitStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            await _writeLock.WaitAsync().ConfigureAwait(false);
+            _writeLock.Release();
+            var waitedMs = System.Diagnostics.Stopwatch.GetElapsedTime(waitStart).TotalMilliseconds;
+            if (waitedMs > CloseWaitLogThresholdMs && PerfLog.Enabled)
+                PerfLog.Mark($"close waited {waitedMs:F1}ms for the write lock ({DisplayName})");
+        }
 
         await Watcher.DisposeAsync().ConfigureAwait(false);
         if (State is IAsyncDisposable stateDisposable)

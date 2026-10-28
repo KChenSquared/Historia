@@ -7,7 +7,8 @@ namespace Historia.ViewModels;
 /// a filter or an expanded folder change, so the view can virtualize it. Folders and sections keep
 /// their open state for the session, across repository switches, until the repository being shown
 /// is closed. The stash, submodule and worktree lists are seeded from the on-disk cache, then loaded
-/// once the repository's first graph paint has landed.
+/// once the repository's first graph paint has landed. The cache is read and written on the thread
+/// pool, one operation at a time, so no file is touched on the UI thread.
 /// </summary>
 public sealed partial class RefNavigatorViewModel : ViewModelBase
 {
@@ -59,6 +60,25 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
     private IReadOnlyList<BranchInfo>? _powerToolsBranches;
     private IReadOnlyList<RemoteInfo>? _powerToolsRemotes;
     private int _stashListGen;
+
+    // Bumped on every bind and on every refs change that re-reads the cache, so a cache read that
+    // lands after a newer one started is not applied over it.
+    private int _cacheGen;
+
+    // Cache reads and writes run one after another on the thread pool, so a read queued after a write
+    // sees it.
+    private readonly object _cacheIoSync = new();
+    private Task _cacheIoTail = Task.CompletedTask;
+
+    // What the Local, Remotes and Tags sections (indexed by RefSectionKind) were last built from; a
+    // refs change rebuilds only the sections whose inputs differ.
+    private readonly RefInputs[] _builtInputs = new RefInputs[3];
+
+    private readonly record struct RefInputs(
+        IReadOnlyList<BranchInfo>? Branches,
+        IReadOnlyList<RemoteInfo>? Remotes,
+        IReadOnlyList<TagInfo>? Tags,
+        GitObjectId? DetachedHead);
 
     // Submodule paths (or AllSubmodulesBusyKey for "Update all") with an Init and update in flight;
     // the row shows a busy label instead of its menu while present.
@@ -165,9 +185,12 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
             ResetSectionState();
 
         _repo = ctx;
+        ++_cacheGen;
         _submodulesFetched = false;
         _worktreesFetched = false;
-        SeedPowerToolsFromCache();
+        _stashList = null;
+        _submoduleList = null;
+        _worktreeList = null;
         if (_repo is not null)
             _repo.State.RefsChanged += OnRefsChanged;
         Rebuild();
@@ -176,6 +199,7 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
             _loadedStashStamp = _repo.State.StashStamp;
             _powerToolsBranches = _repo.State.Branches;
             _powerToolsRemotes = _repo.State.Remotes;
+            _ = SeedPowerToolsFromCacheAsync(_repo);
             _ = LoadPowerToolsAsync(_repo, listStashes: true);
         }
         else
@@ -225,10 +249,11 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
                 || !e.Remotes.SequenceEqual(_powerToolsRemotes);
 
             // Stashes depend only on the stash stamp, and submodules and worktrees don't depend on
-            // tags. When neither changed (a tags-only refresh), just rebuild the rows.
+            // tags. When neither changed (a tags-only refresh), just rebuild the sections whose
+            // inputs changed.
             if (!stashChanged && !refsChanged)
             {
-                Rebuild();
+                RebuildChangedRefSections();
                 return;
             }
 
@@ -242,7 +267,51 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
                 _worktreesFetched = false;
             }
 
-            var snap = _repoCache.TryLoad(_repo.RepositoryPath);
+            RebuildChangedRefSections();
+            _ = ReloadPowerToolsAsync(_repo, ++_cacheGen, stashChanged, refsChanged);
+        });
+
+    // Last-known stash, submodule and worktree lists from the on-disk cache while the real
+    // enumeration runs; a list stays null (shown as "Loading…") when nothing is cached. A list the
+    // real enumeration has already filled is kept. A refs change that bumped the generation while the
+    // read ran does not drop the seed: it only fills lists that are still null.
+    private async Task SeedPowerToolsFromCacheAsync(RepositoryContext repo)
+    {
+        var snap = await ReadCacheAsync(repo.RepositoryPath);
+        if (snap is null || !IsCurrentCacheRead(repo))
+            return;
+
+        var applied = false;
+        if (_stashList is null && snap.Stashes is not null)
+        {
+            _stashList = snap.Stashes;
+            applied = true;
+        }
+        if (_submoduleList is null && snap.Submodules is not null)
+        {
+            _submoduleList = snap.Submodules;
+            applied = true;
+        }
+        if (_worktreeList is null && snap.Worktrees is not null)
+        {
+            _worktreeList = snap.Worktrees;
+            applied = true;
+        }
+        if (applied)
+            RebuildPowerTools();
+    }
+
+    // A refs change shows the cached lists for what changed, then re-lists. The re-list runs even
+    // when a newer change superseded this one's cache read: the newer change may not need the lists
+    // this one does.
+    private async Task ReloadPowerToolsAsync(RepositoryContext repo, int gen, bool stashChanged, bool refsChanged)
+    {
+        var snap = await ReadCacheAsync(repo.RepositoryPath);
+        if (!IsCurrentCacheRead(repo))
+            return;
+
+        if (gen == _cacheGen)
+        {
             if (stashChanged)
                 _stashList = snap?.Stashes;
             if (refsChanged)
@@ -250,19 +319,35 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
                 _submoduleList = snap?.Submodules;
                 _worktreeList = snap?.Worktrees;
             }
+            RebuildPowerTools();
+        }
+        await LoadPowerToolsAsync(repo, listStashes: stashChanged);
+    }
 
-            Rebuild();
-            _ = LoadPowerToolsAsync(_repo, listStashes: stashChanged);
-        });
+    private bool IsCurrentCacheRead(RepositoryContext repo)
+        => !IsDisposed && ReferenceEquals(repo, _repo);
 
-    // Last-known stash, submodule and worktree lists from the on-disk cache while the real
-    // enumeration runs; null (shown as "Loading…") when nothing is cached.
-    private void SeedPowerToolsFromCache()
+    private async Task<RepoStateSnapshot?> ReadCacheAsync(string repoPath)
     {
-        var snap = _repo is not null ? _repoCache.TryLoad(_repo.RepositoryPath) : null;
-        _stashList = snap?.Stashes;
-        _submoduleList = snap?.Submodules;
-        _worktreeList = snap?.Worktrees;
+        try
+        {
+            return await RunCacheIo(() => _repoCache.TryLoadPowerTools(repoPath));
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write(AppLogLevel.Warn, "RefNavigator", "Reading the sidebar cache failed.", ex);
+            return null;
+        }
+    }
+
+    private Task<T> RunCacheIo<T>(Func<T> op)
+    {
+        lock (_cacheIoSync)
+        {
+            var next = _cacheIoTail.ContinueWith(_ => op(), CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+            _cacheIoTail = next;
+            return next;
+        }
     }
 
     private async Task LoadPowerToolsAsync(RepositoryContext repo, bool listStashes = true)
@@ -323,8 +408,13 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
             _worktreeList = wts ?? _worktreeList ?? [];
             _worktreesFetched = true;
         }
-        _repoCache.SavePowerTools(repo.RepositoryPath, _stashList, _submoduleList, _worktreeList);
+        var (stashes, submodules, worktrees) = (_stashList, _submoduleList, _worktreeList);
         RebuildPowerTools();
+        await RunCacheIo(() =>
+        {
+            _repoCache.SavePowerTools(repo.RepositoryPath, stashes, submodules, worktrees);
+            return true;
+        });
 
         static async Task<T?> Safe<T>(Func<Task<T>> op)
         {
@@ -393,6 +483,38 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
         Sections = _all;
     }
 
+    // Rebuilds the branch, remote and tag sections whose inputs differ from what they were last
+    // built from; the rest keep their rows.
+    private void RebuildChangedRefSections()
+    {
+        if (IsDisposed || _repo is not { } repo)
+            return;
+
+        var state = repo.State;
+        foreach (var section in (ReadOnlySpan<RefSectionViewModel>)[Local, Remotes, Tags])
+        {
+            if (!SameInputs(_builtInputs[(int)section.Kind], InputsFor(section.Kind, state)))
+                RebuildSection(section);
+        }
+    }
+
+    private static RefInputs InputsFor(RefSectionKind kind, IRepositoryStateService state) => kind switch
+    {
+        RefSectionKind.Local => new(state.Branches, null, null,
+            state.Repository is { IsHeadDetached: true } info ? info.HeadCommitId : null),
+        RefSectionKind.Remotes => new(state.Branches, state.Remotes, null, null),
+        _ => new(null, state.Remotes, state.Tags, null),
+    };
+
+    private static bool SameInputs(RefInputs a, RefInputs b)
+        => SameList(a.Branches, b.Branches)
+            && SameList(a.Remotes, b.Remotes)
+            && SameList(a.Tags, b.Tags)
+            && Equals(a.DetachedHead, b.DetachedHead);
+
+    private static bool SameList<T>(IReadOnlyList<T>? a, IReadOnlyList<T>? b)
+        => ReferenceEquals(a, b) || (a is not null && b is not null && a.Count == b.Count && a.SequenceEqual(b));
+
     // The stash, submodule and worktree lists change on their own schedule; the branch and tag
     // sections are untouched by them.
     private void RebuildPowerTools()
@@ -411,14 +533,17 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
         switch (section.Kind)
         {
             case RefSectionKind.Local:
+                _builtInputs[0] = InputsFor(RefSectionKind.Local, state);
                 section.SetTitle($"Local Branches ({state.Branches.Count(b => !b.IsRemote)})");
                 section.SetRows(section.IsOpen ? BuildLocalRows(repo, section) : []);
                 break;
             case RefSectionKind.Remotes:
+                _builtInputs[1] = InputsFor(RefSectionKind.Remotes, state);
                 section.SetTitle($"Remotes ({state.Remotes.Count})");
                 section.SetRows(section.IsOpen ? BuildRemoteRows(repo, section) : []);
                 break;
             case RefSectionKind.Tags:
+                _builtInputs[2] = InputsFor(RefSectionKind.Tags, state);
                 section.SetTitle($"Tags ({state.Tags.Count})");
                 section.SetRows(section.IsOpen ? BuildTagRows(repo, section) : []);
                 break;
@@ -447,7 +572,7 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
     {
         var rows = new List<RefRowViewModel>();
         var local = repo.State.Branches.Where(b => !b.IsRemote)
-            .OrderByDescending(b => b.IsCurrent).ThenBy(b => b.Name).ToList();
+            .OrderByDescending(b => b.IsCurrent).ThenBy(b => b.Name, StringComparer.Ordinal).ToList();
         var currentCanonical = repo.State.CurrentBranch?.CanonicalName;
 
         var repoInfo = repo.State.Repository;
@@ -485,7 +610,7 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
     private List<RefRowViewModel> BuildRemoteRows(RepositoryContext repo, RefSectionViewModel section)
     {
         var rows = new List<RefRowViewModel>();
-        var remote = repo.State.Branches.Where(b => b.IsRemote).OrderBy(b => b.Name).ToList();
+        var remote = repo.State.Branches.Where(b => b.IsRemote).OrderBy(b => b.Name, StringComparer.Ordinal).ToList();
 
         if (section.HasActiveFilter)
         {
@@ -533,10 +658,18 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
         return rows;
     }
 
+    // Case-insensitive first, ordinal as the tie-break, culture-free: the same order the branch
+    // tree uses, so tags and branches agree.
+    private static readonly Comparer<string> TagNameComparer = Comparer<string>.Create((a, b) =>
+    {
+        var c = string.Compare(a, b, StringComparison.OrdinalIgnoreCase);
+        return c != 0 ? c : string.CompareOrdinal(a, b);
+    });
+
     private List<RefRowViewModel> BuildTagRows(RepositoryContext repo, RefSectionViewModel section)
     {
         var rows = new List<RefRowViewModel>();
-        var tags = repo.State.Tags.OrderByDescending(t => t.Name).ToList();
+        var tags = repo.State.Tags.OrderByDescending(t => t.Name, TagNameComparer).ToList();
         var remotes = repo.State.Remotes.Select(r => r.Name).ToList();
 
         if (section.HasActiveFilter)

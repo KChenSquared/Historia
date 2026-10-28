@@ -68,7 +68,7 @@ internal sealed partial class ShortcutsBarView : UserControl, IDisposable
                 if (!group.IsMeasureValid && VisualRoot == null)
                     group.Measure(new Size(double.PositiveInfinity, BarHeight));
 
-                sum += group.DesiredSize.Width;
+                sum += UnboundedWidth(group);
             }
 
             if (sum <= 0 && _lastReportedNaturalWidth > 0)
@@ -82,6 +82,26 @@ internal sealed partial class ShortcutsBarView : UserControl, IDisposable
     }
 
     public event EventHandler? NaturalWidthChanged;
+
+    // A group's own DesiredSize is clamped to the width its parent offered, so it under-reports
+    // when the host is narrower than the buttons. Its children are measured without a width limit
+    // inside the horizontal stack, so their desired widths plus the spacing are the natural width.
+    private static double UnboundedWidth(StackPanel group)
+    {
+        double width = 0;
+        var visible = 0;
+        foreach (var child in group.Children)
+        {
+            if (!child.IsVisible)
+                continue;
+            width += child.DesiredSize.Width;
+            visible++;
+        }
+
+        if (visible > 1)
+            width += group.Spacing * (visible - 1);
+        return visible > 0 ? width + group.Margin.Left + group.Margin.Right : width;
+    }
 
     private static ShortcutsBarViewModel CreateViewModel(IServiceProvider? sp) => new(
         ViewServices.Dispatcher(sp),

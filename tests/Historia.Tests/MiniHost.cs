@@ -6,7 +6,13 @@ public sealed class MiniHost : IAsyncDisposable
     private static readonly Lazy<IGitExecutableLocator> SharedLocator = new(() =>
     {
         var locator = new GitExecutableLocator();
-        locator.ResolveAsync(null).GetAwaiter().GetResult();
+        // One timed-out `git --version` probe on a loaded machine would leave every test in the run
+        // on "git not found", so a failed resolution is tried again.
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            if (locator.ResolveAsync(null).GetAwaiter().GetResult().Found)
+                break;
+        }
         return locator;
     });
 

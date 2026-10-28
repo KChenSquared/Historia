@@ -9,6 +9,8 @@ public sealed class App : Application
     private SettingsService? _settings;
     private AvaloniaThemeApplier? _themeApplier;
     private LoggingSettingBinding? _loggingBinding;
+    private RuntimeStatsSampler? _runtimeStats;
+    private UiHeartbeat? _uiHeartbeat;
     private CancellationTokenSource? _singleInstanceCts;
     private SplashWindow? _splash;
     private MainWindow? _mainWindow;
@@ -44,6 +46,10 @@ public sealed class App : Application
 
         _loggingBinding = LoggingSettingBinding.Attach(_settings);
 
+        // Both samplers exist only while logging is on, and each follows the logging switch itself.
+        _uiHeartbeat = new UiHeartbeat(Dispatcher.UIThread);
+        _runtimeStats = new RuntimeStatsSampler();
+
         // Without developer mode, developer-only options are switched off before any theme is resolved.
         if (!Historia.Platform.DevMode.Enabled && _settings.Current.UseCustomTheme)
             _settings.UpdateAsync(s => s.WithoutDevOnlyOptions()).GetAwaiter().GetResult();
@@ -76,6 +82,9 @@ public sealed class App : Application
                 Historia.Diagnostics.PerfLog.Mark("desktop.Exit singleInstanceCts cancelled");
                 _singleInstanceCts?.Dispose();
                 Historia.Diagnostics.PerfLog.Mark("desktop.Exit singleInstanceCts disposed");
+                _uiHeartbeat?.Dispose();
+                _runtimeStats?.Dispose();
+                Historia.Diagnostics.PerfLog.Mark("desktop.Exit diagnostics samplers disposed");
                 _loggingBinding?.Dispose();
                 Historia.Diagnostics.PerfLog.Mark("desktop.Exit loggingBinding disposed");
                 _themeApplier?.Dispose();
@@ -443,15 +452,29 @@ public sealed class App : Application
     private void OnShutdownRequested(object? sender, ShutdownRequestedEventArgs e)
     {
         using var _ = Historia.Diagnostics.PerfLog.Scope("OnShutdownRequested settings flush");
-        try { _settings?.FlushAsync().GetAwaiter().GetResult(); } catch { /* best effort */ }
+        try
+        {
+            // The flush only does file I/O on thread-pool continuations, so waiting for it here
+            // cannot deadlock; the bound keeps a stuck disk or network share from freezing
+            // shutdown, and the flush carries on in the background.
+            if (_settings?.FlushAsync().Wait(TimeSpan.FromSeconds(2)) == false)
+                AppLog.Write(AppLogLevel.Warn, "app", "settings flush timed out during shutdown; continuing");
+        }
+        catch { /* best effort */ }
     }
 
     private void RegisterGlobalExceptionHandlers()
     {
+        var layoutRecovery = new LayoutRecovery(
+            () => (ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.Windows.ToArray() ?? [],
+            action => Dispatcher.UIThread.Post(action, DispatcherPriority.Background),
+            () => TimeSpan.FromMilliseconds(Environment.TickCount64));
+
         Dispatcher.UIThread.UnhandledException += (_, args) =>
         {
             AppLog.Write(AppLogLevel.Error, "unhandled", "Dispatcher.UIThread.UnhandledException", args.Exception);
             TryNotifyFatal(args.Exception);
+            layoutRecovery.OnDispatcherException();
             args.Handled = true;
         };
 

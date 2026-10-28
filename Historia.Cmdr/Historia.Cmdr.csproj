@@ -16,6 +16,12 @@
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
+  <!-- Release publishes ship ReadyToRun images so a short-lived CLI call skips most JIT work. Needs a
+       runtime identifier; the build stays framework-dependent, so there is no new runtime prerequisite. -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release' and '$(RuntimeIdentifier)' != ''">
+    <PublishReadyToRun>true</PublishReadyToRun>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\Historia.Core\Historia.Core.csproj" />
   </ItemGroup>

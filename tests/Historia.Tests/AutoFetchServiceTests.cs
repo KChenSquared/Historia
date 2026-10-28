@@ -281,6 +281,120 @@ public sealed class AutoFetchServiceTests : IAsyncDisposable
         Assert.Equal(1, delay.CountOf(AutoFetchService.InitialIdle)); // still the same cycle
     }
 
+    // ── Gate released before the refresh ──
+
+    [Fact(Timeout = 60000)]
+    public async Task The_network_gate_is_free_while_the_post_fetch_refresh_runs()
+    {
+        var ws = NewWorkspace();
+        var r1 = await ws.OpenAsync(Repo("a.txt").Path);
+
+        var gateFreeDuringRefresh = false;
+        var host = new FakeHost { RefreshGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
+        host.DuringRefresh = ctx =>
+        {
+            if (ctx.TryBeginNetworkOperation(new NetworkOperationInfo(NetworkOperationOwner.User, "Pull"), out var userOp))
+            {
+                gateFreeDuringRefresh = true;
+                userOp.Dispose();
+            }
+        };
+        var graph = new RecordingGraphLayoutService();
+        var delay = new ManualDelayer();
+        _svc = new AutoFetchService(ws, host, Settings(true), delay.Delay, graph);
+        _svc.Start();
+
+        await delay.WaitForPending("initial idle");
+        delay.Fire();
+
+        await host.RefreshStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.True(gateFreeDuringRefresh);
+        Assert.Same(r1, Assert.Single(host.Snapshot()));
+        Assert.Empty(graph.Snapshot()); // the graph refresh waits for the state refresh
+
+        host.RefreshGate!.SetResult();
+        await WaitUntil(() => graph.Snapshot().Count == 1, "commit-graph refresh after the state refresh");
+    }
+
+    [Fact(Timeout = 60000)]
+    public async Task A_tag_conflict_refreshes_after_the_gate_is_released_and_skips_the_graph_refresh()
+    {
+        var ws = NewWorkspace();
+        var r1 = await ws.OpenAsync(Repo("a.txt").Path);
+
+        var gateFreeDuringRefresh = false;
+        var host = new FakeHost
+        {
+            FailWith = new HistoriaGitException(GitErrorKind.TagConflict, "tag moved"),
+            RefreshGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+        host.DuringRefresh = ctx =>
+        {
+            if (ctx.TryBeginNetworkOperation(new NetworkOperationInfo(NetworkOperationOwner.User, "Pull"), out var userOp))
+            {
+                gateFreeDuringRefresh = true;
+                userOp.Dispose();
+            }
+        };
+        var graph = new RecordingGraphLayoutService();
+        var delay = new ManualDelayer();
+        _svc = new AutoFetchService(ws, host, Settings(true), delay.Delay, graph);
+        _svc.Start();
+
+        await delay.WaitForPending("initial idle");
+        delay.Fire();
+
+        await host.RefreshStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.True(gateFreeDuringRefresh);
+        Assert.Same(r1, Assert.Single(host.RefreshedSnapshot()));
+
+        host.RefreshGate!.SetResult();
+        await delay.WaitForPending("trailing step");
+        Assert.Empty(graph.Snapshot());
+        Assert.Equal(AutoFetchTabState.PendingThisCycle, _svc.GetTabState(r1));
+    }
+
+    [Fact(Timeout = 60000)]
+    public async Task The_gate_is_held_for_the_fetch_itself()
+    {
+        var ws = NewWorkspace();
+        var r1 = await ws.OpenAsync(Repo("a.txt").Path);
+
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var host = new FakeHost { BlockNext = release };
+        var delay = new ManualDelayer();
+        _svc = new AutoFetchService(ws, host, Settings(true), delay.Delay);
+        _svc.Start();
+
+        await delay.WaitForPending("initial idle");
+        delay.Fire();
+        await host.BlockedFetchStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.False(r1.TryBeginNetworkOperation(new NetworkOperationInfo(NetworkOperationOwner.User, "Pull"), out _));
+        Assert.Empty(host.RefreshedSnapshot());
+
+        release.SetResult();
+        await WaitUntil(() => host.RefreshedSnapshot().Count == 1, "refresh after the fetch");
+    }
+
+    [Fact(Timeout = 60000)]
+    public async Task A_failed_fetch_skips_the_post_fetch_refresh()
+    {
+        var ws = NewWorkspace();
+        await ws.OpenAsync(Repo("a.txt").Path);
+        await ws.OpenAsync(Repo("b.txt").Path);
+
+        var host = new FakeHost { Fail = true };
+        var delay = new ManualDelayer();
+        _svc = new AutoFetchService(ws, host, Settings(true), delay.Delay);
+        _svc.Start();
+
+        await delay.WaitForPending("loop idle");
+        delay.Fire();
+        await delay.WaitForPending("step to slot 1 after failed slot 0 fetch");
+        Assert.Empty(host.RefreshedSnapshot());
+    }
+
     // ── Commit-graph refresh after a successful fetch ──
 
     [Fact(Timeout = 60000)]
@@ -749,6 +863,7 @@ public sealed class AutoFetchServiceTests : IAsyncDisposable
     {
         private readonly object _g = new();
         private readonly List<RepositoryContext> _fetched = [];
+        private readonly List<RepositoryContext> _refreshed = [];
 
         public TaskCompletionSource? LoadGate { get; init; }
 
@@ -756,9 +871,23 @@ public sealed class AutoFetchServiceTests : IAsyncDisposable
         /// succeeding — used to prove a failed fetch triggers no commit-graph refresh.</summary>
         public bool Fail { get; set; }
 
+        /// <summary>When set, every <see cref="FetchAsync"/> call throws this exception.</summary>
+        public Exception? FailWith { get; init; }
+
         /// <summary>When set, the next <see cref="FetchAsync"/> records its token, signals
         /// <see cref="BlockedFetchStarted"/> and waits for this to complete before succeeding.</summary>
         public TaskCompletionSource? BlockNext { get; set; }
+
+        /// <summary>When set, <see cref="RefreshAfterFetchAsync"/> signals
+        /// <see cref="RefreshStarted"/>, runs <see cref="DuringRefresh"/>, then waits for this to
+        /// complete.</summary>
+        public TaskCompletionSource? RefreshGate { get; init; }
+
+        public TaskCompletionSource RefreshStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Runs inside <see cref="RefreshAfterFetchAsync"/>, before it waits on
+        /// <see cref="RefreshGate"/>.</summary>
+        public Action<RepositoryContext>? DuringRefresh { get; set; }
 
         public TaskCompletionSource BlockedFetchStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public CancellationToken BlockedFetchToken { get; private set; }
@@ -769,6 +898,8 @@ public sealed class AutoFetchServiceTests : IAsyncDisposable
         public async Task FetchAsync(RepositoryContext context, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
+            if (FailWith is not null)
+                throw FailWith;
             if (Fail)
                 throw new InvalidOperationException("simulated fetch failure");
             if (BlockNext is { } block)
@@ -782,10 +913,26 @@ public sealed class AutoFetchServiceTests : IAsyncDisposable
                 _fetched.Add(context);
         }
 
+        public async Task RefreshAfterFetchAsync(RepositoryContext context, CancellationToken ct)
+        {
+            DuringRefresh?.Invoke(context);
+            lock (_g)
+                _refreshed.Add(context);
+            RefreshStarted.TrySetResult();
+            if (RefreshGate is not null)
+                await RefreshGate.Task.WaitAsync(ct);
+        }
+
         public List<RepositoryContext> Snapshot()
         {
             lock (_g)
                 return [.. _fetched];
+        }
+
+        public List<RepositoryContext> RefreshedSnapshot()
+        {
+            lock (_g)
+                return [.. _refreshed];
         }
     }
 

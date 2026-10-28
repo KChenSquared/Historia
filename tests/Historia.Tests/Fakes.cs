@@ -44,7 +44,11 @@ public sealed class RecordingUiDispatcher : IUiDispatcher
 
     public int PostCount { get; private set; }
 
-    public bool CheckAccess() => true;
+    /// <summary>What <see cref="CheckAccess"/> reports; true by default, as if the caller were already
+    /// on the UI thread. Set false to exercise the marshalling path.</summary>
+    public bool OnUiThread { get; set; } = true;
+
+    public bool CheckAccess() => OnUiThread;
 
     public void Post(Action action)
     {

@@ -32,11 +32,13 @@ public sealed partial class WorkspaceService
     /// it is first focused, so a 15-tab restore costs one repository open, not fifteen.
     /// <paramref name="recordRecent"/> is false for session restore: re-opening the previous
     /// tab-set on launch must not reshuffle (or restamp) the Recent list — that list only moves
-    /// when the user explicitly opens or clones a repo.
+    /// when the user explicitly opens or clones a repo. <paramref name="placement"/>, when
+    /// given, inserts the tab at its saved position in the open set instead of appending it.
     /// </summary>
     private async Task<RepositoryContext> OpenCoreAsync(
         string path, bool focus, bool initialize, CancellationToken ct,
-        Task<RepositoryContext>? prefetched = null, bool recordRecent = true, DiscoveredRepository? discovered = null)
+        Task<RepositoryContext>? prefetched = null, bool recordRecent = true, DiscoveredRepository? discovered = null,
+        RestorePlacement? placement = null)
     {
         var context = await (prefetched ?? RepositoryContext.OpenAsync(path, _contextServices, ct, discovered))
             .ConfigureAwait(false);
@@ -44,7 +46,10 @@ public sealed partial class WorkspaceService
 
         lock (_sync)
         {
-            _open.Add(context);
+            if (placement is null)
+                _open.Add(context);
+            else
+                _open.Insert(placement.InsertIndexFor(_open, context), context);
             if (!initialize)
                 _deferredInit.Add(context);
         }
@@ -226,13 +231,20 @@ public sealed partial class WorkspaceService
         return InitOutcome.Completed;
     }
 
-    /// <summary>The tab's status right after its first load — immediately while it keeps focus,
-    /// otherwise from the background queue (see <see cref="RequestBackgroundRefreshAsync"/>).</summary>
+    /// <summary>The tab's status right after its first load: at once while it keeps focus, not
+    /// paced against earlier refreshes (it still opens the next pacing window), and from the
+    /// background queue otherwise (see <see cref="RequestBackgroundRefreshAsync"/>).</summary>
     private async Task RefreshStatusAfterInitAsync(RepositoryContext context)
     {
         try
         {
-            await RequestBackgroundRefreshAsync(context, full: false, context.Lifetime).ConfigureAwait(false);
+            bool isFocused;
+            lock (_sync)
+                isFocused = ReferenceEquals(_focused, context);
+
+            await (isFocused
+                ? RefreshUnpacedAsync(context, full: false, context.Lifetime)
+                : RequestRefreshAsync(context, full: false, context.Lifetime)).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -251,6 +263,13 @@ public sealed partial class WorkspaceService
     {
         try
         {
+            // The local identity read does not depend on the root-commit walk, so it runs beside
+            // it; it is only used if the resolved profile needs the repo's identity filled in. With
+            // no profile besides the global one, or neither a non-global default nor any binding,
+            // nothing can resolve, so the read is not started.
+            var configRead = context.IsBare || !CanResolveProfile()
+                ? null
+                : ReadLocalIdentityAsync(context, ct);
             var key = await _identity.ResolveAsync(context, ct).ConfigureAwait(false);
 
             // Keep the binding's last-known path fresh — the rename case working as intended.
@@ -269,8 +288,9 @@ public sealed partial class WorkspaceService
                 // non-blocking banner rather than being overwritten here.
                 if (!context.IsBare)
                 {
-                    var (name, email) = await context.Gateway.GetConfiguredIdentityAsync(ct).ConfigureAwait(false);
-                    if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(email))
+                    // A profile created while the walk ran was not known when the read was skipped.
+                    var configured = await (configRead ?? ReadLocalIdentityAsync(context, ct)).ConfigureAwait(false);
+                    if (configured is { } local && string.IsNullOrWhiteSpace(local.Name) && string.IsNullOrWhiteSpace(local.Email))
                     {
                         // Check the attempt token before starting the git-config write, then run
                         // the write itself with CancellationToken.None to prevent a focus switch
@@ -291,6 +311,21 @@ public sealed partial class WorkspaceService
         {
             // Identity/profile resolution failure must not stop the repo from opening.
         }
+    }
+
+    /// <summary>Whether some non-global profile could resolve for a repo: one exists and either it is
+    /// the default or a binding names a profile.</summary>
+    private bool CanResolveProfile()
+        => _profiles.GetAllProfiles().Any(p => !p.IsGlobal)
+            && (_profiles.GetDefaultProfile() is { IsGlobal: false } || _profiles.GetAllRepoBindings().Count > 0);
+
+    /// <summary>The repo's local user.name/user.email, or null when the read failed. Never
+    /// throws, so a read nobody awaits (the walk failed or no profile applies) leaves nothing
+    /// unobserved.</summary>
+    private static async Task<(string? Name, string? Email)?> ReadLocalIdentityAsync(RepositoryContext context, CancellationToken ct)
+    {
+        try { return await context.Gateway.GetConfiguredIdentityAsync(ct).ConfigureAwait(false); }
+        catch { return null; }
     }
 
     public async Task<RepositoryContext> InitAsync(string path, string? initialBranch, CancellationToken ct = default)

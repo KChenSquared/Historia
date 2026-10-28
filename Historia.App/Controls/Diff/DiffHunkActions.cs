@@ -5,6 +5,8 @@ namespace Historia.Controls;
 /// </summary>
 public sealed class DiffHunkActionGenerator : VisualLineElementGenerator
 {
+    private static readonly Cursor HandCursor = new(StandardCursorType.Hand);
+
     private readonly DiffPresenterBase _presenter;
     private bool _generatedForCurrentLine;
 
@@ -89,7 +91,7 @@ public sealed class DiffHunkActionGenerator : VisualLineElementGenerator
             FontSize = 10,
             Padding = new Thickness(4, 1),
             Margin = new Thickness(0, 0, 6, 0),
-            Cursor = new Cursor(StandardCursorType.Hand),
+            Cursor = HandCursor,
             VerticalAlignment = VerticalAlignment.Center,
         };
         var hunkIndex = row.HunkIndex;

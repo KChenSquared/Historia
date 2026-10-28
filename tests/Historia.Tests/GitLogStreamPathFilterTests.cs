@@ -155,4 +155,34 @@ public sealed class GitLogStreamPathFilterTests : IAsyncDisposable
             baseline.Select(r => string.Join(',', r.ParentIds)),
             withNull.Select(r => string.Join(',', r.ParentIds)));
     }
+
+    [Fact]
+    public void Priority_changes_do_not_disturb_the_walk()
+    {
+        if (!Locator.Current.Found)
+            return;
+
+        var repo = NewRepo();
+        for (var i = 0; i < 12; i++)
+        {
+            repo.WriteFile("a.txt", $"{i}\n").Stage().Commit($"a {i}");
+            repo.WriteFile($"other{i}.txt", "1\n").Stage().Commit($"other {i}");
+        }
+
+        var expected = Walk(repo, "a.txt").Select(r => r.Id).ToList();
+
+        using var stream = GitLogStream.TryStart(Locator, repo.Path, [repo.HeadSha], pathFilter: "a.txt");
+        Assert.NotNull(stream);
+        var actual = new List<GitObjectId>();
+        var toggle = 0;
+        while (stream.MoveNext())
+        {
+            actual.Add(stream.Current.Id);
+            stream.SetLowPriority(++toggle % 2 == 1);
+        }
+
+        Assert.False(stream.Failed, stream.FailureReason);
+        Assert.Equal(12, actual.Count);
+        Assert.Equal(expected, actual);
+    }
 }

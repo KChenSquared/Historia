@@ -36,6 +36,32 @@ public sealed class PerfLogTests : IDisposable
         Assert.False(flow2Observed);
     }
 
+    /// <summary>An argument whose formatting is observable: <see cref="Calls"/> counts every
+    /// <c>ToString</c>, and each one throws.</summary>
+    internal sealed class FormatBomb
+    {
+        public int Calls { get; private set; }
+
+        public override string ToString()
+        {
+            Calls++;
+            throw new InvalidOperationException("formatted while logging was disabled");
+        }
+    }
+
+    [Fact]
+    public void A_disabled_mark_or_scope_never_formats_its_interpolated_arguments()
+    {
+        PerfLog.OverrideEnabledForTesting(false);
+        var bomb = new FormatBomb();
+
+        PerfLog.Mark($"never {bomb}");
+        PerfLog.Mark($"never {bomb,8} {bomb:x} {bomb,-4:x}");
+        using (PerfLog.Scope($"never {bomb}")) { }
+
+        Assert.Equal(0, bomb.Calls);
+    }
+
     [Fact]
     public void Scope_creates_timer_only_when_enabled()
     {
@@ -108,6 +134,46 @@ public sealed class PerfLogWriterTests : IDisposable
         {
             System.Globalization.CultureInfo.CurrentCulture = saved;
         }
+    }
+
+    [Fact]
+    public void An_interpolated_mark_writes_the_same_text_as_the_string_overload()
+    {
+        var saved = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("fi-FI");
+            PerfLog.OverrideEnabledForTesting(true);
+            var value = 1234.5;
+            var name = "abc";
+            var count = 1234567;
+
+            PerfLog.Mark($"parity {value:F2} [{name,6}] [{name,-6}] {count:N0} {null as string}|");
+            string viaString = $"parity {value:F2} [{name,6}] [{name,-6}] {count:N0} {null as string}|";
+            PerfLog.Mark(viaString);
+            Assert.True(PerfLog.Flush(TimeSpan.FromSeconds(10)));
+
+            var lines = File.ReadAllLines(PerfLog.LogPath).Where(l => l.Contains("parity ", StringComparison.Ordinal)).ToArray();
+            Assert.Equal(2, lines.Length);
+            Assert.EndsWith(viaString, lines[0], StringComparison.Ordinal);
+            Assert.EndsWith(viaString, lines[1], StringComparison.Ordinal);
+            Assert.Contains("1234,50", viaString); // the current culture, as the string overload gets it
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = saved;
+        }
+    }
+
+    [Fact]
+    public void An_interpolated_scope_logs_its_formatted_label_when_enabled()
+    {
+        PerfLog.OverrideEnabledForTesting(true);
+        var n = 7;
+        using (PerfLog.Scope($"interpolated scope {n}")) { }
+
+        Assert.True(PerfLog.Flush(TimeSpan.FromSeconds(10)));
+        Assert.Contains(File.ReadAllLines(PerfLog.LogPath), l => l.Contains("interpolated scope 7: ", StringComparison.Ordinal) && l.EndsWith("ms", StringComparison.Ordinal));
     }
 
     [Fact]

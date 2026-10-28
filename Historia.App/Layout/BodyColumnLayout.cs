@@ -14,7 +14,9 @@ public static class BodyColumnLayout
     /// <summary>
     /// Resolves the width of the Left, Centre, and Right columns given the total content width,
     /// stored user intents, and effective pane minimums. Floors both side panes at their minimums
-    /// (left wins over right when even that doesn't fit) and gives way centre-first.
+    /// (left wins over right when even that doesn't fit) and gives way centre-first. Every width is
+    /// finite and non-negative and the three sum to <paramref name="total"/>; a non-finite or
+    /// negative input counts as 0.
     /// </summary>
     public static (double Left, double Centre, double Right) Resolve(
         double total,
@@ -23,35 +25,67 @@ public static class BodyColumnLayout
         double leftMin,
         double rightMin)
     {
+        total = Sanitize(total);
         if (total <= 0)
             return (0, 0, 0);
 
-        var lIntent = Math.Max(leftMin, leftIntent);
-        var rIntent = Math.Max(rightMin, rightIntent);
+        leftMin = Sanitize(leftMin);
+        rightMin = Sanitize(rightMin);
+        var lIntent = Math.Max(leftMin, Sanitize(leftIntent));
+        var rIntent = Math.Max(rightMin, Sanitize(rightIntent));
 
+        double left;
+        double right;
         if (total >= lIntent + rIntent)
         {
-            var left = lIntent;
-            var right = rIntent;
-            var centre = total - left - right;
-            return (left, centre, right);
+            left = lIntent;
+            right = rIntent;
+        }
+        else if (total >= leftMin + rightMin)
+        {
+            // Narrow space: centre collapses first and both sides stay >= their minimums.
+            left = Math.Clamp(total - rightMin, leftMin, lIntent);
+            right = total - left;
+        }
+        else
+        {
+            // Extremely narrow: left is kept up to total; right takes whatever space remains.
+            left = Math.Min(leftMin, total);
+            right = total - left;
         }
 
-        // Narrow space: centre collapses first.
-        if (total >= leftMin + rightMin)
+        var centre = total - left - right;
+        if (centre < 0)
         {
-            // Both sides remain >= their minimums.
-            var left = Math.Clamp(total - rightMin, leftMin, lIntent);
-            var right = total - left;
-            return (left, 0, right);
+            // Rounding or an over-wide intent: the right column takes the remainder.
+            centre = 0;
+            right = Math.Max(0, total - left);
         }
 
-        // Extremely narrow: total below leftMin + rightMin.
-        // Left is kept up to total; right takes whatever space remains.
-        {
-            var left = Math.Min(leftMin, total);
-            var right = Math.Max(0, total - left);
-            return (left, 0, right);
-        }
+        return (left, centre, right);
     }
+
+    /// <summary>
+    /// Rounds the pinned side-column widths to the device pixel grid at <paramref name="scale"/> so
+    /// that together they never exceed <paramref name="total"/>. Rounding can push the left column
+    /// past the total and the right column over what is left; the left width is capped at the last
+    /// whole pixel inside the total and the right width is shaved to whole pixels. The shave carries
+    /// a small epsilon so float error (for example 924 * 1.25 - 667.2 * 1.25) does not cost a pixel.
+    /// Both widths are finite and non-negative.
+    /// </summary>
+    internal static (double Left, double Right) RoundColumns(double total, double left, double right, double scale)
+    {
+        total = Sanitize(total);
+        scale = double.IsFinite(scale) && scale > 0 ? scale : 1;
+
+        var roundedLeft = LayoutHelper.RoundLayoutValue(Sanitize(left), scale);
+        var roundedRight = LayoutHelper.RoundLayoutValue(Sanitize(right), scale);
+        roundedLeft = Math.Min(roundedLeft, Math.Floor(total * scale + 1e-9) / scale);
+        if (roundedLeft + roundedRight > total)
+            roundedRight = Math.Floor((total - roundedLeft) * scale + 1e-6) / scale;
+
+        return (Math.Max(0, roundedLeft), Math.Max(0, roundedRight));
+    }
+
+    private static double Sanitize(double value) => double.IsFinite(value) && value > 0 ? value : 0;
 }

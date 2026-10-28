@@ -6,7 +6,12 @@ public sealed class RepoStateCache(ISettingsService settings) : IRepoStateCache
     private const int Version = 2;
     private const int MaxFilesPerKind = 60;
 
+    private static readonly long PruneIntervalMs = (long)TimeSpan.FromHours(1).TotalMilliseconds;
+
     private static readonly JsonSerializerOptions Json = HistoriaJson.Options;
+
+    // Environment.TickCount64 at which the cache directory is next pruned; 0 means the next write prunes.
+    private long _nextPruneTick;
 
     private bool Enabled => settings.Current.PersistRepoCache;
 
@@ -35,6 +40,15 @@ public sealed class RepoStateCache(ISettingsService settings) : IRepoStateCache
             pt?.Stashes,
             pt?.Submodules,
             pt?.Worktrees);
+    }
+
+    public RepoStateSnapshot? TryLoadPowerTools(string repoPath)
+    {
+        if (!Enabled)
+            return null;
+
+        var pt = ReadGz<PowerFile>(FileFor(repoPath, "pt"));
+        return pt is null ? null : new RepoStateSnapshot(null, null, null, pt.Stashes, pt.Submodules, pt.Worktrees);
     }
 
     // ── Save ──
@@ -104,7 +118,7 @@ public sealed class RepoStateCache(ISettingsService settings) : IRepoStateCache
         }
     }
 
-    private static void WriteGz<T>(string dest, T value)
+    private void WriteGz<T>(string dest, T value)
     {
         try
         {
@@ -114,9 +128,20 @@ public sealed class RepoStateCache(ISettingsService settings) : IRepoStateCache
             using (var gz = new GZipStream(fs, CompressionLevel.Fastest))
                 JsonSerializer.Serialize(gz, value, Json);
             File.Move(tmp, dest, overwrite: true);
-            Prune();
+            PruneIfDue();
         }
         catch { /* cache write is best-effort */ }
+    }
+
+    // Listing the directory costs more than the write, so it runs on the first write of a session
+    // and then at most once an hour.
+    private void PruneIfDue()
+    {
+        var now = Environment.TickCount64;
+        var due = Volatile.Read(ref _nextPruneTick);
+        if (now < due || Interlocked.CompareExchange(ref _nextPruneTick, now + PruneIntervalMs, due) != due)
+            return;
+        Prune();
     }
 
     private static void Prune()

@@ -280,8 +280,11 @@ public sealed class GitGatewayCaseCollisionStatusTests : IAsyncDisposable
         Assert.DoesNotContain(secondRequests, r => r.Arguments.Contains("config"));
     }
 
+    private static bool IsWholeIndexListing(GitCliRequest r) =>
+        r.Arguments.Contains("ls-files") && r.Arguments.Contains("-s") && !r.Arguments.Contains("--");
+
     [Fact]
-    public async Task Repo_without_collisions_never_lists_the_index()
+    public async Task Status_in_a_repo_without_collisions_never_lists_the_whole_index()
     {
         using var repo = TestRepositoryBuilder.FromTemplate("no-collision-cache", r =>
             r.WriteFile("file.txt", "v1\n").Stage().Commit("init"));
@@ -301,9 +304,96 @@ public sealed class GitGatewayCaseCollisionStatusTests : IAsyncDisposable
         Assert.Single(secondStatus.Unstaged);
         Assert.Empty(secondStatus.HiddenCaseCollisions);
 
-        await ctx.Gateway.StageAsync(["file.txt"]);
+        // The tab's own refreshes (the file watcher reacting to git's index writes) share the spy,
+        // so the cached answers are checked by kind rather than by total request count.
+        var secondRequests = spy.Requests.Skip(countBefore).ToList();
+        Assert.Contains(secondRequests, r => r.Arguments.Contains("status"));
+        Assert.DoesNotContain(secondRequests, r => r.Arguments.Contains("ls-files"));
+        Assert.DoesNotContain(secondRequests, r => r.Arguments.Contains("core.ignorecase"));
 
-        var laterRequests = spy.Requests.Skip(countBefore).ToList();
-        Assert.DoesNotContain(laterRequests, r => r.Arguments.Contains("ls-files") && r.Arguments.Contains("-s"));
+        await File.WriteAllTextAsync(Path.Combine(repo.Path, "file.txt"), "v3\n");
+        await ctx.Gateway.GetStatusAsync();
+
+        Assert.DoesNotContain(spy.Requests, IsWholeIndexListing);
+    }
+
+    [Fact]
+    public async Task Status_asks_the_index_only_about_the_modified_paths()
+    {
+        using var repo = TestRepositoryBuilder.FromTemplate("no-collision-targeted", r =>
+            r.WriteFile("file.txt", "v1\n").WriteFile("other.txt", "v1\n").Stage().Commit("init"));
+
+        await GitAsync(repo.Path, "config", "core.ignorecase", "true");
+        await File.WriteAllTextAsync(Path.Combine(repo.Path, "file.txt"), "v2\n");
+
+        var spy = new InterceptingGitCliService(_host.Cli);
+        var ctx = _host.Open(repo.Path, spy);
+
+        await ctx.Gateway.GetStatusAsync();
+
+        var query = Assert.Single(spy.Requests, r => r.Arguments.Contains("ls-files"));
+        Assert.Equal(["ls-files", "-s", "-z", "--", ":(literal,icase)file.txt"], query.Arguments);
+    }
+
+    [Fact]
+    public async Task Twin_detection_never_lists_the_whole_index()
+    {
+        var fixture = await CreateCollisionFixtureAsync();
+        if (fixture is null)
+            return;
+
+        using var repo = fixture.Value.Repo;
+        var spy = new InterceptingGitCliService(_host.Cli);
+        var ctx = _host.Open(repo.Path, spy);
+
+        var status = await ctx.Gateway.GetStatusAsync();
+
+        Assert.Equal([fixture.Value.LosingPath], status.HiddenCaseCollisions);
+        Assert.DoesNotContain(spy.Requests, IsWholeIndexListing);
+        Assert.Contains(spy.Requests, r => r.Arguments.Contains("ls-files") && r.Arguments.Contains("--"));
+    }
+
+    [Fact]
+    public async Task A_failed_candidate_query_falls_back_to_the_whole_index_and_still_hides_the_twin()
+    {
+        var fixture = await CreateCollisionFixtureAsync();
+        if (fixture is null)
+            return;
+
+        using var repo = fixture.Value.Repo;
+        var spy = new InterceptingGitCliService(_host.Cli)
+        {
+            Intercept = r => r.Arguments.Contains("ls-files") && r.Arguments.Contains("--")
+                ? InterceptingGitCliService.Failure()
+                : null,
+        };
+        var ctx = _host.Open(repo.Path, spy);
+
+        var status = await ctx.Gateway.GetStatusAsync();
+
+        Assert.Empty(status.Unstaged);
+        Assert.Equal([fixture.Value.LosingPath], status.HiddenCaseCollisions);
+        Assert.Contains(spy.Requests, IsWholeIndexListing);
+    }
+
+    [Fact]
+    public async Task Staging_in_a_repo_without_collisions_lists_the_index_at_most_once()
+    {
+        using var repo = TestRepositoryBuilder.FromTemplate("no-collision-stage", r =>
+            r.WriteFile("file.txt", "v1\n").WriteFile("other.txt", "v1\n").Stage().Commit("init"));
+
+        await GitAsync(repo.Path, "config", "core.ignorecase", "true");
+        await File.WriteAllTextAsync(Path.Combine(repo.Path, "file.txt"), "v2\n");
+        await File.WriteAllTextAsync(Path.Combine(repo.Path, "other.txt"), "v2\n");
+
+        var spy = new InterceptingGitCliService(_host.Cli);
+        var ctx = _host.Open(repo.Path, spy);
+
+        await ctx.Gateway.GetStatusAsync();
+        await ctx.Gateway.StageAsync(["file.txt"]);
+        await ctx.Gateway.GetStatusAsync();
+        await ctx.Gateway.StageAsync(["other.txt"]);
+
+        Assert.True(spy.Requests.Count(IsWholeIndexListing) <= 1);
     }
 }

@@ -11,10 +11,10 @@ namespace Historia.Services.Graph;
 /// every single call (quadratic allocation in the number of extends; ~100 MB
 /// per extend at 2M rows, worse at higher <c>ResidentRowCap</c> settings).
 /// <para>
-/// <b>Concurrency contract:</b> <see cref="Add"/> is single-writer — every caller already holds
-/// <c>lock (GraphLayoutState)</c> around the whole Consume/Build pass that appends rows (see
+/// <b>Concurrency contract:</b> <see cref="Add"/> is single-writer — every caller holds
+/// <c>lock (GraphLayoutState)</c> around each Add (see
 /// <c>GraphLayoutService.ExtendLayoutAsync</c>/<c>ComputeLayoutAsync</c>'s own locking of
-/// <c>existing.State</c>). <see cref="Count"/> and the indexer may be called from ANY thread at
+/// <c>existing.State</c>); an extend appends its rows in several separate holds, not one. <see cref="Count"/> and the indexer may be called from ANY thread at
 /// ANY time with NO lock — the render thread reads a snapshot's rows while a background Extend may
 /// be appending to this SAME instance. Safety comes from ordering, not from a lock:
 /// </para>
@@ -83,9 +83,9 @@ internal sealed class ChunkedAppendList<T>
         Volatile.Write(ref _count, index + 1); // publish the item before any reader can see the new count
     }
 
-    /// <summary>Copies every element into a fresh array. Never called by
-    /// <c>DagLayoutEngine.Build</c> (that copy would make extends quadratic) — for tests and
-    /// diagnostics only.</summary>
+    /// <summary>Copies every element into a fresh array. Called once per full Compute, never on
+    /// the incremental path: <c>DagLayoutEngine.Build</c> reads the list in place, because a copy
+    /// per extend would make extends quadratic.</summary>
     public T[] ToArray()
     {
         var count = Count;

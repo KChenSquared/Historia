@@ -73,12 +73,23 @@ then launches Historia.
 #### Test Suite Architecture & Parallelism
 - **Parallel Collections:** Test collections run in parallel on 16 threads (`xunit.runner.json`). Under xunit's default `conservative` algorithm, that caps how many classes run at once, and a class's own tests run one after another.
 - **Slowest First:** `SlowestFirstCollectionOrderer` starts the longest-running classes first, so none of them is admitted late and becomes the run's tail. Re-rank its list from a TRX run (`dotnet test --logger trx`) when one class starts dominating the end of the run.
-- **Serial Collection:** Tests that mutate process-global state, configure ambient environment variables, watch process-wide events such as `TaskScheduler.UnobservedTaskException`, or contend on global locks must be annotated with `[Collection("serial")]`. The serial collection runs alone after every parallel one, so keep it small. It includes 5 test classes:
+- **Serial Collection:** Tests that mutate process-global state, configure ambient environment variables, watch process-wide events such as `TaskScheduler.UnobservedTaskException`, or contend on global locks must be annotated with `[Collection("serial")]`. The serial collection runs alone after every parallel one, so keep it small. It includes 16 test classes:
   1. `AppPathsTests`
   2. `AppLogTests`
   3. `TestScratchTests`
   4. `GraphConcurrencyInvariantTests`
   5. `RepositoryStateRefreshCoalescingTests`
+  6. `ColdLoadPerfManualTests`
+  7. `GitCliPriorityTests`
+  8. `GitCliServicePoolTests`
+  9. `GitLogStreamDisposeKillTests`
+  10. `LogTrimmerTests`
+  11. `LoggingSettingBindingTests`
+  12. `LoggingSwitchTests`
+  13. `PerfLogWriterTests`
+  14. `ProcessKillerTests`
+  15. `QueuedLineWriterTests`
+  16. `RuntimeStatsSamplerSwitchTests`
 - **Timeouts:** A `[Fact(Timeout = ...)]` guards against hangs only. Set it to at least 2x the test's duration under a full parallel run, not its duration alone.
 - **Scratch Root & Fixture Lifecycle:** Disk fixtures live under a per-test-project scratch root inside the build output directory (`bin\<TestProject>\scratch`, or `HISTORIA_TEST_TMP` override). Each test process creates a per-run `historia-run-<pid>-*` folder deleted on process exit (`TestScratch.NewDirectory()`, `NewPath()`, `Delete()`). Run folders of finished test processes older than 30 minutes are purged on first use (`TestScratch.PruneStale()`); nothing else under the root is touched, and the system temporary directory is never pruned. `GIT_CEILING_DIRECTORIES` isolates test repositories from the enclosing repository, and `TestTempUsageGuardTests` guards against test fixtures created in the system temporary directory.
 - **Performance & Timing Assertions:** Per Rule 25, performance tests record timing diagnostics to test output (`ITestOutputHelper`) rather than asserting hard wall-clock ratios (e.g. "must be 5x faster") that can flake under parallel I/O contention.

@@ -266,6 +266,7 @@ internal sealed class GraphMetaWriter(string repoPath, long fingerprint, bool in
             using var search = new StreamWriter(new FileStream(_search, FileMode.Append, FileAccess.Write, FileShare.Read), new UTF8Encoding(false));
             var bw = new BinaryWriter(dat, new UTF8Encoding(false), leaveOpen: true);
             var idxBuf = new byte[8];
+            var fieldBuf = new char[256];
             Span<byte> zeroSha = stackalloc byte[_hashSize];
             zeroSha.Clear();
 
@@ -295,9 +296,9 @@ internal sealed class GraphMetaWriter(string repoPath, long fingerprint, bool in
                 // in-memory store does.
                 search.Write(m.Id.ToString());
                 search.Write(GraphMetaStore.Sep);
-                search.Write(Clean(m.MessageShort).ToLowerInvariant());
+                WriteSearchField(search, m.MessageShort, ref fieldBuf);
                 search.Write(GraphMetaStore.Sep);
-                search.Write(Clean(m.AuthorName).ToLowerInvariant());
+                WriteSearchField(search, m.AuthorName, ref fieldBuf);
                 search.Write('\n');
             }
             bw.Flush();
@@ -574,8 +575,29 @@ internal sealed class GraphMetaWriter(string repoPath, long fingerprint, bool in
         bw.Write((short)when.Offset.TotalMinutes);        // zone offset
     }
 
-    private static string Clean(string s)
-        => s.Replace('\n', ' ').Replace('\r', ' ').Replace(GraphMetaStore.Sep, ' ');
+    /// <summary>Writes <paramref name="s"/> lower-cased (invariant culture) with line breaks and the
+    /// field separator turned into spaces, through <paramref name="buf"/> so a row costs no string.
+    /// Lower-casing never produces or removes those characters, so the order of the two steps does
+    /// not change the bytes.</summary>
+    private static void WriteSearchField(StreamWriter search, string s, ref char[] buf)
+    {
+        if (buf.Length < s.Length)
+            buf = new char[Math.Max(s.Length, buf.Length * 2)];
+
+        var span = buf.AsSpan(0, s.Length);
+        if (s.AsSpan().ToLowerInvariant(span) != s.Length)
+        {
+            // The buffer was not written; never emit whatever it held before.
+            span = s.ToLowerInvariant().ToCharArray();
+        }
+
+        for (var i = 0; i < span.Length; i++)
+        {
+            if (span[i] is '\n' or '\r' || span[i] == GraphMetaStore.Sep)
+                span[i] = ' ';
+        }
+        search.Write(span);
+    }
 
     /// <summary>Appends a spill batch under this repo's <see cref="GraphCacheLocks"/>
     /// lock, re-checking the on-disk header first rather than trusting the caller's own idea of

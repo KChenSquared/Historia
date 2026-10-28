@@ -71,7 +71,7 @@ public class GitCliServiceTests
     }
 
     [Fact]
-    public async Task Cancellation_kills_the_process_and_reports_cancelled()
+    public async Task Cancellation_before_start_reports_cancelled_without_starting_git()
     {
         var cli = await MakeAsync();
         using var repo = TestRepositoryBuilder.FromTemplate("empty-repo", _ => { });
@@ -86,6 +86,288 @@ public class GitCliServiceTests
         }, cts.Token);
 
         Assert.Equal(GitErrorKind.Cancelled, result.ErrorKind);
+    }
+
+    [Fact]
+    public async Task Cancellation_before_start_never_starts_a_write()
+    {
+        var cli = await MakeAsync();
+        using var repo = TestRepositoryBuilder.FromTemplate("empty-repo", _ => { });
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        // The alias leaves a marker if git runs at all; under a write scope a started process is
+        // never killed, so a wrongly started one would have finished and written it.
+        using var scope = GitWriteScope.Enter();
+        var result = await cli.RunAsync(new GitCliRequest
+        {
+            Arguments = ["-c", "alias.mark=!echo hi > marker", "mark"],
+            WorkingDirectory = repo.Path,
+        }, cts.Token);
+
+        Assert.Equal(GitErrorKind.Cancelled, result.ErrorKind);
+        Assert.False(File.Exists(Path.Combine(repo.Path, "marker")));
+    }
+
+    /// <summary>Runs <c>echo started; wait N seconds; echo finished</c> and cancels as soon as git has
+    /// printed the first line, so the cancellation always lands after the process started. With
+    /// <paramref name="shellBuiltinWait"/> the wait is a loop inside the shell itself instead of a
+    /// <c>sleep</c> child: a tree kill of concurrent MSYS processes can end a <c>sleep</c> early on
+    /// its own, after which the shell prints "finished" even though git was killed.</summary>
+    private static async Task<GitCliResult> RunAndCancelAfterStartAsync(
+        GitCliService cli, string workingDirectory, int waitSeconds, GitCliCancelPolicy policy,
+        bool shellBuiltinWait = false)
+    {
+        using var cts = new CancellationTokenSource();
+        var wait = shellBuiltinWait
+            ? $"SECONDS=0; while [ $SECONDS -lt {waitSeconds} ]; do :; done"
+            : $"sleep {waitSeconds}";
+        var request = new GitCliRequest
+        {
+            Arguments = ["-c", $"alias.slow=!echo started; {wait}; echo finished", "slow"],
+            WorkingDirectory = workingDirectory,
+            CancelPolicy = policy,
+            Timeout = TimeSpan.FromSeconds(60),
+        };
+
+        return await cli.RunAsync(request, progress: null, onStdoutLine: line =>
+        {
+            if (line == "started")
+                cts.Cancel();
+        }, cts.Token);
+    }
+
+    [Fact]
+    public async Task Cancellation_after_start_kills_the_process_by_default()
+    {
+        var cli = await MakeAsync();
+        using var repo = TestRepositoryBuilder.FromTemplate("empty-repo", _ => { });
+
+        var result = await RunAndCancelAfterStartAsync(
+            cli, repo.Path, waitSeconds: 30, GitCliCancelPolicy.KillOnCancel, shellBuiltinWait: true);
+
+        Assert.Equal(GitErrorKind.Cancelled, result.ErrorKind);
+        Assert.True(result.Duration < TimeSpan.FromSeconds(20), $"took {result.Duration}");
+        Assert.DoesNotContain("finished", result.StandardOutput);
+    }
+
+    [Fact]
+    public async Task Cancellation_after_start_inside_a_write_scope_returns_the_real_exit_code()
+    {
+        var cli = await MakeAsync();
+        using var repo = TestRepositoryBuilder.FromTemplate("empty-repo", _ => { });
+
+        using var scope = GitWriteScope.Enter();
+        var result = await RunAndCancelAfterStartAsync(cli, repo.Path, waitSeconds: 2, GitCliCancelPolicy.KillOnCancel);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(GitErrorKind.None, result.ErrorKind);
+        Assert.Contains("finished", result.StandardOutput);
+    }
+
+    [Fact]
+    public async Task Cancellation_after_start_with_the_never_after_start_policy_returns_the_real_exit_code()
+    {
+        var cli = await MakeAsync();
+        using var repo = TestRepositoryBuilder.FromTemplate("empty-repo", _ => { });
+
+        var result = await RunAndCancelAfterStartAsync(cli, repo.Path, waitSeconds: 2, GitCliCancelPolicy.NeverAfterStart);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("finished", result.StandardOutput);
+    }
+
+    [Fact]
+    public async Task A_timeout_after_start_does_not_kill_a_write()
+    {
+        var cli = await MakeAsync();
+        using var repo = TestRepositoryBuilder.FromTemplate("empty-repo", _ => { });
+
+        var result = await cli.RunAsync(new GitCliRequest
+        {
+            Arguments = ["-c", "alias.slow=!sleep 2; echo finished", "slow"],
+            WorkingDirectory = repo.Path,
+            CancelPolicy = GitCliCancelPolicy.NeverAfterStart,
+            Timeout = TimeSpan.FromMilliseconds(300),
+        });
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(GitErrorKind.None, result.ErrorKind);
+        Assert.Contains("finished", result.StandardOutput);
+    }
+
+    [Fact]
+    public async Task A_child_process_holding_the_pipes_does_not_hold_the_call_hostage()
+    {
+        var cli = await MakeAsync();
+        using var repo = TestRepositoryBuilder.FromTemplate("empty-repo", _ => { });
+
+        // The backgrounded sleep inherits git's stdout and stderr and outlives git by far.
+        var result = await cli.RunAsync(new GitCliRequest
+        {
+            Arguments = ["-c", "alias.bg=!sleep 25 & echo hi", "bg"],
+            WorkingDirectory = repo.Path,
+            Timeout = Timeout.InfiniteTimeSpan,
+        }).WaitAsync(TimeSpan.FromSeconds(60));
+
+        Assert.True(result.IsSuccess, result.StandardError);
+        Assert.Contains("hi", result.StandardOutput);
+        Assert.True(result.Duration >= TimeSpan.FromSeconds(4), $"gave up after {result.Duration}");
+        Assert.True(result.Duration < TimeSpan.FromSeconds(20), $"waited {result.Duration}");
+    }
+
+    [Fact]
+    public async Task Output_waiting_in_the_pipe_is_captured_in_full_even_when_the_readers_start_late()
+    {
+        var locator = new GitExecutableLocator();
+        await locator.ResolveAsync(null);
+        var cli = new GitCliService(locator) { ReaderStartDelay = TimeSpan.FromSeconds(6) };
+
+        using var repo = TestRepositoryBuilder.FromTemplate("git-cli-seed", r =>
+            r.WriteFile("seed", "x").Stage().Commit("seed"));
+        var content = new byte[1024 * 1024];
+        Array.Fill(content, (byte)'a');
+        File.WriteAllBytes(Path.Combine(repo.Path, "big.bin"), content);
+        var blob = repo.Git("hash-object", "-w", "big.bin").Trim();
+
+        var result = await cli.RunAsync(new GitCliRequest
+        {
+            Arguments = ["cat-file", "blob", blob],
+            WorkingDirectory = repo.Path,
+            RawStandardOutput = true,
+        });
+
+        Assert.True(result.IsSuccess, result.StandardError);
+        Assert.Equal(content, result.StandardOutputBytes);
+    }
+
+    [Fact]
+    public async Task Stderr_over_one_megabyte_keeps_the_tail()
+    {
+        var cli = await MakeAsync();
+        using var repo = TestRepositoryBuilder.FromTemplate("empty-repo", _ => { });
+
+        var result = await cli.RunAsync(new GitCliRequest
+        {
+            Arguments = ["-c", "alias.noisy=!seq 1 40000 | sed 's/^/stderr-line-padded-so-the-total-passes-the-cap-/' >&2", "noisy"],
+            WorkingDirectory = repo.Path,
+        });
+
+        Assert.True(result.IsSuccess);
+        Assert.True(result.StandardError.Length <= 1024 * 1024 + 200, $"kept {result.StandardError.Length} chars");
+        Assert.EndsWith("-40000" + Environment.NewLine, result.StandardError);
+        Assert.DoesNotContain("passes-the-cap-1" + Environment.NewLine, result.StandardError);
+    }
+
+    [Fact]
+    public async Task A_large_stdin_payload_is_fully_consumed()
+    {
+        var cli = await MakeAsync();
+        using var repo = TestRepositoryBuilder.FromTemplate("empty-repo", _ => { });
+
+        var payload = string.Concat(Enumerable.Repeat("0123456789abcdef\n", 100 * 1024 / 17 + 1))[..(100 * 1024)];
+
+        var result = await cli.RunAsync(new GitCliRequest
+        {
+            Arguments = ["hash-object", "--stdin"],
+            WorkingDirectory = repo.Path,
+            StandardInput = payload,
+        });
+
+        Assert.True(result.IsSuccess, result.StandardError);
+        var bytes = Encoding.ASCII.GetBytes(payload);
+        var expected = Convert.ToHexString(SHA1.HashData(
+            [.. Encoding.ASCII.GetBytes($"blob {bytes.Length}\0"), .. bytes])).ToLowerInvariant();
+        Assert.Equal(expected, result.StandardOutput.Trim());
+    }
+
+    [Fact]
+    public async Task Raw_mode_decodes_stdout_text_on_demand_and_keeps_the_result()
+    {
+        var (cli, repo, blob) = await AwkwardBlobAsync();
+        using var _ = repo;
+
+        var result = await cli.RunAsync(new GitCliRequest
+        {
+            Arguments = ["cat-file", "blob", blob],
+            WorkingDirectory = repo.Path,
+            RawStandardOutput = true,
+        });
+
+        var text = result.StandardOutput;
+        Assert.Equal("a\r\nb\rc\0d\n", text);
+        Assert.Same(text, result.StandardOutput);
+    }
+
+    [Fact]
+    public async Task A_throwing_line_callback_fails_the_call_instead_of_crashing_the_process()
+    {
+        var cli = await MakeAsync();
+        using var repo = TestRepositoryBuilder.FromTemplate("git-cli-seed", r =>
+            r.WriteFile("seed", "x").Stage().Commit("seed"));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => cli.RunAsync(new GitCliRequest
+        {
+            Arguments = ["log", "--oneline"],
+            WorkingDirectory = repo.Path,
+        }, progress: null, onStdoutLine: _ => throw new InvalidOperationException("callback")));
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task A_throwing_line_callback_on_a_never_killed_write_keeps_draining_and_reports_the_failure()
+    {
+        var cli = await MakeAsync();
+        using var repo = TestRepositoryBuilder.FromTemplate("empty-repo", _ => { });
+        var calls = 0;
+
+        // Far more output than any pipe buffer holds: a reader that stopped at the first throw
+        // would leave git blocked on a full pipe, and a never-killed write would hang with it.
+        var run = cli.RunAsync(new GitCliRequest
+        {
+            Arguments = ["-c", "alias.noisy=!seq 1 200000", "noisy"],
+            WorkingDirectory = repo.Path,
+            CancelPolicy = GitCliCancelPolicy.NeverAfterStart,
+        }, progress: null, onStdoutLine: _ =>
+        {
+            Interlocked.Increment(ref calls);
+            throw new InvalidOperationException("callback");
+        });
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => run.WaitAsync(TimeSpan.FromSeconds(45)));
+
+        Assert.Equal("callback", ex.Message);
+        Assert.Equal(1, Volatile.Read(ref calls));
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task A_throwing_progress_report_on_a_never_killed_write_keeps_draining_and_reports_the_failure()
+    {
+        var cli = await MakeAsync();
+        using var repo = TestRepositoryBuilder.FromTemplate("empty-repo", _ => { });
+        var progress = new ThrowingProgress();
+
+        var run = cli.RunAsync(new GitCliRequest
+        {
+            Arguments = ["-c", "alias.noisy=!seq 1 100000 | sed 's|.*|Receiving objects:  42% (42/100)|' >&2", "noisy"],
+            WorkingDirectory = repo.Path,
+            CancelPolicy = GitCliCancelPolicy.NeverAfterStart,
+        }, progress, onStdoutLine: null);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => run.WaitAsync(TimeSpan.FromSeconds(45)));
+
+        Assert.Equal(1, progress.Reports);
+    }
+
+    private sealed class ThrowingProgress : IProgress<GitProgress>
+    {
+        private int _reports;
+        public int Reports => Volatile.Read(ref _reports);
+
+        public void Report(GitProgress value)
+        {
+            Interlocked.Increment(ref _reports);
+            throw new InvalidOperationException("progress");
+        }
     }
 
     /// <summary>A blob whose bytes line mode would rewrite: a CRLF, a lone CR and a NUL.</summary>
@@ -249,6 +531,41 @@ public class GitCliServiceTests
         Assert.NotNull(result.StandardOutputBytes);
         Assert.True(result.StandardOutputBytes.Length <= 1_000);
         Assert.Equal(GitErrorKind.None, result.ErrorKind);
+    }
+
+    [Fact]
+    public async Task Output_budget_does_not_kill_a_process_that_must_never_be_killed()
+    {
+        var cli = await MakeAsync();
+        using var repo = TestRepositoryBuilder.FromTemplate("linear-3000", b => b.LinearHistory(3_000));
+
+        var result = await cli.RunAsync(new GitCliRequest
+        {
+            Arguments = ["log", "--all", "-p"],
+            WorkingDirectory = repo.Path,
+            MaxStandardOutputBytes = 1_000,
+            CancelPolicy = GitCliCancelPolicy.NeverAfterStart,
+        });
+
+        // The overflow is flagged and the rest is drained, but git is left to finish on its own.
+        Assert.True(result.OutputTruncated);
+        Assert.True(result.StandardOutput.Length <= 5_000);
+        Assert.Equal(0, result.ExitCode);
+    }
+
+    [Fact]
+    public void Results_with_the_same_content_are_equal_whether_or_not_stdout_was_decoded()
+    {
+        byte[] bytes = [(byte)'h', (byte)'i'];
+        var decoded = new GitCliResult(0, bytes, "", GitErrorKind.None, TimeSpan.Zero);
+        var undecoded = new GitCliResult(0, (byte[])bytes.Clone(), "", GitErrorKind.None, TimeSpan.Zero);
+        Assert.Equal("hi", decoded.StandardOutput);
+
+        Assert.Equal(decoded, undecoded);
+        Assert.Equal(decoded.GetHashCode(), undecoded.GetHashCode());
+        Assert.NotEqual(decoded, new GitCliResult(0, "hi", "", GitErrorKind.None, TimeSpan.Zero));
+        Assert.NotEqual(decoded, undecoded with { OutputTruncated = true });
+        Assert.DoesNotContain("hi", undecoded.ToString());
     }
 
     private sealed class DelayedLocator : IGitExecutableLocator

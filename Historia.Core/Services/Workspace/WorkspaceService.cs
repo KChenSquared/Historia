@@ -192,7 +192,8 @@ public sealed partial class WorkspaceService : IWorkspaceService, IAsyncDisposab
             catch { /* teardown must not be blocked by a terminal close */ }
         }
 
-        await context.DisposeAsync().ConfigureAwait(false);
+        // The tab is already out of every collection, so the strip and the focus update first;
+        // disposing waits for a running write to finish and nothing the user sees may wait on it.
         RaiseOpenChanged();
 
         if (wasFocused)
@@ -202,6 +203,8 @@ public sealed partial class WorkspaceService : IWorkspaceService, IAsyncDisposab
             else
                 FocusedRepositoryChanged?.Invoke(this, new FocusedRepositoryChangedEventArgs(context, null));
         }
+
+        await context.DisposeAsync().ConfigureAwait(false);
     }
 
     public void Focus(RepositoryContext context) => FocusInternal(context);
@@ -332,8 +335,9 @@ public sealed partial class WorkspaceService : IWorkspaceService, IAsyncDisposab
             _focused = null;
         }
 
-        foreach (var context in toDispose)
-            await context.DisposeAsync().ConfigureAwait(false);
+        // Concurrently: each context waits for its own running write, and one long write must not
+        // use up the whole exit wait for the others.
+        await Task.WhenAll(toDispose.Select(c => c.DisposeAsync().AsTask())).ConfigureAwait(false);
         Historia.Diagnostics.PerfLog.Mark($"WorkspaceService.DisposeAsync done ({toDispose.Count} repos)");
     }
 }

@@ -90,14 +90,22 @@ public sealed class AppBandViewModelTests : IAsyncDisposable
             RaiseOpenChanged();
         }
 
-        public Task CloseAsync(RepositoryContext context)
+        /// <summary>When set, a close raises its events and then waits on this task, like the real
+        /// workspace waiting for a running write before it disposes the context.</summary>
+        public Task? DisposeGate { get; set; }
+
+        public async Task CloseAsync(RepositoryContext context)
         {
             Closed.Add(context);
             _open.Remove(context);
-            if (ReferenceEquals(Focused, context))
+            var wasFocused = ReferenceEquals(Focused, context);
+            if (wasFocused)
                 Focused = _open.FirstOrDefault();
             RaiseOpenChanged();
-            return Task.CompletedTask;
+            if (wasFocused)
+                FocusedRepositoryChanged?.Invoke(this, new FocusedRepositoryChangedEventArgs(context, Focused));
+            if (DisposeGate is not null)
+                await DisposeGate;
         }
 
         public Task<RepositoryContext> OpenAsync(string path, CancellationToken ct = default) => throw new NotSupportedException();
@@ -935,6 +943,42 @@ public sealed class AppBandViewModelTests : IAsyncDisposable
         Assert.Equal([a, b], rig.Workspace.Closed);
         Assert.Equal([""], rig.Routes);
         Assert.Empty(vm.Tabs);
+    }
+
+    [Fact]
+    public async Task Closing_the_last_tab_goes_home_before_a_running_write_releases_the_close()
+    {
+        var rig = NewRig();
+        var a = OpenRepo();
+        rig.Workspace.Set(a, a);
+        var write = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Workspace.DisposeGate = write.Task;
+        using var vm = rig.Create();
+
+        var closing = RepoTabs(vm)[0].CloseCommand.ExecuteAsync(null);
+
+        Assert.False(closing.IsCompleted);
+        Assert.Equal([""], rig.Routes);
+        Assert.Empty(vm.Tabs);
+
+        write.SetResult();
+        await closing;
+        Assert.Equal([""], rig.Routes);
+    }
+
+    [Fact]
+    public async Task Closing_the_focused_tab_while_others_remain_does_not_leave_the_repository_view()
+    {
+        var rig = NewRig();
+        var a = OpenRepo();
+        var b = OpenRepo();
+        rig.Workspace.Set(a, a, b);
+        using var vm = rig.Create();
+
+        await RepoTabs(vm)[0].CloseCommand.ExecuteAsync(null);
+
+        Assert.Same(b, rig.Workspace.Focused);
+        Assert.Empty(rig.Routes);
     }
 
     [Fact]

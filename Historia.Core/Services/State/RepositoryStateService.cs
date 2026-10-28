@@ -8,8 +8,43 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
     private readonly IRepoStateCache? _repoCache;
     private readonly object _sync = new();
 
+    private readonly TimeProvider _time;
+
+    // A status that arrives when nothing was raised in the last StatusRaiseWindow is raised at once;
+    // later ones within the window wait on a trailing timer, restarted by each newer status but never
+    // so long that the oldest waiting one passes StatusRaiseMaxWait.
+    private static readonly TimeSpan StatusRaiseWindow = TimeSpan.FromMilliseconds(50);
+    private static readonly TimeSpan StatusRaiseMaxWait = TimeSpan.FromMilliseconds(150);
+
+    // Touched only on the UI thread when there is a dispatcher.
     private readonly IUiTimer? _statusCoalesceTimer;
-    private RepositoryStatus? _pendingStatusRaise;
+    private (RepositoryStatus Status, RepositoryInfo Info, OperationState Operation)? _pendingStatusRaise;
+    private bool _statusTimerRunning;
+    private long _pendingStatusSince;
+    private long _lastStatusRaiseAt;
+    private bool _statusRaisedOnce;
+    private volatile bool _disposed;
+
+    // The status, info and operation state of the last raise; guarded by _raiseSync.
+    private readonly object _raiseSync = new();
+    private (RepositoryStatus Status, RepositoryInfo Info, OperationState Operation)? _lastRaised;
+
+    private TimeSpan _lastStatusDuration;
+    private DateTimeOffset? _lastStatusCompletedAt;
+
+    // A status slower than this means many index entries carry stale stat data; refreshing them
+    // lets the next status skip the hashing. At most one refresh per interval, none while one runs,
+    // and none after a tab's first status: that run is slow from a cold file cache whatever the
+    // index holds, and the refresh would hold the write lock against the user's first stage or commit.
+    // A status that is still slow with a warm cache is the signal.
+    private static readonly TimeSpan SlowStatusThreshold = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan IndexStatRefreshInterval = TimeSpan.FromSeconds(60);
+
+    // The refresh starts this long after the slow status, so a user operation that the status was
+    // read for (Stage all, Commit) gets the write lock first.
+    private static readonly TimeSpan IndexStatRefreshGrace = TimeSpan.FromSeconds(2);
+    private long? _lastIndexStatRefreshAt;
+    private Task _indexStatRefresh = Task.CompletedTask;
 
     private RepositoryInfo _repository;
     private RepositoryStatus _status = RepositoryStatus.Empty;
@@ -50,9 +85,11 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
         RepositoryContext context,
         IUiDispatcher? ui = null,
         IRepoStateCache? repoCache = null,
-        IGitGateway? gateway = null)
+        IGitGateway? gateway = null,
+        TimeProvider? time = null)
     {
         _context = context;
+        _time = time ?? TimeProvider.System;
         _gateway = gateway ?? context.Gateway;
         _refsCoalescer = new(() => _context.Lifetime, () => _context.CompletedOperations);
         _statusCoalescer = new(() => _context.Lifetime, () => _context.CompletedOperations);
@@ -71,7 +108,7 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
         };
 
         if (_ui is not null)
-            _statusCoalesceTimer = _ui.CreateTimer(TimeSpan.FromMilliseconds(50), OnStatusCoalesceTick);
+            _statusCoalesceTimer = _ui.CreateTimer(StatusRaiseWindow, OnStatusCoalesceTick, UiPriority.Normal);
     }
 
     public RepositoryInfo Repository { get { lock (_sync) return _repository; } }
@@ -85,6 +122,8 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
     public DiffRequest? OpenDiff { get { lock (_sync) return _openDiff; } }
     public GitProfile? ActiveProfile { get { lock (_sync) return _activeProfile; } }
     public OperationState PendingOperation { get { lock (_sync) return _pendingOperation; } }
+    public TimeSpan LastStatusDuration { get { lock (_sync) return _lastStatusDuration; } }
+    public DateTimeOffset? LastStatusCompletedAt { get { lock (_sync) return _lastStatusCompletedAt; } }
     public bool KeepConflictResolverOpen { get { lock (_sync) return _keepConflictResolverOpen; } }
     public bool IsConflictSessionActive { get { lock (_sync) return ComputeIsConflictSessionActive(_status, _pendingOperation, _keepConflictResolverOpen); } }
     public string? SelectedConflictPath { get { lock (_sync) return _selectedConflictPath; } }
@@ -259,7 +298,9 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
     private async Task DoRefreshStatusAsync(CancellationToken ct)
     {
         using var _perf = Historia.Diagnostics.PerfLog.Scope($"RepositoryStateService.RefreshStatusAsync({_context.DisplayName})");
+        var statusStarted = _time.GetTimestamp();
         var status = await _gateway.GetStatusAsync(ct).ConfigureAwait(false);
+        var statusDuration = _time.GetElapsedTime(statusStarted);
         var info = await _gateway.GetRepositoryInfoAsync(ct).ConfigureAwait(false);
         var operation = DetectOperationState(_context.GitDirectory);
 
@@ -268,6 +309,7 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
         bool conflictSessionFlipped;
         bool nowActive;
         bool closedCleared = false;
+        bool followsEarlierStatus;
         lock (_sync)
         {
             bool wasActive = ComputeIsConflictSessionActive(_status, _pendingOperation, _keepConflictResolverOpen);
@@ -288,6 +330,9 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
 
             _status = status;
             _repository = info;
+            followsEarlierStatus = _lastStatusCompletedAt is not null;
+            _lastStatusDuration = statusDuration;
+            _lastStatusCompletedAt = _time.GetUtcNow();
             operationChanged = _pendingOperation != operation;
             _pendingOperation = operation;
 
@@ -314,7 +359,8 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
                 _openDiff = null;
         }
 
-        QueueStatusRaise(status);
+        QueueStatusRaise(status, info, operation);
+        RefreshIndexStatIfSlow(statusDuration, followsEarlierStatus);
 
         if (conflictSessionFlipped)
             HandleConflictSessionFlipped(nowActive, closedCleared);
@@ -326,6 +372,60 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
 
         if (operationChanged)
             Raise(() => OperationStateChanged?.Invoke(this, new OperationStateChangedEventArgs(operation)));
+    }
+
+    /// <summary>The most recent index stat refresh this service started; completed when none is running.</summary>
+    internal Task IndexStatRefreshTask { get { lock (_sync) return _indexStatRefresh; } }
+
+    private void RefreshIndexStatIfSlow(TimeSpan statusDuration, bool followsEarlierStatus)
+    {
+        if (!followsEarlierStatus || statusDuration <= SlowStatusThreshold || _disposed)
+            return;
+
+        lock (_sync)
+        {
+            var now = _time.GetTimestamp();
+            if (!_indexStatRefresh.IsCompleted ||
+                (_lastIndexStatRefreshAt is { } last && _time.GetElapsedTime(last, now) < IndexStatRefreshInterval))
+                return;
+
+            _lastIndexStatRefreshAt = now;
+            var operationsAtStart = _context.CompletedOperations;
+            _indexStatRefresh = Task.Run(() => RunIndexStatRefreshAsync(operationsAtStart));
+        }
+    }
+
+    // Best effort: the refresh only speeds up later statuses, so a failure is logged and nothing else.
+    // It waits out a grace period and then gives way to user work: when an operation ended or one
+    // holds the write lock meanwhile, it does not run, and the next slow status may schedule it again.
+    private async Task RunIndexStatRefreshAsync(long operationsAtStart)
+    {
+        try
+        {
+            await Task.Delay(IndexStatRefreshGrace, _time, _context.Lifetime).ConfigureAwait(false);
+            if (_disposed
+                || _context.CompletedOperations != operationsAtStart
+                || _context.CurrentWriteHolder is not null)
+            {
+                lock (_sync)
+                    _lastIndexStatRefreshAt = null;
+                return;
+            }
+
+            await _gateway.RefreshIndexStatAsync(_context.Lifetime).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Tab closed before the refresh started.
+        }
+        catch (HistoriaGitException)
+        {
+            // The logging gateway has already recorded the failure.
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write(AppLogLevel.Warn, "git", $"{_context.DisplayName}: index stat refresh failed: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -404,8 +504,10 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
             _tags = tags;
         }
 
-        // Keep _repoCache.SaveRefs a single write after tags complete — do not write a half-populated ref snapshot.
-        _repoCache?.SaveRefs(_context.RepositoryPath, branches, tags, remotes);
+        // One write after tags complete, so a half-populated ref snapshot is never stored, and only
+        // when a ref list changed: an unchanged refresh would rewrite the same snapshot.
+        if (branchesOrRemotesChanged || tagsChanged)
+            _repoCache?.SaveRefs(_context.RepositoryPath, branches, tags, remotes);
 
         // Raise second time if tags changed.
         if (tagsChanged)
@@ -446,31 +548,93 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
         await _statusCoalescer.RunAsync(DoRefreshStatusAsync, joinFrom, ct).ConfigureAwait(false);
     }
 
-    // ── Status-raise coalescing on a 50 ms trailing window ──
+    // ── Status raise: leading edge, trailing coalescing, no raise for an unchanged status ──
 
-    private void QueueStatusRaise(RepositoryStatus status)
+    private void QueueStatusRaise(RepositoryStatus status, RepositoryInfo info, OperationState operation)
     {
         if (_ui is null || _statusCoalesceTimer is null)
         {
-            StatusChanged?.Invoke(this, new StatusChangedEventArgs(status));
+            RaiseStatus(status, info, operation);
             return;
         }
 
-        _ui.Post(() =>
+        if (_ui.CheckAccess())
+            OfferStatus(status, info, operation);
+        else
+            _ui.Post(() => OfferStatus(status, info, operation), UiPriority.Normal);
+    }
+
+    private void OfferStatus(RepositoryStatus status, RepositoryInfo info, OperationState operation)
+    {
+        if (_disposed)
+            return;
+
+        var now = _time.GetTimestamp();
+        _pendingStatusRaise = (status, info, operation);
+
+        if (_statusTimerRunning)
         {
-            _pendingStatusRaise = status;
-            _statusCoalesceTimer.Stop();
-            _statusCoalesceTimer.Start();
-        });
+            // Restarting waits one more window; skip it when the oldest waiting status would then
+            // pass the maximum wait. The running timer fires within one window of its last restart,
+            // which is within the maximum wait of that status's arrival.
+            if (_time.GetElapsedTime(_pendingStatusSince, now) + StatusRaiseWindow <= StatusRaiseMaxWait)
+            {
+                _statusCoalesceTimer!.Stop();
+                _statusCoalesceTimer.Start();
+            }
+            return;
+        }
+
+        if (!_statusRaisedOnce || _time.GetElapsedTime(_lastStatusRaiseAt, now) >= StatusRaiseWindow)
+        {
+            _pendingStatusRaise = null;
+            if (RaiseStatus(status, info, operation))
+            {
+                _statusRaisedOnce = true;
+                _lastStatusRaiseAt = now;
+            }
+            return;
+        }
+
+        _pendingStatusSince = now;
+        _statusTimerRunning = true;
+        _statusCoalesceTimer!.Start();
     }
 
     private void OnStatusCoalesceTick()
     {
         _statusCoalesceTimer!.Stop();
-        var status = _pendingStatusRaise;
+        _statusTimerRunning = false;
+        var pending = _pendingStatusRaise;
         _pendingStatusRaise = null;
-        if (status is not null)
-            StatusChanged?.Invoke(this, new StatusChangedEventArgs(status));
+        if (_disposed || pending is not { } p)
+            return;
+
+        if (RaiseStatus(p.Status, p.Info, p.Operation))
+        {
+            _statusRaisedOnce = true;
+            _lastStatusRaiseAt = _time.GetTimestamp();
+        }
+    }
+
+    /// <summary>Raises <see cref="StatusChanged"/> unless the status and operation state match the last raise.
+    /// A status with conflicted files always raises: the conflict resolver compares a conflicted file
+    /// with the disk on every raise, and an edit that keeps the file's size changes nothing the
+    /// comparison sees. Returns whether it raised.</summary>
+    private bool RaiseStatus(RepositoryStatus status, RepositoryInfo info, OperationState operation)
+    {
+        lock (_raiseSync)
+        {
+            if (_lastRaised is { } last
+                && last.Operation == operation
+                && RepositoryStatusEquivalence.Equivalent(last.Status, last.Info, status, info)
+                && status.Conflicted.Count == 0)
+                return false;
+            _lastRaised = (status, info, operation);
+        }
+
+        StatusChanged?.Invoke(this, new StatusChangedEventArgs(status));
+        return true;
     }
 
     private void Raise(Action action)
@@ -482,24 +646,11 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
     }
 
     /// <summary>Derives <see cref="OperationState"/> from on-disk sequencer markers.</summary>
-    internal static OperationState DetectOperationState(string gitDir)
-    {
-        if (System.IO.Directory.Exists(System.IO.Path.Combine(gitDir, "rebase-merge")) ||
-            System.IO.Directory.Exists(System.IO.Path.Combine(gitDir, "rebase-apply")))
-            return OperationState.Rebasing;
-        if (System.IO.File.Exists(System.IO.Path.Combine(gitDir, "CHERRY_PICK_HEAD")))
-            return OperationState.CherryPicking;
-        if (System.IO.File.Exists(System.IO.Path.Combine(gitDir, "REVERT_HEAD")))
-            return OperationState.Reverting;
-        if (System.IO.File.Exists(System.IO.Path.Combine(gitDir, "MERGE_HEAD")))
-            return OperationState.Merging;
-        if (System.IO.File.Exists(System.IO.Path.Combine(gitDir, "BISECT_LOG")))
-            return OperationState.Bisecting;
-        return OperationState.None;
-    }
+    internal static OperationState DetectOperationState(string gitDir) => OperationMarkers.Detect(gitDir);
 
     public ValueTask DisposeAsync()
     {
+        _disposed = true;
         _statusCoalesceTimer?.Dispose();
         return ValueTask.CompletedTask;
     }
@@ -568,8 +719,10 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
                 run.Waiters++;
             }
 
+            // Off the caller's thread: a run started inline would execute the work's synchronous
+            // prefix (process start, file probes) on the UI thread of a UI-originated refresh.
             if (start)
-                _ = PumpAsync(work);
+                _ = Task.Run(() => PumpAsync(work));
             return WaitAsync(run, ct);
         }
 

@@ -60,6 +60,9 @@ public sealed partial class HomeViewModel : ViewModelBase
         Subscribe(() => _cloneService.Changed += OnCloneServiceChanged, () => _cloneService.Changed -= OnCloneServiceChanged);
         RefreshRecents();
         RefreshCloneStatus();
+        // The rows above carry the last known staleness; the check runs off this thread and its
+        // result arrives through the change event.
+        _ = _recents.RefreshStalenessAsync();
 
         if (intent == "clone" && _cloneService.IsRunning)
         {
@@ -107,6 +110,7 @@ public sealed partial class HomeViewModel : ViewModelBase
     public partial bool CanCancelClone { get; private set; }
 
     // Neither service raises on the UI thread; the work hops there because it touches bound state.
+    // The recents service also raises when a background folder check changes a row's staleness.
     private void OnRecentsChanged(object? sender, EventArgs e)
         => _ui.Post(() =>
         {
@@ -333,7 +337,7 @@ public sealed partial class HomeViewModel : ViewModelBase
     /// <summary>Parent of the most recently opened repo, else the user's home folder.</summary>
     private string DefaultCloneRoot()
     {
-        var recent = _recents.Items.FirstOrDefault()?.Path;
+        var recent = Recents.FirstOrDefault()?.Path;
         if (!string.IsNullOrEmpty(recent))
         {
             var parent = Path.GetDirectoryName(recent.TrimEnd('/', '\\'));

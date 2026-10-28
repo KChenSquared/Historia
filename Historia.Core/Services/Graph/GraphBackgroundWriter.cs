@@ -25,21 +25,24 @@ namespace Historia.Services.Graph;
 /// </list>
 /// Every job awaits <see cref="IBackgroundWorkGate"/> before it starts and runs at
 /// <see cref="ProcessPriorityClass.BelowNormal"/> for the git process itself
-/// (<see cref="GitCliRequest.LowerPriority"/>). Every commit-graph write sets
+/// (<see cref="GitCliPriority.Background"/>, which also keeps at most two background git
+/// processes running across the app). Every commit-graph write sets
 /// <c>GIT_NO_LAZY_FETCH=1</c>: in a partial clone, <c>commit-graph write --reachable</c> otherwise
 /// fetches a promisor-only object a ref points at — a network call the user never asked for.
 /// Never calls <c>git maintenance start</c>/<c>register</c> or changes git config.
 /// <para>
-/// Once a commit-graph write has actually started it is never cancelled: git only removes <c>objects/info/commit-graph.lock</c> /
-/// <c>commit-graphs/commit-graph-chain.lock</c> from its own exit/signal handlers, never when the
-/// process tree is torn down with <c>TerminateProcess</c>
+/// A commit-graph write must not be killed once it has started: git only removes
+/// <c>objects/info/commit-graph.lock</c> / <c>commit-graphs/commit-graph-chain.lock</c> from its own
+/// exit/signal handlers, never when the process tree is torn down with <c>TerminateProcess</c>
 /// (<see cref="GitCliProcessSetup.TryKill"/> calls <c>Process.Kill(entireProcessTree: true)</c>,
-/// which on Windows is exactly that — verified in <c>GitCliService.RunAsync</c>: a request's
-/// cancellation token is what triggers <c>TryKill</c>). So <see cref="RunWriteAsync"/> runs the
-/// git process itself with <see cref="CancellationToken.None"/>; a context's
-/// <see cref="RepositoryContext.Lifetime"/> only gates whether a write is allowed to <i>start</i>
-/// (the gate wait, and the wait for <see cref="_serial"/> below) — a closed tab still skips a
-/// write that hasn't begun, but never kills one already running.
+/// which on Windows is exactly that). <see cref="GitCliRequest.Priority"/> does not protect a
+/// process: the runner kills a background request on cancellation or timeout like any other,
+/// unless the request is <see cref="GitCliCancelPolicy.NeverAfterStart"/> or runs inside a
+/// <see cref="GitWriteScope"/>. So <see cref="RunWriteAsync"/> runs the git process with
+/// <see cref="CancellationToken.None"/> and an infinite timeout, leaving nothing that could cancel
+/// it; a context's <see cref="RepositoryContext.Lifetime"/> only gates whether a write is allowed
+/// to <i>start</i> (the gate wait, and the wait for <see cref="_serial"/> below) — a closed tab
+/// still skips a write that hasn't begun, but never kills one already running.
 /// </para>
 /// <para>
 /// The inactive-tab queue (<see cref="EnqueueInactiveTab"/>) de-dupes by on-disk store: a
@@ -441,7 +444,7 @@ internal sealed class GraphBackgroundWriter(IGitCliService cli, IBackgroundWorkG
             Arguments = args,
             WorkingDirectory = context.RepositoryPath,
             Timeout = Timeout.InfiniteTimeSpan,
-            LowerPriority = true,
+            Priority = GitCliPriority.Background,
             ExtraEnvironment = NoLazyFetch,
         }, CancellationToken.None).ConfigureAwait(false);
 
