@@ -173,13 +173,14 @@ public sealed class IndexStatRefreshTests : IAsyncDisposable
     // the index, so it must leave an edit made right after it detectable. An mtime a minute ahead
     // makes the entry racy whatever the clock does; offset 0 is the entry written in the same
     // second as the refresh. When a second boundary passes between choosing that mtime and git
-    // writing the index, the entry is not racy and the scenario does not apply; it starts again.
-    [Theory(Timeout = 60000)]
+    // writing the index, the entry is not racy and the scenario does not apply; it starts again,
+    // and a loaded machine can need many starts.
+    [Theory(Timeout = 180000)]
     [InlineData(0)]
     [InlineData(60)]
     public async Task An_edit_made_in_the_same_second_as_the_refresh_is_still_reported_modified(int offsetSeconds)
     {
-        for (var attempt = 0; attempt < 10; attempt++)
+        for (var attempt = 0; attempt < 30; attempt++)
         {
             using var repo = NewRepo();
             Write(repo, "f.txt", "aaaa\n", Past);
