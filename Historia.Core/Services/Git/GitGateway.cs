@@ -595,13 +595,20 @@ public sealed partial class GitGateway(
             {
                 // Stored credentials still work; only the interactive sign-in window is off. The
                 // SSH command is set whatever the transport: an HTTPS remote that url.insteadOf
-                // rewrites to SSH would otherwise run ssh with prompts and no keepalives.
+                // rewrites to SSH would otherwise run ssh with prompts and no keepalives. Outside
+                // the SSH transport the user's core.sshCommand (Windows OpenSSH, plink…) is kept
+                // and only given the quiet options.
                 var backgroundEnv = new Dictionary<string, string>(env ?? ReadOnlyDictionary<string, string>.Empty)
                 {
                     ["GCM_INTERACTIVE"] = "never",
                 };
                 foreach (var (key, value) in SshEnv(background: true))
                     backgroundEnv[key] = value;
+                if (envTransport != RouteTransport.Ssh
+                    && await ConfiguredSshCommandAsync(ct).ConfigureAwait(false) is { } configuredSsh)
+                {
+                    backgroundEnv["GIT_SSH_COMMAND"] = configuredSsh + BackgroundSshOptions;
+                }
                 env = backgroundEnv;
             }
 
@@ -717,6 +724,22 @@ public sealed partial class GitGateway(
             return null;
         var expanded = result.StandardOutput.Trim();
         return expanded.Length == 0 ? null : expanded;
+    }
+
+    /// <summary>The repository's effective <c>core.sshCommand</c> (<c>git config --get</c>, local
+    /// and cheap); null when unset or unreadable.</summary>
+    private async Task<string?> ConfiguredSshCommandAsync(CancellationToken ct)
+    {
+        var result = await cli.RunAsync(new GitCliRequest
+        {
+            Arguments = ["config", "--get", "core.sshCommand"],
+            WorkingDirectory = context.RepositoryPath,
+        }, ct).ConfigureAwait(false);
+
+        if (!result.IsSuccess)
+            return null;
+        var command = result.StandardOutput.Trim();
+        return command.Length == 0 ? null : command;
     }
 
     private IReadOnlyDictionary<string, string> SshEnv(bool background)

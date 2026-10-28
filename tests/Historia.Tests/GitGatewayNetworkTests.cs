@@ -129,6 +129,22 @@ public sealed class GitGatewayNetworkTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_background_fetch_of_an_https_remote_keeps_the_users_core_sshcommand()
+    {
+        await using var ctx = Open("https://example.invalid/o/r.git");
+        var cli = new RecordingCli(Fail(Unreachable), Ok()) { SshCommand = "C:/Windows/System32/OpenSSH/ssh.exe -F cfg" };
+
+        await Assert.ThrowsAsync<HistoriaGitException>(() => Gateway(ctx, cli).FetchAsync("origin", Background, null));
+
+        var ssh = Assert.Single(cli.NetworkCalls).ExtraEnvironment!["GIT_SSH_COMMAND"];
+        Assert.StartsWith("C:/Windows/System32/OpenSSH/ssh.exe -F cfg ", ssh);
+        Assert.Contains("-o BatchMode=yes", ssh);
+        Assert.Contains("-o ServerAliveInterval=15", ssh);
+        Assert.Contains("-o ServerAliveCountMax=4", ssh);
+        Assert.DoesNotContain("ConnectTimeout", ssh);
+    }
+
+    [Fact]
     public async Task A_background_fetch_of_a_local_remote_is_one_attempt_with_the_quiet_settings()
     {
         await using var ctx = Open(new Uri(Path.Combine(TestScratch.Root, "no-such-remote.git")).AbsoluteUri);
@@ -355,6 +371,10 @@ public sealed class GitGatewayNetworkTests : IAsyncDisposable
 
         /// <summary>Runs as each network command arrives, before it is answered.</summary>
         public Action? OnNetworkCall { get; init; }
+
+        /// <summary>The answer to <c>git config --get core.sshCommand</c>; null is "unset".</summary>
+        public string? SshCommand { get; init; }
+
         public bool IsGitAvailable => true;
 
         public Task<GitCliResult> RunAsync(GitCliRequest request, CancellationToken ct = default)
@@ -368,6 +388,12 @@ public sealed class GitGatewayNetworkTests : IAsyncDisposable
             {
                 var url = args.Last(a => a.StartsWith("remote.", StringComparison.Ordinal) && !a.EndsWith('=')).Split('=', 2)[1];
                 return Task.FromResult(new GitCliResult(0, url + "\n", "", GitErrorKind.None, TimeSpan.Zero));
+            }
+            if (args.Contains("config") && args.Contains("core.sshCommand"))
+            {
+                return Task.FromResult(SshCommand is null
+                    ? new GitCliResult(1, "", "", GitErrorKind.RefNotFound, TimeSpan.Zero)
+                    : new GitCliResult(0, SshCommand + "\n", "", GitErrorKind.None, TimeSpan.Zero));
             }
             if (!args.Any(a => a is "push" or "pull" or "fetch" or "prune"))
                 return Task.FromResult(Ok());
