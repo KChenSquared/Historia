@@ -510,9 +510,9 @@ public sealed class RepositoryViewModelTests : IAsyncDisposable
     }
 
     [Fact]
-    public void Network_progress_is_applied_through_the_ui_dispatcher()
+    public void Network_progress_off_the_ui_thread_is_posted_to_the_ui_dispatcher()
     {
-        var ui = new RecordingUiDispatcher();
+        var ui = new RecordingUiDispatcher { OnUiThread = false };
         var vm = Create(ui);
 
         _network.Report(_ctx, new GitProgress { Phase = "Fetching" });
@@ -520,6 +520,53 @@ public sealed class RepositoryViewModelTests : IAsyncDisposable
 
         ui.DrainPosted();
         Assert.True(vm.IsNetworkProgressVisible);
+    }
+
+    [Fact]
+    public void Network_progress_on_the_ui_thread_is_applied_in_place_without_a_post()
+    {
+        var ui = new RecordingUiDispatcher { OnUiThread = true };
+        var vm = Create(ui);
+        var posts = ui.PostCount;
+
+        _network.Report(_ctx, new GitProgress { Phase = "Fetching" });
+
+        Assert.True(vm.IsNetworkProgressVisible);
+        Assert.Equal(posts, ui.PostCount);
+    }
+
+    [Fact]
+    public async Task A_status_change_off_the_ui_thread_is_posted_and_applied_when_drained()
+    {
+        var ui = new RecordingUiDispatcher { OnUiThread = false };
+        var vm = Create(ui);
+        _ctx.State.SetSelectedCommit(GitObjectId.Parse(_repo.HeadSha));
+        ui.DrainPosted();
+        Assert.False(vm.HasWorkingCopyChanges);
+
+        _repo.WriteFile("f.txt", "one\nmodified\n");
+        await _ctx.State.RefreshStatusAsync();
+
+        Assert.False(vm.HasWorkingCopyChanges);
+        Assert.True(ui.PostCount > 0);
+        ui.DrainPosted();
+        Assert.True(vm.HasWorkingCopyChanges);
+    }
+
+    [Fact]
+    public async Task A_status_change_on_the_ui_thread_is_applied_in_place_without_a_post()
+    {
+        var ui = new RecordingUiDispatcher { OnUiThread = true };
+        var vm = Create(ui);
+        _ctx.State.SetSelectedCommit(GitObjectId.Parse(_repo.HeadSha));
+        ui.DrainPosted();
+        Assert.False(vm.HasWorkingCopyChanges);
+
+        _repo.WriteFile("f.txt", "one\nmodified\n");
+        await _ctx.State.RefreshStatusAsync();
+
+        // Nothing was drained, so the change was applied inline rather than through a post.
+        Assert.True(vm.HasWorkingCopyChanges);
     }
 
     private sealed class FakeUnsavedWork(RepositoryContext context) : IUnsavedWork

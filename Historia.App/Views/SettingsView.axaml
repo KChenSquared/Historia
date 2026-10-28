@@ -201,6 +201,10 @@
                         <ctl:HelpHint Text="Puts your local commits on top of the remote ones instead of creating a merge commit." />
                         <CheckBox Content="Pull with rebase" IsChecked="{Binding PullWithRebase}" />
                     </DockPanel>
+                    <DockPanel Classes="hinted">
+                        <ctl:HelpHint Text="Fetch all branches and tags after a pull." />
+                        <CheckBox Content="Fetch after pull" IsChecked="{Binding FetchAfterPull}" />
+                    </DockPanel>
                     <CheckBox Content="Reopen tabs on launch" IsChecked="{Binding RestoreSessionTabs}" />
                     <DockPanel Classes="hinted">
                         <ctl:HelpHint Text="When off, the Stash button names the stash &quot;Stash of &lt;branch&gt;&quot;." />

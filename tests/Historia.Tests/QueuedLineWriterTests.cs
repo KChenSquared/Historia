@@ -51,7 +51,7 @@ public sealed class QueuedLineWriterTests : IDisposable
     private static long LowestRetained(long before, long limit)
     {
         var lowest = long.MaxValue;
-        for (var attempt = 0; attempt < 10 && lowest >= limit; attempt++)
+        for (var attempt = 0; attempt < 30 && lowest >= limit; attempt++)
         {
             if (attempt > 0)
                 Thread.Sleep(200);

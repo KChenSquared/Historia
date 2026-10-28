@@ -255,6 +255,11 @@ public sealed class FileWatcherService : IAsyncDisposable
         var path = NormalizePath(fullPath);
         if (IsSameOrUnder(path, _gitDirRoot))
         {
+            // A fetch or push writes refs and objects here and refreshes once when it ends;
+            // working-tree events, which are the user's own edits, fall through and still count.
+            if (_context.IsGitDirectoryOperationInProgress)
+                return;
+
             QueueEvent(path.AsSpan(_gitDirRoot.Length), underGit: true);
             return;
         }

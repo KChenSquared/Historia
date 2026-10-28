@@ -29,9 +29,15 @@ public interface IAutoFetchHost
     Task WhenFullyLoadedAsync(RepositoryContext context, CancellationToken ct);
 
     /// <summary>Runs one background fetch on <paramref name="context"/> (honours SSH
-    /// Only, never prompts, quiet on failure). Exceptions other than cancellation are swallowed
+    /// Only, never prompts, quiet on failure). Network only: the caller holds the repository's
+    /// network gate for exactly this call. Exceptions other than cancellation are swallowed
     /// by the caller.</summary>
     Task FetchAsync(RepositoryContext context, CancellationToken ct);
+
+    /// <summary>Lands the refs a <see cref="FetchAsync"/> brought in — a successful one, or one that
+    /// failed only on a refused tag — into the UI state.
+    /// Runs after the network gate is released, so it must not assume the gate is held.</summary>
+    Task RefreshAfterFetchAsync(RepositoryContext context, CancellationToken ct);
 }
 
 /// <summary>

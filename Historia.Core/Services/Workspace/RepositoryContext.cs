@@ -17,6 +17,17 @@ public enum NetworkOperationOwner
 /// user-facing name ("Fetch", "Auto-fetch", "Lock cleanup").</summary>
 public sealed record NetworkOperationInfo(NetworkOperationOwner Owner, string Label);
 
+/// <summary>What the file watcher drops while one of Historia's own Git operations runs.</summary>
+public enum SelfOperationKind
+{
+    /// <summary>Every watcher event: the operation rewrites the working tree, the index and refs.</summary>
+    Full,
+
+    /// <summary>Only events under the git directory: the operation writes refs and objects there
+    /// and leaves the working tree alone, so edits made while it runs still show.</summary>
+    GitDirectoryOnly,
+}
+
 /// <summary>
 /// Per-repository-tab handle. Owns the reactive state service, the gateway, the file watcher,
 /// write lock, and a lifetime cancellation scope.
@@ -29,6 +40,8 @@ public sealed class RepositoryContext : IAsyncDisposable
     private readonly SemaphoreSlim _networkGate = new(1, 1);
     private NetworkOperationInfo? _networkOp;
     private int _selfOperationDepth;
+    private int _gitDirectoryOperationDepth;
+    private int _anySelfOperationDepth;
     private long _completedOperations;
 
     // Signaled once the graph control's first paint for this context lands (success, failure,
@@ -367,14 +380,24 @@ public sealed class RepositoryContext : IAsyncDisposable
     /// <summary>
     /// Marks a scope as one of Historia's own Git operations so the watcher suppresses the
     /// self-triggered refresh storm and issues one explicit refresh on completion.
+    /// <see cref="SelfOperationKind.Full"/> drops every watcher event for the scope;
+    /// <see cref="SelfOperationKind.GitDirectoryOnly"/>, for an operation that writes only inside
+    /// the git directory and may run for minutes, drops only the git-directory events so edits to
+    /// the working tree still show while it runs. The refresh fires when the last scope of either
+    /// kind ends.
     /// </summary>
-    public IDisposable BeginSelfOperation()
+    public IDisposable BeginSelfOperation(SelfOperationKind kind = SelfOperationKind.Full)
     {
-        Interlocked.Increment(ref _selfOperationDepth);
-        return new SelfOperationScope(this);
+        Interlocked.Increment(ref kind == SelfOperationKind.Full ? ref _selfOperationDepth : ref _gitDirectoryOperationDepth);
+        Interlocked.Increment(ref _anySelfOperationDepth);
+        return new SelfOperationScope(this, kind);
     }
 
+    /// <summary>A <see cref="SelfOperationKind.Full"/> scope is open.</summary>
     public bool IsSelfOperationInProgress => Volatile.Read(ref _selfOperationDepth) > 0;
+
+    /// <summary>A <see cref="SelfOperationKind.GitDirectoryOnly"/> scope is open.</summary>
+    public bool IsGitDirectoryOperationInProgress => Volatile.Read(ref _gitDirectoryOperationDepth) > 0;
 
     /// <summary>
     /// Counts Historia's own operations that have ended on this tab. A refresh whose work started
@@ -432,12 +455,24 @@ public sealed class RepositoryContext : IAsyncDisposable
         }
     }
 
-    private sealed class SelfOperationScope(RepositoryContext owner) : IDisposable
+    private sealed class SelfOperationScope(RepositoryContext owner, SelfOperationKind kind) : IDisposable
     {
+        private int _disposed;
+
         public void Dispose()
         {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                return;
+
             var operationEnd = Interlocked.Increment(ref owner._completedOperations);
-            if (Interlocked.Decrement(ref owner._selfOperationDepth) == 0)
+            if (kind == SelfOperationKind.Full)
+                Interlocked.Decrement(ref owner._selfOperationDepth);
+            else
+                Interlocked.Decrement(ref owner._gitDirectoryOperationDepth);
+
+            // One counter across both kinds, so exactly one ending scope sees zero and fires the
+            // refresh even when scopes of different kinds end on different threads at once.
+            if (Interlocked.Decrement(ref owner._anySelfOperationDepth) == 0)
                 _ = RefreshQuietlyAsync(owner, operationEnd);
         }
 
