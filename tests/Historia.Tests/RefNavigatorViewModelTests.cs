@@ -716,6 +716,47 @@ public sealed class RefNavigatorViewModelTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Binding_reads_only_the_power_tools_half_of_the_cache()
+    {
+        var repo = NewRepo();
+        var ctx = await OpenAsync(repo, paintDone: false);
+        var rig = new Rig(null);
+        _vms.Add(rig.Vm);
+        rig.Cache.Snapshots[ctx.RepositoryPath] = new RepoStateSnapshot(null, null, null, [Stash(0, "cached", 'c')], [], []);
+
+        rig.Workspace.ChangeFocus(ctx);
+        await WaitForAsync(() => rig.Vm.Stashes.Title == "Stashes (1)", "the cached stash list");
+
+        Assert.Equal(0, rig.Cache.FullLoads);
+        Assert.True(rig.Cache.Loads > 0);
+    }
+
+    [Fact]
+    public async Task A_stash_change_during_the_bind_read_keeps_the_cached_submodules_and_worktrees()
+    {
+        var repo = NewRepo();
+        var ctx = await OpenAsync(repo, paintDone: false);
+        var rig = new Rig(null);
+        _vms.Add(rig.Vm);
+        var sm = new SubmoduleInfo { Name = "libs/core", Path = "libs/core", Url = "u", Status = SubmoduleStatus.Clean };
+        rig.Cache.Snapshots[ctx.RepositoryPath] = new RepoStateSnapshot(null, null, null, [Stash(0, "cached", 'c')], [sm], []);
+        var gate = rig.Cache.BlockLoads();
+
+        rig.Workspace.ChangeFocus(ctx);
+        Assert.True(rig.Cache.LoadEntered.Wait(TimeSpan.FromSeconds(30)), "the cache was never read");
+
+        // A stash-only change bumps the cache generation while the bind's read is still running.
+        rig.Vm.OnRefsChanged(ctx.State, new RefsChangedEventArgs(ctx.State.Branches, ctx.State.Tags, ctx.State.Remotes)
+        {
+            StashStamp = ctx.State.StashStamp + 1,
+        });
+        gate.Set();
+
+        await WaitForAsync(() => rig.Vm.Submodules.Title == "Submodules (1)", "the cached submodule list");
+        Assert.Equal("Stashes (1)", rig.Vm.Stashes.Title);
+    }
+
+    [Fact]
     public async Task A_refs_change_reads_the_cache_off_the_calling_thread()
     {
         var repo = NewRepo();
@@ -836,7 +877,7 @@ public sealed class RefNavigatorViewModelTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task Tags_sort_by_ordinal_name()
+    public async Task Tags_sort_by_name_ignoring_case_then_ordinal()
     {
         var repo = NewRepo(r =>
         {
@@ -846,7 +887,8 @@ public sealed class RefNavigatorViewModelTests : IAsyncDisposable
         var rig = NewRig(await OpenAsync(repo));
         rig.Vm.Tags.ToggleCommand.Execute(null);
 
-        Assert.Equal(["b-1", "B-2"], Texts(rig.Vm.Tags));
+        // Case-insensitive first (descending, like the other tag orders), ordinal as the tie-break.
+        Assert.Equal(["B-2", "b-1"], Texts(rig.Vm.Tags));
     }
 
     private static List<string> TrackRowChanges(RefNavigatorViewModel vm)
@@ -1173,6 +1215,7 @@ public sealed class RefNavigatorViewModelTests : IAsyncDisposable
         private ManualResetEventSlim? _loadGate;
         private ManualResetEventSlim? _saveGate;
         private int _loads;
+        private int _fullLoads;
         private int _gateTimedOut;
 
         public ConcurrentDictionary<string, RepoStateSnapshot> Snapshots { get; } = new(StringComparer.Ordinal);
@@ -1192,7 +1235,16 @@ public sealed class RefNavigatorViewModelTests : IAsyncDisposable
         /// <summary>Makes every save wait until the returned gate is set.</summary>
         public ManualResetEventSlim BlockSaves() => _saveGate = new ManualResetEventSlim();
 
+        /// <summary>How many times the whole snapshot (refs included) was read; the sidebar only needs the power tools.</summary>
+        public int FullLoads => Volatile.Read(ref _fullLoads);
+
         public RepoStateSnapshot? TryLoad(string repoPath)
+        {
+            Interlocked.Increment(ref _fullLoads);
+            return Snapshots.TryGetValue(repoPath, out var snapshot) ? snapshot : null;
+        }
+
+        public RepoStateSnapshot? TryLoadPowerTools(string repoPath)
         {
             Interlocked.Increment(ref _loads);
             LoadEntered.Set();

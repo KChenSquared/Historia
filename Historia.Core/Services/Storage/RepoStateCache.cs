@@ -42,6 +42,15 @@ public sealed class RepoStateCache(ISettingsService settings) : IRepoStateCache
             pt?.Worktrees);
     }
 
+    public RepoStateSnapshot? TryLoadPowerTools(string repoPath)
+    {
+        if (!Enabled)
+            return null;
+
+        var pt = ReadGz<PowerFile>(FileFor(repoPath, "pt"));
+        return pt is null ? null : new RepoStateSnapshot(null, null, null, pt.Stashes, pt.Submodules, pt.Worktrees);
+    }
+
     // ── Save ──
 
     public void SaveRefs(string repoPath, IReadOnlyList<BranchInfo> branches, IReadOnlyList<TagInfo> tags, IReadOnlyList<RemoteInfo> remotes)

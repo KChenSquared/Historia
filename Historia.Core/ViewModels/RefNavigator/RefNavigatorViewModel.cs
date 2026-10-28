@@ -273,11 +273,12 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
 
     // Last-known stash, submodule and worktree lists from the on-disk cache while the real
     // enumeration runs; a list stays null (shown as "Loading…") when nothing is cached. A list the
-    // real enumeration has already filled is kept.
+    // real enumeration has already filled is kept. A refs change that bumped the generation while the
+    // read ran does not drop the seed: it only fills lists that are still null.
     private async Task SeedPowerToolsFromCacheAsync(RepositoryContext repo, int gen)
     {
         var snap = await ReadCacheAsync(repo.RepositoryPath);
-        if (snap is null || !IsCurrentCacheRead(repo, gen))
+        if (snap is null || !IsCurrentCacheRead(repo, gen, requireLatest: false))
             return;
 
         var applied = false;
@@ -330,7 +331,7 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
     {
         try
         {
-            return await RunCacheIo(() => _repoCache.TryLoad(repoPath));
+            return await RunCacheIo(() => _repoCache.TryLoadPowerTools(repoPath));
         }
         catch (Exception ex)
         {
@@ -657,10 +658,18 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
         return rows;
     }
 
+    // Case-insensitive first, ordinal as the tie-break, culture-free: the same order the branch
+    // tree uses, so tags and branches agree.
+    private static readonly Comparer<string> TagNameComparer = Comparer<string>.Create((a, b) =>
+    {
+        var c = string.Compare(a, b, StringComparison.OrdinalIgnoreCase);
+        return c != 0 ? c : string.CompareOrdinal(a, b);
+    });
+
     private List<RefRowViewModel> BuildTagRows(RepositoryContext repo, RefSectionViewModel section)
     {
         var rows = new List<RefRowViewModel>();
-        var tags = repo.State.Tags.OrderByDescending(t => t.Name, StringComparer.Ordinal).ToList();
+        var tags = repo.State.Tags.OrderByDescending(t => t.Name, TagNameComparer).ToList();
         var remotes = repo.State.Remotes.Select(r => r.Name).ToList();
 
         if (section.HasActiveFilter)

@@ -359,6 +359,45 @@ public sealed class RepoStateCacheTests : IDisposable
     }
 
     [Fact]
+    public void TryLoadPowerTools_returns_only_the_power_tools_file_and_never_the_refs()
+    {
+        var settings = new FakeSettingsService(new AppSettings { PersistRepoCache = true });
+        var cache = new RepoStateCache(settings);
+        const string repoPath = "C:/test-repo-pt-only";
+        var stash = new StashEntry
+        {
+            Index = 0,
+            CommitId = new GitObjectId("3333333333333333333333333333333333333333"),
+            Message = "WIP",
+            AuthorName = "Dev",
+            AuthorEmail = "dev@example.com",
+            CreatedAt = DateTimeOffset.UtcNow,
+            BranchName = "main",
+        };
+
+        // Refs alone: there is nothing power-tools to load, though TryLoad finds a snapshot.
+        cache.SaveRefs(repoPath, [new BranchInfo { Name = "main", CanonicalName = "refs/heads/main", IsRemote = false, IsCurrent = true, TipCommitId = null }], [], []);
+        Assert.NotNull(cache.TryLoad(repoPath));
+        Assert.Null(cache.TryLoadPowerTools(repoPath));
+
+        // With a power-tools file the refs half of the snapshot stays unread even though it exists.
+        cache.SavePowerTools(repoPath, [stash], [], []);
+        var snapshot = cache.TryLoadPowerTools(repoPath);
+        Assert.NotNull(snapshot);
+        Assert.Null(snapshot.Branches);
+        Assert.Null(snapshot.Tags);
+        Assert.Null(snapshot.Remotes);
+        Assert.Equal("WIP", Assert.Single(snapshot.Stashes!).Message);
+        Assert.Empty(snapshot.Submodules!);
+        Assert.Empty(snapshot.Worktrees!);
+        Assert.NotNull(cache.TryLoad(repoPath)!.Branches);
+
+        // A cache that is switched off loads nothing.
+        var off = new RepoStateCache(new FakeSettingsService(new AppSettings { PersistRepoCache = false }));
+        Assert.Null(off.TryLoadPowerTools(repoPath));
+    }
+
+    [Fact]
     public void Cached_remote_HEAD_entry_is_dropped_on_load()
     {
         var settings = new FakeSettingsService(new AppSettings { PersistRepoCache = true });
