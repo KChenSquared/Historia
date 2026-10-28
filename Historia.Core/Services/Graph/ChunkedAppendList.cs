@@ -11,10 +11,10 @@ namespace Historia.Services.Graph;
 /// every single call (quadratic allocation in the number of extends; ~100 MB
 /// per extend at 2M rows, worse at higher <c>ResidentRowCap</c> settings).
 /// <para>
-/// <b>Concurrency contract:</b> <see cref="Add"/> is single-writer — every caller already holds
-/// <c>lock (GraphLayoutState)</c> around the whole Consume/Build pass that appends rows (see
+/// <b>Concurrency contract:</b> <see cref="Add"/> is single-writer — every caller holds
+/// <c>lock (GraphLayoutState)</c> around each Add (see
 /// <c>GraphLayoutService.ExtendLayoutAsync</c>/<c>ComputeLayoutAsync</c>'s own locking of
-/// <c>existing.State</c>). <see cref="Count"/> and the indexer may be called from ANY thread at
+/// <c>existing.State</c>); an extend appends its rows in several separate holds, not one. <see cref="Count"/> and the indexer may be called from ANY thread at
 /// ANY time with NO lock — the render thread reads a snapshot's rows while a background Extend may
 /// be appending to this SAME instance. Safety comes from ordering, not from a lock:
 /// </para>

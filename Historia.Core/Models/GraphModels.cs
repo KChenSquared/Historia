@@ -206,8 +206,10 @@ public interface ICommitStore : IReadOnlyList<CommitMetadata>, IDisposable
     void Prefetch(int firstRow, int lastRow);
 
     /// <summary>find: ascending row indices whose message or author contains
-    /// <paramref name="term"/> (case-insensitive), or whose SHA starts with it.</summary>
-    IReadOnlyList<int> Search(string term);
+    /// <paramref name="term"/> (case-insensitive), or whose SHA starts with it. Cancelling
+    /// <paramref name="ct"/> stops the scan early by throwing <see cref="OperationCanceledException"/>;
+    /// a partial result is never returned.</summary>
+    IReadOnlyList<int> Search(string term, CancellationToken ct = default);
 
     /// <summary>Take an extra lease on the store's backing resources. Every successful call must
     /// be balanced by exactly one <see cref="IDisposable.Dispose"/>; the handle a disk-backed
@@ -222,10 +224,14 @@ public interface ICommitStore : IReadOnlyList<CommitMetadata>, IDisposable
 /// <summary>The match rule the in-memory stores share for <see cref="ICommitStore.Search"/>.</summary>
 internal static class CommitSearch
 {
+    /// <summary>Rows scanned between cancellation checks; a power of two.</summary>
+    internal const int CancelCheckInterval = 4_096;
+
     /// <summary>Ascending indices of the rows of <paramref name="rows"/> whose message or author
     /// contains the trimmed <paramref name="term"/> (case-insensitive) or whose SHA starts with it;
-    /// none for an empty term.</summary>
-    internal static List<int> Matching(IReadOnlyList<CommitMetadata> rows, string term)
+    /// none for an empty term. The token is checked every <see cref="CancelCheckInterval"/> rows
+    /// and cancelling it throws <see cref="OperationCanceledException"/>.</summary>
+    internal static List<int> Matching(IReadOnlyList<CommitMetadata> rows, string term, CancellationToken ct = default)
     {
         var hits = new List<int>();
         var t = term.Trim();
@@ -233,6 +239,8 @@ internal static class CommitSearch
             return hits;
         for (var i = 0; i < rows.Count; i++)
         {
+            if ((i & (CancelCheckInterval - 1)) == 0)
+                ct.ThrowIfCancellationRequested();
             var m = rows[i];
             if (m.MessageShort.Contains(t, StringComparison.OrdinalIgnoreCase)
                 || m.AuthorName.Contains(t, StringComparison.OrdinalIgnoreCase)
@@ -256,7 +264,7 @@ public sealed class ArrayCommitStore(CommitMetadata[] items) : ICommitStore
     public ICommitStore? AddRef() => this;
     public void Dispose() { }
 
-    public IReadOnlyList<int> Search(string term) => CommitSearch.Matching(this, term);
+    public IReadOnlyList<int> Search(string term, CancellationToken ct = default) => CommitSearch.Matching(this, term, ct);
 
     public IEnumerator<CommitMetadata> GetEnumerator() => ((IEnumerable<CommitMetadata>)items).GetEnumerator();
     System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => items.GetEnumerator();

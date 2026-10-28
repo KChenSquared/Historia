@@ -139,8 +139,8 @@ public sealed class GraphCacheLifetimeTests : IDisposable
         Assert.False(svc.HasDecoCache(ctx.RepositoryPath));
     }
 
-    /// <summary>What the writer produced before it lower-cased through a reused buffer: clean the
-    /// text, then lower-case it into a new string.</summary>
+    /// <summary>The reference text for a field: clean it, then lower-case it into a new string
+    /// (the writer lower-cases through a reused buffer and must produce the same characters).</summary>
     private static string ExpectedField(string s)
         => s.Replace('\n', ' ').Replace('\r', ' ').Replace(GraphMetaStore.Sep, ' ').ToLowerInvariant();
 

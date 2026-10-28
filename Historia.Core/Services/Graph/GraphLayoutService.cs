@@ -174,7 +174,15 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
     /// some other way (see <see cref="PrimeCliWalkAsync"/>); the startup notice tells the user
     /// why.</summary>
     public GraphLayoutService(ISettingsService settings, IGitExecutableLocator locator)
+        : this(settings, locator, new GraphWalkCache())
     {
+    }
+
+    /// <summary>Uses <paramref name="walkCache"/> for the walk cache — lets a test give its read
+    /// entries a lifetime that outlasts a slow machine.</summary>
+    internal GraphLayoutService(ISettingsService settings, IGitExecutableLocator locator, GraphWalkCache walkCache)
+    {
+        _walkCache = walkCache;
         _settings = settings;
         _locator = locator;
         _cli = new GitCliService(locator);
@@ -242,7 +250,7 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
     }
 
     private readonly DagLayoutEngine _engine = new();
-    private readonly GraphWalkCache _walkCache = new();
+    private readonly GraphWalkCache _walkCache;
     private readonly ConditionalWeakTable<RepositoryContext, RepoCache> _caches = [];
     // The walk each layout's rows came from. Extend shares State in place, so one entry covers a
     // layout and every extension of it. A layout whose walk has since been reset (a RefsChanged
