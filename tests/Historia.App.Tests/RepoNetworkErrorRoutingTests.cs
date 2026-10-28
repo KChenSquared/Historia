@@ -517,6 +517,75 @@ public sealed class RepoNetworkErrorRoutingTests
     }
 
     [AvaloniaFact]
+    public async Task Waiting_behind_auto_fetch_marks_the_perf_log_with_the_holders_label()
+    {
+        var stateDir = TestScratch.NewDirectory("historia-netgate-perf-");
+        AppPaths.OverrideForTesting(stateDir);
+        Historia.Diagnostics.LoggingSwitch.OverrideForTesting(true);
+        try
+        {
+            using var fixture = new PushFixture();
+            await using var h = new Harness();
+            var repo = await h.OpenAsync(fixture.LocalPath);
+
+            Assert.True(repo.TryBeginNetworkOperation(new NetworkOperationInfo(NetworkOperationOwner.AutoFetch, "Auto-fetch"), out var autoFetch));
+            _ = Task.Delay(150).ContinueWith(_ => autoFetch.Dispose(), TaskScheduler.Default);
+            await h.Runner.RunExclusiveAsync(repo, "Pull", (_, _) => Task.CompletedTask);
+
+            Historia.Diagnostics.PerfLog.Flush();
+            var mark = Assert.Single(ReadGateMarks());
+            Assert.Contains("behind Auto-fetch", mark);
+            Assert.Contains("Pull", mark);
+            Assert.DoesNotContain(", cancelled", mark);
+        }
+        finally
+        {
+            Historia.Diagnostics.LoggingSwitch.OverrideForTesting(null);
+            AppPaths.OverrideForTesting(null);
+            TestScratch.Delete(stateDir);
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task A_waiter_cancelled_behind_auto_fetch_marks_the_perf_log_as_cancelled()
+    {
+        var stateDir = TestScratch.NewDirectory("historia-netgate-perf-");
+        AppPaths.OverrideForTesting(stateDir);
+        Historia.Diagnostics.LoggingSwitch.OverrideForTesting(true);
+        try
+        {
+            using var fixture = new PushFixture();
+            await using var h = new Harness();
+            var repo = await h.OpenAsync(fixture.LocalPath);
+
+            Assert.True(repo.TryBeginNetworkOperation(new NetworkOperationInfo(NetworkOperationOwner.AutoFetch, "Auto-fetch"), out var autoFetch));
+            using (autoFetch)
+            {
+                _ = Task.Delay(150).ContinueWith(_ => Dispatcher.UIThread.Post(() => h.Runner.Cancel(repo)), TaskScheduler.Default);
+                await h.Runner.RunExclusiveAsync(repo, "Pull", (_, _) => Task.CompletedTask);
+            }
+
+            Historia.Diagnostics.PerfLog.Flush();
+            var mark = Assert.Single(ReadGateMarks());
+            Assert.Contains("behind Auto-fetch, cancelled", mark);
+        }
+        finally
+        {
+            Historia.Diagnostics.LoggingSwitch.OverrideForTesting(null);
+            AppPaths.OverrideForTesting(null);
+            TestScratch.Delete(stateDir);
+        }
+    }
+
+    private static string[] ReadGateMarks()
+    {
+        var path = Path.Combine(AppPaths.LogsDirectory, "perf.log");
+        return File.Exists(path)
+            ? File.ReadAllLines(path).Where(l => l.Contains("network gate wait")).ToArray()
+            : [];
+    }
+
+    [AvaloniaFact]
     public async Task An_exclusive_operation_on_a_busy_repo_gets_a_notice_and_does_not_run()
     {
         using var fixture = new PushFixture();

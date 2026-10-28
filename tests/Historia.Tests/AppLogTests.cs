@@ -211,6 +211,44 @@ public sealed class AppLogTests : IDisposable
     }
 
     [Fact]
+    public void Write_with_a_long_exception_chain_keeps_every_cause_under_the_line_cap()
+    {
+        AppLog.Enabled = true;
+        var root = new HugeStackException("root cause message", null);
+        var middle = new HugeStackException("middle message", root);
+        var outer = new HugeStackException("outer message", middle);
+
+        AppLog.Write(AppLogLevel.Error, "unhandled", "crash", outer);
+
+        var text = ReadSession();
+        Assert.Contains("outer message", text);
+        Assert.Contains("middle message", text);
+        Assert.Contains("root cause message", text);
+        Assert.Contains("frames omitted", text);
+        Assert.DoesNotContain("more characters not logged", text);
+        Assert.True(text.Length < QueuedLineWriter.MaxLineChars);
+    }
+
+    [Fact]
+    public void Write_with_a_short_exception_stack_omits_nothing()
+    {
+        AppLog.Enabled = true;
+        Exception caught;
+        try { throw new InvalidOperationException("boom"); }
+        catch (Exception ex) { caught = ex; }
+
+        AppLog.Write(AppLogLevel.Error, "unhandled", "crash", caught);
+
+        Assert.DoesNotContain("frames omitted", ReadSession());
+    }
+
+    private sealed class HugeStackException(string message, Exception? inner) : Exception(message, inner)
+    {
+        public override string? StackTrace => string.Join(
+            "\n", Enumerable.Range(0, 400).Select(i => $"   at Historia.Some.Deeply.Nested.Type.Method{i}(String argument) in File.cs:line {i}"));
+    }
+
+    [Fact]
     public void Credentials_in_urls_are_redacted()
     {
         AppLog.Enabled = true;

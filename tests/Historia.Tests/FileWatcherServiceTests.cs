@@ -318,6 +318,45 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_flush_that_fires_before_the_window_ends_is_retried_for_the_rest_of_it()
+    {
+        using var dir = new StateDir();
+        using var session = AppLog.StartSessionForTesting(dir.Path);
+        await using var ctx = _host.Open(_repo.Path);
+        var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace(), watchFilesystem: false);
+
+        // The flush timer is armed for the end of an hour-long window; shortening the window and
+        // firing the flush stands in for a timer that wakes a tick before its window ends.
+        watcher.OverflowLogWindow = TimeSpan.FromHours(1);
+        RaiseWatcherError(watcher);
+        RaiseWatcherError(watcher);
+        watcher.OverflowLogWindow = TimeSpan.FromMilliseconds(300);
+        typeof(Historia.Services.Watching.FileWatcherService)
+            .GetMethod("FlushSuppressedOverflows", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .Invoke(watcher, [false]);
+
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        var logged = false;
+        while (!logged && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(50);
+            session.Flush(TimeSpan.FromSeconds(1));
+            logged = File.Exists(session.SessionPath)
+                && ReadSharedText(session.SessionPath).Contains("1 further overflow(s)");
+        }
+
+        await watcher.DisposeAsync();
+        Assert.True(logged);
+    }
+
+    private static string ReadSharedText(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+
+    [Fact]
     public async Task Entering_degraded_mode_logs_the_reason()
     {
         // Rewrite only the header's entry count: the watcher decides from the header alone.
