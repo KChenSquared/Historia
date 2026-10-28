@@ -54,7 +54,6 @@ public static class BodyColumnLayout
             right = total - left;
         }
 
-        left = Math.Min(left, total);
         var centre = total - left - right;
         if (centre < 0)
         {

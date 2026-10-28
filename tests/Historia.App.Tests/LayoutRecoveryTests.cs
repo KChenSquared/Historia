@@ -7,7 +7,8 @@ namespace HistoriaApp.Tests;
 public class LayoutRecoveryTests
 {
     /// <summary>Throws from <see cref="ArrangeOverride"/> while <see cref="ThrowsRemaining"/> is
-    /// positive (counting down) or negative (always).</summary>
+    /// positive (counting down) or negative (always). It invalidates itself first because the layout
+    /// manager marks the arrange valid before calling in, so a throw alone is not retried.</summary>
     private sealed class Thrower : Control
     {
         public int ThrowsRemaining;
@@ -17,6 +18,7 @@ public class LayoutRecoveryTests
             if (ThrowsRemaining != 0)
             {
                 if (ThrowsRemaining > 0) ThrowsRemaining--;
+                InvalidateArrange();
                 throw new InvalidOperationException("arrange failed");
             }
 
@@ -128,6 +130,27 @@ public class LayoutRecoveryTests
     }
 
     [AvaloniaFact]
+    public void A_fault_lasting_two_passes_is_recovered_by_a_follow_up_pass()
+    {
+        using var rig = new Rig(withRecovery: true);
+        rig.Thrower.ThrowsRemaining = 2;
+
+        rig.Thrower.InvalidateArrange();
+        rig.Pump();
+
+        Assert.Equal(1, rig.Unhandled);
+        Assert.Equal(2, rig.RecoveryPasses);
+        Assert.False(rig.Queued);
+
+        rig.Marker.Width = 80;
+        rig.Pump();
+
+        Assert.Equal(80, rig.Marker.Bounds.Width);
+        Assert.Equal(2, rig.RecoveryPasses);
+        Assert.Equal(1, rig.Unhandled);
+    }
+
+    [AvaloniaFact]
     public void A_control_that_always_throws_cannot_make_recovery_loop()
     {
         using var rig = new Rig(withRecovery: true);
@@ -137,7 +160,7 @@ public class LayoutRecoveryTests
         rig.Pump();
 
         Assert.Equal(1, rig.Unhandled);
-        Assert.Equal(1, rig.RecoveryPasses);
+        Assert.Equal(LayoutRecovery.MaxRecoveriesPerWindow, rig.RecoveryPasses);
 
         for (var i = 0; i < 10; i++)
         {
@@ -145,7 +168,7 @@ public class LayoutRecoveryTests
             rig.Pump();
         }
 
-        Assert.Equal(1, rig.RecoveryPasses);
+        Assert.Equal(LayoutRecovery.MaxRecoveriesPerWindow, rig.RecoveryPasses);
         Assert.Equal(1, rig.Unhandled);
     }
 
