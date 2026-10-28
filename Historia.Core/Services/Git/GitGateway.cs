@@ -512,7 +512,10 @@ public sealed partial class GitGateway(
             args = [.. BackgroundGitConfig, .. args];
         }
 
-        using var _ = context.BeginSelfOperation();
+        // A pull rewrites the working tree and index; fetch, push, prune and remote-branch delete
+        // write only inside the git directory, so edits made while they run still show.
+        using var _ = context.BeginSelfOperation(
+            operation == "Pull" ? SelfOperationKind.Full : SelfOperationKind.GitDirectoryOnly);
 
         var attempts = new List<NetworkAttempt>(plan.Count);
         foreach (var transport in plan)
