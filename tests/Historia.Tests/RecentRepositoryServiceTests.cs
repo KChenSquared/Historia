@@ -262,6 +262,27 @@ public sealed class RecentRepositoryServiceTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task IsStaleAsync_during_a_running_refresh_waits_for_that_check_and_answers_for_a_healthy_path()
+    {
+        var paths = new ScriptedPaths { Mode = ScriptedPaths.Hangs };
+        await using var svc = NewService(paths);
+        var path = Path.Combine(_state.Path, "a");
+
+        // AddAsync starts a background refresh whose check of the path is held on the gate.
+        await svc.AddAsync(path, "a");
+        var deadline = DateTime.UtcNow + Generous;
+        while (paths.Calls == 0 && DateTime.UtcNow < deadline)
+            await Task.Delay(10);
+        Assert.True(paths.Calls >= 1);
+
+        var answer = svc.IsStaleAsync(path);
+        Assert.False(answer.IsCompleted);
+        paths.Gate.Set();
+
+        Assert.False(await answer.WaitAsync(Generous));
+    }
+
+    [Fact]
     public async Task Racing_adds_leave_the_newest_list_pending()
     {
         const int rounds = 1_000;

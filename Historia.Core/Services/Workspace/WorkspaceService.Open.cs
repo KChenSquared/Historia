@@ -265,8 +265,9 @@ public sealed partial class WorkspaceService
         {
             // The local identity read does not depend on the root-commit walk, so it runs beside
             // it; it is only used if the resolved profile needs the repo's identity filled in. With
-            // no profile besides the global one nothing can resolve, so the read is not started.
-            var configRead = context.IsBare || !_profiles.GetAllProfiles().Any(p => !p.IsGlobal)
+            // no profile besides the global one, or neither a non-global default nor any binding,
+            // nothing can resolve, so the read is not started.
+            var configRead = context.IsBare || !CanResolveProfile()
                 ? null
                 : ReadLocalIdentityAsync(context, ct);
             var key = await _identity.ResolveAsync(context, ct).ConfigureAwait(false);
@@ -311,6 +312,12 @@ public sealed partial class WorkspaceService
             // Identity/profile resolution failure must not stop the repo from opening.
         }
     }
+
+    /// <summary>Whether some non-global profile could resolve for a repo: one exists and either it is
+    /// the default or a binding names a profile.</summary>
+    private bool CanResolveProfile()
+        => _profiles.GetAllProfiles().Any(p => !p.IsGlobal)
+            && (_profiles.GetDefaultProfile() is { IsGlobal: false } || _profiles.GetAllRepoBindings().Count > 0);
 
     /// <summary>The repo's local user.name/user.email, or null when the read failed. Never
     /// throws, so a read nobody awaits (the walk failed or no profile applies) leaves nothing

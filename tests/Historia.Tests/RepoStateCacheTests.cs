@@ -341,6 +341,25 @@ public sealed class RepoStateCacheTests : IDisposable
     }
 
     [Fact]
+    public void Only_the_first_write_of_an_instance_prunes_the_cache_directory()
+    {
+        const int cap = 60;
+        const int written = cap + 10;
+        var settings = new FakeSettingsService(new AppSettings { PersistRepoCache = true });
+        var cache = new RepoStateCache(settings);
+
+        for (var i = 0; i < written; i++)
+            cache.SaveRefs($"C:/prune-repo-{i}", [], [], []);
+
+        // The first write pruned an empty directory; the hourly gate then skips the later ones.
+        Assert.Equal(written, Directory.GetFiles(AppPaths.CacheDirectory, "repo-refs-*.json.gz").Length);
+
+        // A new instance prunes on its first write, down to the cap.
+        new RepoStateCache(settings).SaveRefs("C:/prune-repo-next", [], [], []);
+        Assert.Equal(cap, Directory.GetFiles(AppPaths.CacheDirectory, "repo-refs-*.json.gz").Length);
+    }
+
+    [Fact]
     public void WipeAll_removes_cache_files()
     {
         var settings = new FakeSettingsService(new AppSettings { PersistRepoCache = true });

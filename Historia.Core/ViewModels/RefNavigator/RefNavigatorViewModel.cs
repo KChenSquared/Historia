@@ -185,7 +185,7 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
             ResetSectionState();
 
         _repo = ctx;
-        var gen = ++_cacheGen;
+        ++_cacheGen;
         _submodulesFetched = false;
         _worktreesFetched = false;
         _stashList = null;
@@ -199,7 +199,7 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
             _loadedStashStamp = _repo.State.StashStamp;
             _powerToolsBranches = _repo.State.Branches;
             _powerToolsRemotes = _repo.State.Remotes;
-            _ = SeedPowerToolsFromCacheAsync(_repo, gen);
+            _ = SeedPowerToolsFromCacheAsync(_repo);
             _ = LoadPowerToolsAsync(_repo, listStashes: true);
         }
         else
@@ -275,10 +275,10 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
     // enumeration runs; a list stays null (shown as "Loading…") when nothing is cached. A list the
     // real enumeration has already filled is kept. A refs change that bumped the generation while the
     // read ran does not drop the seed: it only fills lists that are still null.
-    private async Task SeedPowerToolsFromCacheAsync(RepositoryContext repo, int gen)
+    private async Task SeedPowerToolsFromCacheAsync(RepositoryContext repo)
     {
         var snap = await ReadCacheAsync(repo.RepositoryPath);
-        if (snap is null || !IsCurrentCacheRead(repo, gen, requireLatest: false))
+        if (snap is null || !IsCurrentCacheRead(repo))
             return;
 
         var applied = false;
@@ -307,7 +307,7 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
     private async Task ReloadPowerToolsAsync(RepositoryContext repo, int gen, bool stashChanged, bool refsChanged)
     {
         var snap = await ReadCacheAsync(repo.RepositoryPath);
-        if (!IsCurrentCacheRead(repo, gen, requireLatest: false))
+        if (!IsCurrentCacheRead(repo))
             return;
 
         if (gen == _cacheGen)
@@ -324,8 +324,8 @@ public sealed partial class RefNavigatorViewModel : ViewModelBase
         await LoadPowerToolsAsync(repo, listStashes: stashChanged);
     }
 
-    private bool IsCurrentCacheRead(RepositoryContext repo, int gen, bool requireLatest = true)
-        => !IsDisposed && ReferenceEquals(repo, _repo) && (!requireLatest || gen == _cacheGen);
+    private bool IsCurrentCacheRead(RepositoryContext repo)
+        => !IsDisposed && ReferenceEquals(repo, _repo);
 
     private async Task<RepoStateSnapshot?> ReadCacheAsync(string repoPath)
     {
