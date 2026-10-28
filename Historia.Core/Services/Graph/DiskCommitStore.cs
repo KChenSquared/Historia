@@ -582,9 +582,11 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
     /// identity-order store a record index IS the row; otherwise the hits are
     /// mapped back to rows via the inverse of the current order, built once per call (no
     /// persisted reverse map), and a record no longer referenced
-    /// by the current order (superseded by a reorder, not yet compacted) is dropped.
+    /// by the current order (superseded by a reorder, not yet compacted) is dropped. The token is
+    /// checked before every read block; cancelling it throws <see cref="OperationCanceledException"/>
+    /// after the pooled buffer and the lease are returned.
     /// </summary>
-    public IReadOnlyList<int> Search(string term)
+    public IReadOnlyList<int> Search(string term, CancellationToken ct = default)
     {
         var t = term.Trim().ToLowerInvariant();
         if (t.Length == 0 || _search is null)
@@ -627,6 +629,7 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
                     Pool.Return(buf);
                     buf = grown;
                 }
+                ct.ThrowIfCancellationRequested();
                 var n = RandomAccess.Read(_search, buf.AsSpan(len), offset);
                 if (n <= 0)
                     break;
@@ -663,6 +666,10 @@ internal sealed class DiskCommitStore : ICommitStore, IDisposable
             }
             if (recordToRow is not null)
                 hits.Sort();
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch
         {

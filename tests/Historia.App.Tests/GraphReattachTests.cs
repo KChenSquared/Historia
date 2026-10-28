@@ -330,6 +330,35 @@ public sealed class GraphReattachTests
         Assert.Null(detached.Graph.LayoutForTesting);
     }
 
+    /// <summary>Makes the graph remember a HEAD lookup that missed on a layout nothing else
+    /// references, and returns only a weak reference to that layout.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static WeakReference MissHeadOnAThrowawayLayout(CommitGraphControl graph)
+    {
+        var layout = FakeLayout(0, 0);
+        Assert.Equal(-1, graph.ResolveHeadRowForTesting(layout));
+        return new WeakReference(layout);
+    }
+
+    [AvaloniaFact]
+    public async Task A_closed_repository_does_not_stay_reachable_through_the_remembered_head_miss()
+    {
+        using var detached = await OpenDetachedGraphAsync();
+        var missed = MissHeadOnAThrowawayLayout(detached.Graph);
+
+        await CloseTheOpenRepositoryAsync(detached.Services.GetRequiredService<IWorkspaceService>());
+
+        var collected = await WaitForAsync(() =>
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            return !missed.IsAlive;
+        }, timeoutMs: 30_000);
+
+        Assert.True(collected, "the graph still holds the layout of its last HEAD miss");
+    }
+
     [AvaloniaFact]
     public async Task A_detached_graph_keeps_its_layout_while_the_repository_stays_open()
     {

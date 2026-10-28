@@ -96,7 +96,9 @@ public sealed class GraphLayoutServiceHibernateTests : IAsyncDisposable
     public async Task Recompute_keeps_the_walk_cache_read_entry_for_its_own_walk()
     {
         await _host.Settings.UpdateAsync(s => s with { GraphMetadataFromDisk = false });
-        var svc = new GraphLayoutService(_host.Settings, _host.Locator);
+        // A read entry that lives for minutes, so a slow machine cannot expire the primed one
+        // before the assertion.
+        var svc = new GraphLayoutService(_host.Settings, _host.Locator, new GraphWalkCache(TimeSpan.FromMinutes(5)));
         await using var ctx = _host.Open(_repo.Path);
         // The walk cache supports only an all-refs query, so computing and recomputing a
         // current-branch graph never saves or loads the entry the primed read created.

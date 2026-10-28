@@ -148,10 +148,10 @@ public sealed partial class CommitGraphControl
             }
 
             // The store owns the scan: an in-memory array loops; a disk-backed store streams its
-            // search sidecar rather than paging every record. The scan itself cannot be
-            // interrupted, so a superseded one finishes and its result is dropped.
+            // search sidecar rather than paging every record. A superseded scan sees the
+            // cancelled token, stops and applies no result.
             var search = _findSearchForTesting;
-            var hits = await Task.Run(() => search is null ? lease.Search(term) : search(term, ct), ct).ConfigureAwait(true);
+            var hits = await Task.Run(() => search is null ? lease.Search(term, ct) : search(term, ct), ct).ConfigureAwait(true);
             if (version == _findVersion)
                 ApplyMatches(hits, preserveCursor);
         }

@@ -187,7 +187,7 @@ public sealed class DiskCommitStoreCostTests : IDisposable
     }
 
     [Fact]
-    public void Search_matches_the_previous_scan_on_unicode_messages()
+    public void Search_matches_the_reference_scan_on_unicode_messages()
     {
         var rows = new List<CommitMetadata>
         {
@@ -217,6 +217,33 @@ public sealed class DiskCommitStoreCostTests : IDisposable
 
         Assert.Empty(store.Search("   "));
         Assert.Contains(1, store.Search("日本語"));
+    }
+
+    [Fact]
+    public void Search_with_a_cancelled_token_throws_before_scanning()
+    {
+        var rows = Generated(5_000);
+        WriteStore(rows);
+        using var store = Open(rows.Count);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        Assert.Throws<OperationCanceledException>(() => store.Search("commit", cts.Token));
+
+        // The scan released its lease and buffer: a following search runs to completion.
+        Assert.Equal(ReferenceSearch(rows, "commit"), store.Search("commit"));
+    }
+
+    [Fact]
+    public void The_in_memory_search_with_a_cancelled_token_throws()
+    {
+        var rows = Enumerable.Range(0, 10_000).Select(i => Row(i)).ToArray();
+        var store = new ArrayCommitStore(rows);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        Assert.Throws<OperationCanceledException>(() => store.Search("commit", cts.Token));
+        Assert.Equal(10_000, store.Search("commit").Count);
     }
 
     [Fact]

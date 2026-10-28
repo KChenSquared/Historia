@@ -1397,6 +1397,15 @@ public sealed partial class CommitGraphControl : Control
     /// and neither it nor the lease is adopted; the caller keeps whatever it had.</para></summary>
     private bool SetLayout(GraphLayoutResult? result)
     {
+        // The remembered HEAD miss holds a whole layout snapshot (its state and store), so it ends
+        // with the layout lineage it was made for. An extend keeps the lineage's state, so the
+        // once-per-batch retry still runs.
+        if (result is null || !ReferenceEquals(result.State, _layout?.State))
+        {
+            _headRowMissed = false;
+            _headRowMissLayout = null;
+        }
+
         var next = result?.Layout.Commits;
         if (ReferenceEquals(next, _leasedStore))
         {

@@ -373,7 +373,7 @@ public sealed class DagLayoutEngine
 
         public void Dispose() { }
 
-        public IReadOnlyList<int> Search(string term) => CommitSearch.Matching(this, term);
+        public IReadOnlyList<int> Search(string term, CancellationToken ct = default) => CommitSearch.Matching(this, term, ct);
 
         public IEnumerator<CommitMetadata> GetEnumerator()
         {
