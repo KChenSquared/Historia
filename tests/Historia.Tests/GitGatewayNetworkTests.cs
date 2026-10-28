@@ -131,7 +131,7 @@ public sealed class GitGatewayNetworkTests : IAsyncDisposable
     [Fact]
     public async Task A_background_fetch_of_a_local_remote_is_one_attempt_with_the_quiet_settings()
     {
-        await using var ctx = Open(new Uri(Path.Combine(Path.GetTempPath(), "historia-no-such-remote.git")).AbsoluteUri);
+        await using var ctx = Open(new Uri(Path.Combine(TestScratch.Root, "no-such-remote.git")).AbsoluteUri);
         var cli = new RecordingCli(Fail("fatal: '/x' does not appear to be a git repository"), Ok());
 
         await Assert.ThrowsAsync<HistoriaGitException>(() => Gateway(ctx, cli).FetchAsync("origin", Background, null));
