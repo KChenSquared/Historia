@@ -368,6 +368,17 @@ public class WorkspaceServiceTests : WorkspaceServiceTestBase
             await Task.Delay(150);
             Assert.Equal(3, Started().Count);
 
+            // The focused tab is open and focused while every other open is still held, even though
+            // earlier tabs come before it in the saved order.
+            var focusSw = Stopwatch.StartNew();
+            while (ws.Focused is null)
+            {
+                Assert.True(focusSw.Elapsed < TimeSpan.FromSeconds(20), "the focused tab was not focused before the others opened");
+                await Task.Delay(5);
+            }
+            Assert.Equal(Norm(focusPath), Norm(ws.Focused.RepositoryPath));
+            Assert.Equal([Norm(focusPath)], ws.OpenRepositories.Select(c => Norm(c.RepositoryPath)));
+
             // Each finished open lets exactly one more start, until all have.
             for (var startedCount = 3; startedCount < repos.Count; startedCount++)
             {

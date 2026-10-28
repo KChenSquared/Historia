@@ -10,6 +10,25 @@ public sealed partial class WorkspaceService
     internal Func<string, IServiceProvider, CancellationToken, Task<RepositoryContext>> OpenContext { get; set; } =
         (path, services, ct) => RepositoryContext.OpenAsync(path, services, ct);
 
+    /// <summary>Where a session-restored tab belongs in the open set: before the first
+    /// already-restored tab with a later saved position. Tabs the restore did not add (opened
+    /// by the user meanwhile) keep their place.</summary>
+    private sealed class RestorePlacement(int rank, Dictionary<RepositoryContext, int> restoredRanks)
+    {
+        /// <summary>Under <see cref="_sync"/>: the index for <paramref name="context"/>, which is
+        /// recorded as restored at this placement's saved position.</summary>
+        public int InsertIndexFor(IReadOnlyList<RepositoryContext> open, RepositoryContext context)
+        {
+            restoredRanks[context] = rank;
+            for (var i = 0; i < open.Count; i++)
+            {
+                if (restoredRanks.TryGetValue(open[i], out var other) && other > rank)
+                    return i;
+            }
+            return open.Count;
+        }
+    }
+
     public async Task RestoreSessionAsync(CancellationToken ct = default)
     {
         Historia.Diagnostics.PerfLog.Mark("RestoreSessionAsync start");
@@ -59,10 +78,11 @@ public sealed partial class WorkspaceService
         // The focused tab's RepositoryContext.Open starts right away. Every other tab's open waits
         // for it to finish and then runs through a gate of RestoreOpenConcurrency, so a restore of
         // many tabs never launches git for all of them at once and the focused tab's open and
-        // graph walk have the CPU and disk to themselves. The loop below adds tabs to _open (and
-        // focuses/initializes the right one) strictly in saved-session order; each non-focused tab
-        // only needs RepositoryContext.Open (no graph work -- InitializeContextAsync is deferred
-        // until it is actually focused).
+        // graph walk have the CPU and disk to themselves. The focused tab is added, focused and
+        // initialized as soon as its own open finishes, before any other tab joins; every tab is
+        // inserted at its saved position, so the tab strip always matches the saved order. Each
+        // non-focused tab only needs RepositoryContext.Open (no graph work -- InitializeContextAsync
+        // is deferred until it is actually focused).
         var openGate = new SemaphoreSlim(RestoreOpenConcurrency);
         Task<RepositoryContext>? focusPrefetch = null;
         var prefetches = new Dictionary<string, Task<RepositoryContext>>(StringComparer.OrdinalIgnoreCase);
@@ -90,29 +110,38 @@ public sealed partial class WorkspaceService
                 prefetches[p] = Task.Run(() => OpenAfterFocusAsync(p), ct);
         }
 
+        var savedRanks = new Dictionary<RepositoryContext, int>();
+        async Task RestoreTabAsync(int rank, string path, Task<RepositoryContext> prefetch, bool isFocus)
+        {
+            try
+            {
+                await OpenCoreAsync(path, focus: isFocus, initialize: isFocus, ct, prefetched: prefetch, recordRecent: false,
+                    placement: new RestorePlacement(rank, savedRanks)).ConfigureAwait(false);
+            }
+            catch { /* skip a repo that no longer opens */ }
+        }
+
         try
         {
-            foreach (var path in paths)
+            // The focused tab first, so it paints before any other tab is added.
+            if (focusTarget is not null)
+            {
+                var focusRank = paths.FindIndex(p => string.Equals(p, focusTarget, StringComparison.OrdinalIgnoreCase));
+                if (prefetches.Remove(focusTarget, out var focusTask))
+                    await RestoreTabAsync(focusRank, focusTarget, focusTask, isFocus: true).ConfigureAwait(false);
+                Historia.Diagnostics.PerfLog.Mark("RestoreSessionAsync focus tab open+focused");
+                try { await Task.Delay(FocusPriorityYield, ct).ConfigureAwait(false); }
+                catch (OperationCanceledException) { return; }
+            }
+
+            for (var rank = 0; rank < paths.Count; rank++)
             {
                 // Consume this path's prefetch exactly once -- a duplicate path later in the session
                 // file (or one whose directory was already gone when the map above was built) has no
                 // entry left and is skipped.
-                if (!prefetches.Remove(path, out var prefetch))
+                if (!prefetches.Remove(paths[rank], out var prefetch))
                     continue;
-                var isFocus = string.Equals(path, focusTarget, StringComparison.OrdinalIgnoreCase);
-                try
-                {
-                    await OpenCoreAsync(path, focus: isFocus, initialize: isFocus, ct, prefetched: prefetch, recordRecent: false)
-                        .ConfigureAwait(false);
-                }
-                catch { /* skip a repo that no longer opens */ }
-
-                if (isFocus)
-                {
-                    Historia.Diagnostics.PerfLog.Mark("RestoreSessionAsync focus tab open+focused");
-                    try { await Task.Delay(FocusPriorityYield, ct).ConfigureAwait(false); }
-                    catch (OperationCanceledException) { return; }
-                }
+                await RestoreTabAsync(rank, paths[rank], prefetch, isFocus: false).ConfigureAwait(false);
             }
 
             // v3: re-establish each restored tab's link group. The saved "paths" order already

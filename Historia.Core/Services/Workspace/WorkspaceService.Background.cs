@@ -574,7 +574,7 @@ public sealed partial class WorkspaceService
 
     // Trap: an aggressive, blocking, compacting GC.Collect after every tab switch paid a full-heap
     // pause and a large-object-heap compaction even when the outgoing tab held only a few MB, and
-    // Aggressive also decommits, so the next tab paid to re-commit. The collection is now a
+    // Aggressive also decommits, so the next tab paid to re-commit. The collection is a
     // non-blocking request, made only once the heap has grown enough to matter and only while the
     // window is inactive, so it never lands while the user is interacting.
     private const long CompactHeapThresholdBytes = 1L * 1024 * 1024 * 1024; // 1 GiB
