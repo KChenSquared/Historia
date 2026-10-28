@@ -270,9 +270,10 @@ public sealed class AutoFetchService : IAutoFetchService
     /// <summary>
     /// runs one fetch for <paramref name="context"/>. On success, also refreshes that repo's state
     /// and commit-graph (after the network gate is released) and, for an inactive tab, queues its
-    /// headless disk cache. A repository whose network gate is held — a fetch, pull or push the user started, or a lock cleanup — is
-    /// skipped until the next cycle. Failures stop quietly here; the host reports them. A refused
-    /// tag still refreshes, since git fetched every other ref first.
+    /// headless disk cache. A repository whose network gate is held — a fetch, pull or push the
+    /// user started, or a lock cleanup — is skipped until the next cycle. Failures stop quietly
+    /// here; the host reports them. A refused tag still refreshes, since git fetched every other
+    /// ref first.
     /// </summary>
     /// <returns><c>true</c> if the fetch completed without error.</returns>
     private async Task<bool> SafeFetchAsync(RepositoryContext context, CancellationToken ct)

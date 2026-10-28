@@ -113,6 +113,9 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
 
         private void OnTick()
         {
+            // Stopped before the snapshot: an Offer that lands after it re-arms the timer, and a
+            // Stop after the lock would disarm that and leave the newest value pending.
+            _timer.Stop();
             GitProgress? progress;
             lock (_sync)
             {
@@ -122,7 +125,6 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
                     MarkDelivered(progress);
             }
 
-            _timer.Stop();
             if (progress is not null)
                 DeliverProgress(progress);
         }

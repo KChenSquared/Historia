@@ -151,7 +151,19 @@ public sealed class RepoNetworkTargetingTests
         public bool Running { get; private set; }
         public bool Disposed { get; private set; }
         public void Start() => Running = true;
-        public void Stop() => Running = false;
+
+        /// <summary>Runs once inside the next <see cref="Stop"/>, before it takes effect: another
+        /// thread's call landing at that point.</summary>
+        public Action? DuringNextStop { get; set; }
+
+        public void Stop()
+        {
+            var interleaved = DuringNextStop;
+            DuringNextStop = null;
+            interleaved?.Invoke();
+            Running = false;
+        }
+
         public void Dispose() { Running = false; Disposed = true; }
 
         /// <summary>Ticks once if the timer is running, the way the UI timer does.</summary>
@@ -238,6 +250,23 @@ public sealed class RepoNetworkTargetingTests
 
         Assert.Equal([1L, 3L], rig.Delivered.Select(p => p!.ObjectsDone!.Value));
         Assert.False(rig.Timer.Running);
+    }
+
+    [Fact]
+    public void Throttle_never_leaves_the_newest_report_pending_without_a_running_timer()
+    {
+        var rig = new ThrottleRig();
+        rig.Throttle.Offer(ThrottleRig.Receiving(1));
+        rig.Throttle.Offer(ThrottleRig.Receiving(2));
+        Assert.True(rig.Timer.Running);
+
+        // A reader thread's Offer lands while the tick is stopping the timer.
+        rig.Timer.DuringNextStop = () => rig.Throttle.Offer(ThrottleRig.Receiving(3));
+        rig.Timer.FireIfRunning();
+
+        var newestDelivered = rig.Delivered.Any(p => p!.ObjectsDone == 3);
+        Assert.True(newestDelivered || rig.Timer.Running,
+            "the newest report is neither delivered nor waiting on a running timer");
     }
 
     [Fact]
