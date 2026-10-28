@@ -341,10 +341,21 @@ public static partial class AppLog
         _ => "ERROR",
     };
 
+    private const int MaxFrameChars = 240;
+    private const int MaxMessageChars = 2_000;
+    private const int HeadFrames = 40;
+    private const int TailFrames = 10;
+    private const int ChainDepthLimit = 5;
+
+    /// <summary>Appends <paramref name="ex"/> and its <c>caused by:</c> chain. The entry is written
+    /// as one queued line that the writer cuts at its length cap from the end, and the root cause
+    /// comes last, so each exception's frames are bounded: at most the first
+    /// <see cref="HeadFrames"/> and last <see cref="TailFrames"/>, fewer when the chain would
+    /// otherwise not fit, with the middle replaced by an omitted-frames note.</summary>
     private static void AppendException(StringBuilder sb, Exception ex, int depth = 0)
     {
         var pad = new string(' ', 4 + depth * 2);
-        sb.Append(pad).Append(ex.GetType().FullName).Append(": ").Append(Redact(ex.Message));
+        sb.Append(pad).Append(ex.GetType().FullName).Append(": ").Append(Redact(Truncate(ex.Message, MaxMessageChars)));
 
         if (ex is Historia.Services.Git.HistoriaGitException { Details: { Length: > 0 } details })
         {
@@ -352,17 +363,55 @@ public static partial class AppLog
               .Append(Redact(Truncate(details.Replace(Environment.NewLine, " ").Replace('\n', ' '), 500)));
         }
 
+        var remaining = 1;
+        for (Exception? e = ex.InnerException; e is not null && depth + remaining <= ChainDepthLimit; e = e.InnerException)
+            remaining++;
+        // Each later exception in the chain keeps room for its own header and message.
+        var budget = (QueuedLineWriter.MaxLineChars - sb.Length - (MaxMessageChars + 200) * (remaining - 1)) / remaining;
+
         if (!string.IsNullOrEmpty(ex.StackTrace))
         {
-            foreach (var frame in ex.StackTrace.Split('\n'))
-                sb.Append(Environment.NewLine).Append(pad).Append("  ").Append(frame.TrimEnd('\r'));
+            var frames = ex.StackTrace.Split('\n');
+            for (var i = 0; i < frames.Length; i++)
+                frames[i] = Truncate(frames[i].TrimEnd('\r'), MaxFrameChars);
+
+            var head = Math.Min(frames.Length, HeadFrames);
+            var tail = Math.Min(frames.Length - head, TailFrames);
+            while ((head + tail > 0) && FramesCost(frames, head, tail, pad) > budget)
+            {
+                if (head >= tail * 4 && head > 0)
+                    head--;
+                else
+                    tail--;
+            }
+
+            for (var i = 0; i < head; i++)
+                sb.Append(Environment.NewLine).Append(pad).Append("  ").Append(frames[i]);
+            if (head + tail < frames.Length)
+            {
+                sb.Append(Environment.NewLine).Append(pad).Append("  … ")
+                  .Append(frames.Length - head - tail).Append(" frames omitted");
+            }
+            for (var i = frames.Length - tail; i < frames.Length; i++)
+                sb.Append(Environment.NewLine).Append(pad).Append("  ").Append(frames[i]);
         }
 
-        if (ex.InnerException is { } inner && depth < 5)
+        if (ex.InnerException is { } inner && depth < ChainDepthLimit)
         {
             sb.Append(Environment.NewLine).Append(pad).Append("caused by:").Append(Environment.NewLine);
             AppendException(sb, inner, depth + 1);
         }
+    }
+
+    private static int FramesCost(string[] frames, int head, int tail, string pad)
+    {
+        var cost = 0;
+        for (var i = 0; i < head; i++)
+            cost += frames[i].Length;
+        for (var i = frames.Length - tail; i < frames.Length; i++)
+            cost += frames[i].Length;
+        var lines = head + tail + (head + tail < frames.Length ? 1 : 0);
+        return cost + lines * (Environment.NewLine.Length + pad.Length + 2) + (head + tail < frames.Length ? 30 : 0);
     }
 
     private static string Truncate(string s, int max) => s.Length <= max ? s : s[..max] + "…";

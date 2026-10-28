@@ -212,6 +212,8 @@ public sealed class FileWatcherService : IAsyncDisposable
         var remaining = OverflowLogWindow - Stopwatch.GetElapsedTime(_lastOverflowLogTimestamp, now);
         if (remaining < TimeSpan.Zero)
             remaining = TimeSpan.Zero;
+        else if (remaining < TimeSpan.FromMilliseconds(1))
+            remaining = TimeSpan.FromMilliseconds(1);
         try
         {
             if (_overflowFlushTimer is null)
@@ -232,7 +234,13 @@ public sealed class FileWatcherService : IAsyncDisposable
             if (_suppressedOverflowLogs == 0)
                 return;
             if (!force && Stopwatch.GetElapsedTime(_lastOverflowLogTimestamp) < OverflowLogWindow)
+            {
+                // The timer counts milliseconds off a coarser clock than the window, so it can
+                // fire a tick before the window ends; try again for the rest of it.
+                if (!_disposed)
+                    ArmOverflowFlushLocked(Stopwatch.GetTimestamp());
                 return;
+            }
             suppressed = _suppressedOverflowLogs;
             _suppressedOverflowLogs = 0;
         }
