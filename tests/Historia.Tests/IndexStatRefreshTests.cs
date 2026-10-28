@@ -359,14 +359,104 @@ public sealed class IndexStatRefreshTests : IAsyncDisposable
 
     // ── The state service's trigger ──
 
-    /// <summary>A clock the test advances by hand, in milliseconds.</summary>
+    /// <summary>A clock the test advances by hand, in milliseconds. Its timers fire only when the
+    /// clock reaches them (<see cref="Advance"/>) or the test fires them (<see cref="FireAll"/>).</summary>
     private sealed class ManualTime : TimeProvider
     {
+        private readonly object _sync = new();
+        private readonly List<ManualTimer> _timers = [];
         private long _ms;
-        public void Advance(long ms) => Interlocked.Add(ref _ms, ms);
+
+        public void Advance(long ms)
+        {
+            Interlocked.Add(ref _ms, ms);
+            Fire(all: false);
+        }
+
+        /// <summary>Fires every armed timer whatever its due time, without moving the clock.</summary>
+        public void FireAll() => Fire(all: true);
+
+        /// <summary>Timers created and not yet fired or disposed.</summary>
+        public int PendingTimers
+        {
+            get { lock (_sync) return _timers.Count; }
+        }
+
         public override long TimestampFrequency => 1000;
         public override long GetTimestamp() => Interlocked.Read(ref _ms);
         public override DateTimeOffset GetUtcNow() => new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero).AddMilliseconds(Interlocked.Read(ref _ms));
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            var timer = new ManualTimer(this, callback, state);
+            timer.Change(dueTime, period);
+            return timer;
+        }
+
+        private void Fire(bool all)
+        {
+            List<ManualTimer> due;
+            lock (_sync)
+            {
+                var now = Interlocked.Read(ref _ms);
+                due = _timers.Where(t => all || t.DueAt <= now).ToList();
+                foreach (var timer in due)
+                    _timers.Remove(timer);
+            }
+
+            foreach (var timer in due)
+                timer.Callback(timer.State);
+        }
+
+        private sealed class ManualTimer(ManualTime owner, TimerCallback callback, object? state) : ITimer
+        {
+            public long DueAt { get; private set; }
+            public TimerCallback Callback => callback;
+            public object? State => state;
+
+            public bool Change(TimeSpan dueTime, TimeSpan period)
+            {
+                lock (owner._sync)
+                {
+                    owner._timers.Remove(this);
+                    if (dueTime != Timeout.InfiniteTimeSpan)
+                    {
+                        DueAt = Interlocked.Read(ref owner._ms) + (long)dueTime.TotalMilliseconds;
+                        owner._timers.Add(this);
+                    }
+                }
+
+                return true;
+            }
+
+            public void Dispose()
+            {
+                lock (owner._sync)
+                    owner._timers.Remove(this);
+            }
+
+            public ValueTask DisposeAsync()
+            {
+                Dispose();
+                return ValueTask.CompletedTask;
+            }
+        }
+    }
+
+    /// <summary>Lets the refresh the last slow status scheduled run to its end: fires its grace timer
+    /// as soon as it is created (the clock stays where it is) and waits for the task.</summary>
+    private static async Task SettleRefreshAsync(RepositoryStateService state, ManualTime time)
+    {
+        var task = state.IndexStatRefreshTask;
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (!task.IsCompleted)
+        {
+            Assert.True(DateTime.UtcNow < deadline, "The index stat refresh never finished.");
+            time.FireAll();
+            await Task.WhenAny(task, Task.Delay(5));
+        }
+
+        await task;
     }
 
     /// <summary>Forwards every call to the real gateway, taking a hook on status reads (to move the
@@ -401,9 +491,9 @@ public sealed class IndexStatRefreshTests : IAsyncDisposable
         }
     }
 
-    private (RepositoryStateService State, GatewayProxy Proxy, ManualTime Time, Action<long> SetStatusMs) NewService(TestRepositoryBuilder repo)
+    private (RepositoryStateService State, GatewayProxy Proxy, ManualTime Time, Action<long> SetStatusMs, RepositoryContext Context, InterceptingGitCliService Cli) NewService(TestRepositoryBuilder repo)
     {
-        var (ctx, _) = Open(repo);
+        var (ctx, cli) = Open(repo);
         var time = new ManualTime();
         long statusMs = 0;
         var proxy = DispatchProxy.Create<IGitGateway, GatewayProxy>();
@@ -411,7 +501,7 @@ public sealed class IndexStatRefreshTests : IAsyncDisposable
         handle.Inner = ctx.Gateway;
         handle.OnStatusRead = () => time.Advance(Interlocked.Read(ref statusMs));
         var state = new RepositoryStateService(ctx, gateway: proxy, time: time);
-        return (state, handle, time, ms => Interlocked.Exchange(ref statusMs, ms));
+        return (state, handle, time, ms => Interlocked.Exchange(ref statusMs, ms), ctx, cli);
     }
 
     [Fact(Timeout = 60000)]
@@ -421,16 +511,16 @@ public sealed class IndexStatRefreshTests : IAsyncDisposable
         Write(repo, "t.txt", "touched\n", Past);
         repo.Stage();
         repo.Commit("init");
-        var (state, proxy, _, setStatusMs) = NewService(repo);
+        var (state, proxy, time, setStatusMs, _, _) = NewService(repo);
 
         // A cold first run is slow whatever the index holds; only a slow run after it counts.
         setStatusMs(30_000);
         await state.RefreshStatusAsync();
-        await state.IndexStatRefreshTask;
+        await SettleRefreshAsync(state, time);
         Assert.Equal(0, proxy.Refreshes);
 
         await state.RefreshStatusAsync();
-        await state.IndexStatRefreshTask;
+        await SettleRefreshAsync(state, time);
         Assert.Equal(1, proxy.Refreshes);
     }
 
@@ -441,20 +531,20 @@ public sealed class IndexStatRefreshTests : IAsyncDisposable
         Write(repo, "t.txt", "touched\n", Past);
         repo.Stage();
         repo.Commit("init");
-        var (state, proxy, time, setStatusMs) = NewService(repo);
+        var (state, proxy, time, setStatusMs, _, _) = NewService(repo);
 
         // Not slow: at the threshold or under it.
         setStatusMs(1999);
         await state.RefreshStatusAsync();
         setStatusMs(2000);
         await state.RefreshStatusAsync();
-        await state.IndexStatRefreshTask;
+        await SettleRefreshAsync(state, time);
         Assert.Equal(0, proxy.Refreshes);
 
         // The first slow status starts a refresh.
         setStatusMs(2500);
         await state.RefreshStatusAsync();
-        await state.IndexStatRefreshTask;
+        await SettleRefreshAsync(state, time);
         Assert.Equal(1, proxy.Refreshes);
 
         // More slow statuses within the minute do not.
@@ -462,16 +552,16 @@ public sealed class IndexStatRefreshTests : IAsyncDisposable
         await state.RefreshStatusAsync();
         time.Advance(40_000);
         await state.RefreshStatusAsync();
-        await state.IndexStatRefreshTask;
+        await SettleRefreshAsync(state, time);
         Assert.Equal(1, proxy.Refreshes);
 
         // Past the minute the next slow status does, once.
         time.Advance(20_000);
         await state.RefreshStatusAsync();
-        await state.IndexStatRefreshTask;
+        await SettleRefreshAsync(state, time);
         Assert.Equal(2, proxy.Refreshes);
         await state.RefreshStatusAsync();
-        await state.IndexStatRefreshTask;
+        await SettleRefreshAsync(state, time);
         Assert.Equal(2, proxy.Refreshes);
     }
 
@@ -482,13 +572,14 @@ public sealed class IndexStatRefreshTests : IAsyncDisposable
         Write(repo, "t.txt", "touched\n", Past);
         repo.Stage();
         repo.Commit("init");
-        var (state, proxy, time, setStatusMs) = NewService(repo);
+        var (state, proxy, time, setStatusMs, _, _) = NewService(repo);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         proxy.OnRefresh = () => release.Task;
 
         await state.RefreshStatusAsync();
         setStatusMs(3000);
         await state.RefreshStatusAsync();
+        await FireUntilAsync(time, () => proxy.Refreshes == 1);
         time.Advance(120_000);
         await state.RefreshStatusAsync();
 
@@ -496,7 +587,145 @@ public sealed class IndexStatRefreshTests : IAsyncDisposable
         Assert.Equal(1, proxy.Refreshes);
 
         release.SetResult();
+        await SettleRefreshAsync(state, time);
+    }
+
+    [Fact(Timeout = 60000)]
+    public async Task The_refresh_starts_only_after_the_grace_period()
+    {
+        using var repo = NewRepo();
+        Write(repo, "t.txt", "touched\n", Past);
+        repo.Stage();
+        repo.Commit("init");
+        var (state, proxy, time, setStatusMs, _, _) = NewService(repo);
+
+        await state.RefreshStatusAsync();
+        setStatusMs(3000);
+        await state.RefreshStatusAsync();
+        await WaitUntilAsync(() => time.PendingTimers == 1, "the grace timer was not created");
+
+        time.Advance(1999);
+        await Task.Delay(50);
+        Assert.Equal(0, proxy.Refreshes);
+        Assert.False(state.IndexStatRefreshTask.IsCompleted);
+
+        time.Advance(1);
         await state.IndexStatRefreshTask;
+        Assert.Equal(1, proxy.Refreshes);
+    }
+
+    [Fact(Timeout = 60000)]
+    public async Task A_stage_right_after_a_slow_status_runs_add_and_the_refresh_is_skipped()
+    {
+        using var repo = NewRepo();
+        Write(repo, "t.txt", "touched\n", Past);
+        repo.Stage();
+        repo.Commit("init");
+        var (state, proxy, time, setStatusMs, ctx, cli) = NewService(repo);
+
+        await state.RefreshStatusAsync();
+        setStatusMs(3000);
+        await state.RefreshStatusAsync();
+        repo.WriteFile("t.txt", "changed\n");
+
+        await ctx.Gateway.StageAsync(["t.txt"]);
+        await WaitUntilAsync(() => time.PendingTimers == 1, "the grace timer was not created");
+        time.Advance(2000);
+        await state.IndexStatRefreshTask;
+
+        Assert.Equal(0, proxy.Refreshes);
+        Assert.Contains(cli.Requests, r => r.Arguments[0] == "add");
+        Assert.Equal(0, RefreshCount(cli));
+
+        // The skipped refresh is not held against the next slow status: it may schedule again.
+        await state.RefreshStatusAsync();
+        await SettleRefreshAsync(state, time);
+        Assert.Equal(1, proxy.Refreshes);
+    }
+
+    [Fact(Timeout = 60000)]
+    public async Task A_write_lock_holder_during_the_grace_period_skips_the_refresh()
+    {
+        using var repo = NewRepo();
+        Write(repo, "t.txt", "touched\n", Past);
+        repo.Stage();
+        repo.Commit("init");
+        var (state, proxy, time, setStatusMs, ctx, _) = NewService(repo);
+
+        await state.RefreshStatusAsync();
+        setStatusMs(3000);
+        await state.RefreshStatusAsync();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holder = ctx.WithWriteLockAsync(async ct =>
+        {
+            entered.SetResult();
+            await release.Task;
+        }, label: "Commit");
+        await entered.Task;
+
+        await WaitUntilAsync(() => time.PendingTimers == 1, "the grace timer was not created");
+        time.Advance(2000);
+        await state.IndexStatRefreshTask;
+
+        Assert.Equal(0, proxy.Refreshes);
+        release.SetResult();
+        await holder;
+    }
+
+    [Fact(Timeout = 60000)]
+    public async Task A_writer_queued_behind_the_refresh_runs_first_and_the_refresh_runs_no_git()
+    {
+        using var repo = NewRepo();
+        Write(repo, "t.txt", "touched\n", Past);
+        repo.Stage();
+        repo.Commit("init");
+        File.SetLastWriteTimeUtc(Path.Combine(repo.Path, "t.txt"), Past.AddHours(3));
+        repo.WriteFile("u.txt", "new\n");
+        var (ctx, cli) = Open(repo);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holder = ctx.WithWriteLockAsync(async ct =>
+        {
+            entered.SetResult();
+            await release.Task;
+        }, label: "Commit");
+        await entered.Task;
+
+        var refresh = ctx.Gateway.RefreshIndexStatAsync();
+        await WaitUntilAsync(() => ctx.WaitingWriters == 1, "the refresh did not queue for the lock");
+        var stage = ctx.Gateway.StageAsync(["u.txt"]);
+        await WaitUntilAsync(() => ctx.WaitingWriters == 2, "the stage did not queue for the lock");
+
+        release.SetResult();
+        await Task.WhenAll(holder, refresh, stage);
+
+        Assert.Equal(0, RefreshCount(cli));
+        Assert.Contains(cli.Requests, r => r.Arguments[0] == "add");
+        Assert.Equal("u.txt", repo.Git("diff", "--cached", "--name-only").Trim());
+        Assert.NotEqual(FileMtimeSeconds(repo, "t.txt"), IndexedMtimeSeconds(repo, "t.txt"));
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, string what)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while (!condition() && DateTime.UtcNow < deadline)
+            await Task.Delay(10);
+        Assert.True(condition(), what);
+    }
+
+    /// <summary>Fires the pending timers until <paramref name="condition"/> holds, for a test that
+    /// needs the grace period over without caring about the clock.</summary>
+    private static async Task FireUntilAsync(ManualTime time, Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while (!condition() && DateTime.UtcNow < deadline)
+        {
+            time.FireAll();
+            await Task.Delay(10);
+        }
+
+        Assert.True(condition(), "The condition was not reached.");
     }
 
     [Fact(Timeout = 60000)]
@@ -506,13 +735,13 @@ public sealed class IndexStatRefreshTests : IAsyncDisposable
         Write(repo, "t.txt", "touched\n", Past);
         repo.Stage();
         repo.Commit("init");
-        var (state, proxy, _, setStatusMs) = NewService(repo);
+        var (state, proxy, time, setStatusMs, _, _) = NewService(repo);
         proxy.OnRefresh = () => Task.FromException(new InvalidOperationException("boom"));
 
         await state.RefreshStatusAsync();
         setStatusMs(3000);
         await state.RefreshStatusAsync();
-        await state.IndexStatRefreshTask;
+        await SettleRefreshAsync(state, time);
 
         Assert.True(state.IndexStatRefreshTask.IsCompletedSuccessfully);
         Assert.Equal(1, proxy.Refreshes);

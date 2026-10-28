@@ -438,7 +438,9 @@ public sealed partial class GitGateway
 
         await context.WithWriteLockAsync(async innerCt =>
         {
-            if (!IsIndexStatRefreshSafe())
+            // A writer queued behind this refresh is a user operation (or another upkeep pass)
+            // that must not wait for a full re-stat: give way, the next status will schedule again.
+            if (context.HasWaitingWriters || !IsIndexStatRefreshSafe())
                 return;
 
             var result = await cli.RunAsync(new GitCliRequest
@@ -458,7 +460,7 @@ public sealed partial class GitGateway
                 innerCt.ThrowIfCancellationRequested();
 
             throw HistoriaGitException.FromCli(result, "Refresh index");
-        }, ct, label: "Refresh index").ConfigureAwait(false);
+        }, ct, label: "Index refresh").ConfigureAwait(false);
     }
 
     private bool IsIndexStatRefreshSafe() =>

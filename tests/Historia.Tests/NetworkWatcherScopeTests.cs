@@ -93,6 +93,27 @@ public sealed class NetworkWatcherScopeTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task An_index_event_inside_a_git_directory_scope_publishes_one_status_only_refresh()
+    {
+        var (ctx, _, ws, watcher) = Open();
+        await using var ctxScope = ctx;
+        await using var watcherScope = watcher;
+
+        using (ctx.BeginSelfOperation(SelfOperationKind.GitDirectoryOnly))
+        {
+            RaiseRawEvent(watcher, RemoteRef, isGitDir: true);
+            RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "index"), isGitDir: true);
+            RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "index"), isGitDir: true);
+
+            await WaitUntilAsync(() => ws.RefreshCalls == 1, "the index event did not publish a refresh");
+            Assert.False(ws.LastFull);
+
+            await Task.Delay(Quiet);
+            Assert.Equal(1, ws.RefreshCalls);
+        }
+    }
+
+    [Fact]
     public async Task A_full_scope_drops_working_tree_and_git_directory_events()
     {
         var (ctx, _, ws, watcher) = Open();

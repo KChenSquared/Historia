@@ -39,6 +39,10 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
     // A status that is still slow with a warm cache is the signal.
     private static readonly TimeSpan SlowStatusThreshold = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan IndexStatRefreshInterval = TimeSpan.FromSeconds(60);
+
+    // The refresh starts this long after the slow status, so a user operation that the status was
+    // read for (Stage all, Commit) gets the write lock first.
+    private static readonly TimeSpan IndexStatRefreshGrace = TimeSpan.FromSeconds(2);
     private long? _lastIndexStatRefreshAt;
     private Task _indexStatRefresh = Task.CompletedTask;
 
@@ -386,20 +390,37 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
                 return;
 
             _lastIndexStatRefreshAt = now;
-            _indexStatRefresh = Task.Run(RunIndexStatRefreshAsync);
+            var operationsAtStart = _context.CompletedOperations;
+            _indexStatRefresh = Task.Run(() => RunIndexStatRefreshAsync(operationsAtStart));
         }
     }
 
     // Best effort: the refresh only speeds up later statuses, so a failure is logged and nothing else.
-    private async Task RunIndexStatRefreshAsync()
+    // It waits out a grace period and then gives way to user work: when an operation ended or one
+    // holds the write lock meanwhile, it does not run, and the next slow status may schedule it again.
+    private async Task RunIndexStatRefreshAsync(long operationsAtStart)
     {
         try
         {
+            await Task.Delay(IndexStatRefreshGrace, _time, _context.Lifetime).ConfigureAwait(false);
+            if (_disposed
+                || _context.CompletedOperations != operationsAtStart
+                || _context.CurrentWriteHolder is not null)
+            {
+                lock (_sync)
+                    _lastIndexStatRefreshAt = null;
+                return;
+            }
+
             await _gateway.RefreshIndexStatAsync(_context.Lifetime).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
             // Tab closed before the refresh started.
+        }
+        catch (HistoriaGitException)
+        {
+            // The logging gateway has already recorded the failure.
         }
         catch (Exception ex)
         {

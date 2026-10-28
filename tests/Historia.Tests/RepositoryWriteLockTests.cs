@@ -460,4 +460,75 @@ public sealed class RepositoryWriteLockTests : IAsyncDisposable
             PerfLog.OverrideEnabledForTesting(null);
         }
     }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, string what)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!condition() && DateTime.UtcNow < deadline)
+            await Task.Delay(10);
+        Assert.True(condition(), what);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Waiting_writers_are_counted_until_they_acquire_the_lock()
+    {
+        using var repo = TestRepositoryBuilder.FromTemplate("write-lock-seed", b =>
+        {
+            b.WriteFile("a.txt", "initial\n").Stage();
+            b.Commit("c1");
+        });
+        var ctx = _host.Open(repo.Path);
+        var holding = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holder = ctx.WithWriteLockAsync(async ct =>
+        {
+            holding.SetResult();
+            await release.Task;
+        });
+        await holding.Task;
+        Assert.False(ctx.HasWaitingWriters);
+
+        var seenInside = new List<int>();
+        var first = ctx.WithWriteLockAsync(ct => { seenInside.Add(ctx.WaitingWriters); return Task.CompletedTask; });
+        await WaitUntilAsync(() => ctx.WaitingWriters == 1, "the first waiter was not counted");
+        var second = ctx.WithWriteLockAsync(ct => { seenInside.Add(ctx.WaitingWriters); return Task.CompletedTask; });
+        await WaitUntilAsync(() => ctx.WaitingWriters == 2, "the second waiter was not counted");
+        Assert.True(ctx.HasWaitingWriters);
+
+        release.SetResult();
+        await Task.WhenAll(holder, first, second);
+
+        Assert.Equal([1, 0], seenInside);
+        Assert.False(ctx.HasWaitingWriters);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task A_cancelled_waiter_is_no_longer_counted()
+    {
+        using var repo = TestRepositoryBuilder.FromTemplate("write-lock-seed", b =>
+        {
+            b.WriteFile("a.txt", "initial\n").Stage();
+            b.Commit("c1");
+        });
+        var ctx = _host.Open(repo.Path);
+        var holding = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holder = ctx.WithWriteLockAsync(async ct =>
+        {
+            holding.SetResult();
+            await release.Task;
+        });
+        await holding.Task;
+
+        using var cts = new CancellationTokenSource();
+        var waiter = ctx.WithWriteLockAsync(ct => Task.CompletedTask, cts.Token);
+        await WaitUntilAsync(() => ctx.HasWaitingWriters, "the waiter was not counted");
+
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiter);
+
+        Assert.False(ctx.HasWaitingWriters);
+        release.SetResult();
+        await holder;
+    }
 }

@@ -274,6 +274,15 @@ public sealed class RepositoryContext : IAsyncDisposable
     private sealed record WriteHolder(string Label, long StartTimestamp);
 
     private WriteHolder? _writeHolder;
+    private int _waitingWriters;
+
+    /// <summary>Another caller of <see cref="WithWriteLockAsync{T}"/> is waiting for the lock.
+    /// Read inside the lock, it means a writer queued behind the current holder; background
+    /// upkeep uses it to give way.</summary>
+    internal bool HasWaitingWriters => WaitingWriters > 0;
+
+    /// <summary>How many callers are waiting for the write lock right now.</summary>
+    internal int WaitingWriters => Volatile.Read(ref _waitingWriters);
 
     /// <summary>The operation holding the write lock and how long it has held it, or null while the
     /// lock is free. Safe to read from any thread; the value is a snapshot.</summary>
@@ -322,12 +331,14 @@ public sealed class RepositoryContext : IAsyncDisposable
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, Lifetime);
         var holderAtWaitStart = Volatile.Read(ref _writeHolder);
         var waitStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        Interlocked.Increment(ref _waitingWriters);
         try
         {
             await _writeLock.WaitAsync(linked.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
+            Interlocked.Decrement(ref _waitingWriters);
             var cancelledMs = System.Diagnostics.Stopwatch.GetElapsedTime(waitStart).TotalMilliseconds;
             if (cancelledMs > WriteLockLogThresholdMs && PerfLog.Enabled)
             {
@@ -336,6 +347,7 @@ public sealed class RepositoryContext : IAsyncDisposable
             }
             throw;
         }
+        Interlocked.Decrement(ref _waitingWriters);
         var waitMs = System.Diagnostics.Stopwatch.GetElapsedTime(waitStart).TotalMilliseconds;
         var resolvedLabel = ResolveCallerLabel(label, callerMember, callerFile);
         var holdStart = System.Diagnostics.Stopwatch.GetTimestamp();
