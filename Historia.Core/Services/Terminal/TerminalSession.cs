@@ -186,10 +186,9 @@ public sealed class TerminalSession : IDisposable
             {
                 _pty.Resize(columns, rows);
             }
-            catch (Exception ex) when (Volatile.Read(ref _disposed) != 0)
+            catch (Exception) when (Volatile.Read(ref _disposed) != 0)
             {
                 // Disposed while resizing; the pty is already gone.
-                _ = ex;
             }
             catch (Exception ex)
             {
