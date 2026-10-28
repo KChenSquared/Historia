@@ -29,13 +29,17 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
     /// apart. A report that arrives inside the interval is held as the single pending value and
     /// delivered by a timer when the interval ends; a report that starts a new phase is delivered
     /// at once and replaces anything pending. <see cref="Complete"/> delivers the end of the
-    /// operation (null) at once and discards anything pending. Subscribers are never called while
-    /// the throttle's lock is held.</summary>
+    /// operation (null) at once and discards anything pending. Offered from another thread, a
+    /// delivery is posted to the UI thread, so the reader thread never queues more than the
+    /// throttle lets through; a posted report that runs after <see cref="Complete"/> is dropped, so
+    /// the end is always the last delivery. Subscribers are never called while the throttle's lock
+    /// is held.</summary>
     internal sealed class ProgressThrottle : IDisposable
     {
         public static readonly TimeSpan MinInterval = TimeSpan.FromMilliseconds(100);
 
         private readonly TimeProvider _time;
+        private readonly IUiDispatcher _ui;
         private readonly Action<GitProgress?> _deliver;
         private readonly IUiTimer _timer;
         private readonly object _sync = new();
@@ -49,6 +53,7 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
         public ProgressThrottle(TimeProvider time, IUiDispatcher ui, Action<GitProgress?> deliver)
         {
             _time = time;
+            _ui = ui;
             _deliver = deliver;
             _timer = ui.CreateTimer(MinInterval, OnTick);
         }
@@ -76,7 +81,7 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
             if (deliverNow)
             {
                 _timer.Stop();
-                _deliver(progress);
+                DeliverProgress(progress);
             }
             else if (startTimer)
             {
@@ -87,7 +92,10 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
         public void Complete()
         {
             Dispose();
-            _deliver(null);
+            if (_ui.CheckAccess())
+                _deliver(null);
+            else
+                _ui.Post(() => _deliver(null), UiPriority.Background);
         }
 
         /// <summary>Stops delivering without announcing the end of the operation.</summary>
@@ -116,7 +124,27 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
 
             _timer.Stop();
             if (progress is not null)
-                _deliver(progress);
+                DeliverProgress(progress);
+        }
+
+        private void DeliverProgress(GitProgress progress)
+        {
+            if (_ui.CheckAccess())
+                DeliverUnlessClosed(progress);
+            else
+                _ui.Post(() => DeliverUnlessClosed(progress), UiPriority.Background);
+        }
+
+        // Re-checked where the delivery runs: a report posted just before Complete must not
+        // arrive after the end.
+        private void DeliverUnlessClosed(GitProgress progress)
+        {
+            lock (_sync)
+            {
+                if (_closed)
+                    return;
+            }
+            _deliver(progress);
         }
 
         private void MarkDelivered(GitProgress progress)
@@ -126,6 +154,13 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
             _deliveredAt = _time.GetTimestamp();
             _pending = false;
         }
+    }
+
+    /// <summary>Runs the handler on the reporting thread. <see cref="Progress{T}"/> would post every
+    /// git progress line to the UI thread's context before the throttle could drop it.</summary>
+    private sealed class SynchronousProgress(Action<GitProgress> handler) : IProgress<GitProgress>
+    {
+        public void Report(GitProgress value) => handler(value);
     }
 
     public event EventHandler<RepoNetworkProgress>? ProgressChanged;
@@ -308,16 +343,17 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
     /// local branch doesn't. Offer the three ways out in a modal the user can't lose behind
     /// later toasts — integrate then re-push (rebase or merge), or overwrite the remote
     /// (force-with-lease). A rebase/merge that stops in conflicts leaves the push for the user
-    /// to retry once the resolver panel is dealt with.
+    /// to retry once the resolver panel is dealt with. Returns true when the recovery ran git, so
+    /// the caller refreshes once the network gate is released.
     /// </summary>
-    private async Task RecoverFromPushRejectionAsync(
+    private async Task<bool> RecoverFromPushRejectionAsync(
         RepositoryContext repo, string remote, string branch, HistoriaGitException ex,
         IProgress<GitProgress> progress, CancellationToken ct)
     {
         if (!string.Equals(branch, repo.State.CurrentBranch?.Name, StringComparison.Ordinal))
         {
             _notifications.Publish(NotificationSeverity.Warning, ex.Message, ex.Details);
-            return;
+            return false;
         }
 
         // Left→right: Fetch & merge (blue default) · Fetch & rebase · Force push (red) · Cancel.
@@ -339,7 +375,7 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
             // The modal already explained the rejection; Cancel means "leave it" — the record
             // goes to the dev log, not a card the user didn't ask to see again.
             AppLog.Write(AppLogLevel.Info, "declined", $"Push rejected modal cancelled: {ex.Message}", ex);
-            return;
+            return false;
         }
 
         var setUpstream = !TargetHasUpstream(repo.State.Branches, branch);
@@ -368,7 +404,7 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
                         + "--force-with-lease only guards against changes made since your last fetch.\n\n"
                         + "Prefer \"Fetch & rebase\" unless you are certain you want to replace the remote branch.",
                         "Force push"))
-                    return;
+                    return false;
                 await repo.Gateway.PushAsync(remote,
                     new PushSpec { RefSpec = branch, ForceWithLease = true, SetUpstream = setUpstream }, progress, ct);
                 _notifications.Publish(NotificationSeverity.Success, $"Force-pushed to {remote}.");
@@ -390,10 +426,8 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
             _notifications.Publish(NotificationSeverity.Error,
                 retryEx.NotificationMessage("Push"), retryEx.NotificationDetails());
         }
-        finally
-        {
-            await repo.State.RefreshAllAsync(repo.Lifetime);
-        }
+
+        return true;
     }
 
     public void Cancel(RepositoryContext repo)
@@ -482,7 +516,7 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
         RunGatedAsync(repo, label, async ct =>
         {
             Report(repo, new GitProgress { Phase = $"{label}…" });
-            await operation(new Progress<GitProgress>(p => Report(repo, p)), ct);
+            await operation(new SynchronousProgress(p => Report(repo, p)), ct);
             return null;
         });
 
@@ -617,7 +651,7 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
             return null;
         }
 
-        var progress = new Progress<GitProgress>(p => Report(repo, p));
+        var progress = new SynchronousProgress(p => Report(repo, p));
         Report(repo, new GitProgress { Phase = $"{OpLabel(op)}…" });
 
         // Prune and remote-branch delete are confirmed above, once; the same delegate serves the first
@@ -715,7 +749,8 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
         }
         catch (HistoriaGitException ex) when (ex.Kind == GitErrorKind.RemoteRejected && op == RepoNetworkAction.Push && branch is not null)
         {
-            await RecoverFromPushRejectionAsync(repo, remote, branch, ex, progress, ct);
+            if (await RecoverFromPushRejectionAsync(repo, remote, branch, ex, progress, ct))
+                afterGate = () => RefreshAfterOperationAsync(repo, op);
         }
         catch (HistoriaGitException ex) when (ex.Kind == GitErrorKind.UnrelatedHistories && op == RepoNetworkAction.Pull && branch is not null)
         {
@@ -746,10 +781,13 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
         }
         catch (HistoriaGitException ex) when (ex.Kind == GitErrorKind.TagConflict)
         {
-            // Every other ref was fetched before the tag was reported, so the refresh shows them.
-            // A pull stops there and never merges.
-            RefreshCommitGraphAfterFetch(repo, op);
-            await repo.State.RefreshAllAsync(repo.Lifetime);
+            // Every other ref was fetched before the tag was reported, so the refresh shows them;
+            // it runs once the gate is free. A pull stops there and never merges.
+            afterGate = () =>
+            {
+                RefreshCommitGraphAfterFetch(repo, op);
+                return RefreshAfterOperationAsync(repo, op);
+            };
             var pull = op == RepoNetworkAction.Pull;
             _notifications.Publish(pull ? NotificationSeverity.Error : NotificationSeverity.Warning,
                 pull

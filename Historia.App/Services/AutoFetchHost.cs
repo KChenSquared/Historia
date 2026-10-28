@@ -42,8 +42,8 @@ public sealed class AutoFetchHost(
         {
             if (ex.Kind == GitErrorKind.TagConflict)
             {
-                // Every other ref was fetched before the tag was reported.
-                await context.State.RefreshAllAsync(ct).ConfigureAwait(false);
+                // Every other ref was fetched before the tag was reported; the caller refreshes
+                // once the network gate is released.
                 if (FirstWarning(context, ex.Kind))
                     notifications.Publish(NotificationSeverity.Warning,
                         $"Auto-fetch of {context.DisplayName}: {TagConflictPrompt.Subject(ex)} on {remote}.", ex.Details,

@@ -293,10 +293,11 @@ public sealed class AutoFetchServiceTests : IAsyncDisposable
         var host = new FakeHost { RefreshGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
         host.DuringRefresh = ctx =>
         {
-            gateFreeDuringRefresh = ctx.TryBeginNetworkOperation(
-                new NetworkOperationInfo(NetworkOperationOwner.User, "Pull"), out var userOp);
-            if (gateFreeDuringRefresh)
+            if (ctx.TryBeginNetworkOperation(new NetworkOperationInfo(NetworkOperationOwner.User, "Pull"), out var userOp))
+            {
+                gateFreeDuringRefresh = true;
                 userOp.Dispose();
+            }
         };
         var graph = new RecordingGraphLayoutService();
         var delay = new ManualDelayer();
@@ -313,6 +314,44 @@ public sealed class AutoFetchServiceTests : IAsyncDisposable
 
         host.RefreshGate!.SetResult();
         await WaitUntil(() => graph.Snapshot().Count == 1, "commit-graph refresh after the state refresh");
+    }
+
+    [Fact(Timeout = 60000)]
+    public async Task A_tag_conflict_refreshes_after_the_gate_is_released_and_skips_the_graph_refresh()
+    {
+        var ws = NewWorkspace();
+        var r1 = await ws.OpenAsync(Repo("a.txt").Path);
+
+        var gateFreeDuringRefresh = false;
+        var host = new FakeHost
+        {
+            FailWith = new HistoriaGitException(GitErrorKind.TagConflict, "tag moved"),
+            RefreshGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+        host.DuringRefresh = ctx =>
+        {
+            if (ctx.TryBeginNetworkOperation(new NetworkOperationInfo(NetworkOperationOwner.User, "Pull"), out var userOp))
+            {
+                gateFreeDuringRefresh = true;
+                userOp.Dispose();
+            }
+        };
+        var graph = new RecordingGraphLayoutService();
+        var delay = new ManualDelayer();
+        _svc = new AutoFetchService(ws, host, Settings(true), delay.Delay, graph);
+        _svc.Start();
+
+        await delay.WaitForPending("initial idle");
+        delay.Fire();
+
+        await host.RefreshStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.True(gateFreeDuringRefresh);
+        Assert.Same(r1, Assert.Single(host.RefreshedSnapshot()));
+
+        host.RefreshGate!.SetResult();
+        await delay.WaitForPending("trailing step");
+        Assert.Empty(graph.Snapshot());
+        Assert.Equal(AutoFetchTabState.PendingThisCycle, _svc.GetTabState(r1));
     }
 
     [Fact(Timeout = 60000)]
@@ -832,6 +871,9 @@ public sealed class AutoFetchServiceTests : IAsyncDisposable
         /// succeeding — used to prove a failed fetch triggers no commit-graph refresh.</summary>
         public bool Fail { get; set; }
 
+        /// <summary>When set, every <see cref="FetchAsync"/> call throws this exception.</summary>
+        public Exception? FailWith { get; init; }
+
         /// <summary>When set, the next <see cref="FetchAsync"/> records its token, signals
         /// <see cref="BlockedFetchStarted"/> and waits for this to complete before succeeding.</summary>
         public TaskCompletionSource? BlockNext { get; set; }
@@ -856,6 +898,8 @@ public sealed class AutoFetchServiceTests : IAsyncDisposable
         public async Task FetchAsync(RepositoryContext context, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
+            if (FailWith is not null)
+                throw FailWith;
             if (Fail)
                 throw new InvalidOperationException("simulated fetch failure");
             if (BlockNext is { } block)

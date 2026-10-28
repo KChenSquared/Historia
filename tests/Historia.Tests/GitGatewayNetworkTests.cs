@@ -27,15 +27,20 @@ public sealed class GitGatewayNetworkTests : IAsyncDisposable
         await _host.DisposeAsync();
     }
 
-    private RepositoryContext Open(string remoteUrl)
+    private RepositoryContext Open(string remoteUrl) => _host.Open(NewRepository(remoteUrl, null).Path);
+
+    private TestRepositoryBuilder NewRepository(string remoteUrl, string? insteadOfKey)
     {
-        var repo = TestRepositoryBuilder.FromTemplate("gateway-network-" + Math.Abs(StringComparer.Ordinal.GetHashCode(remoteUrl)), r =>
+        var name = "gateway-network-" + Math.Abs(StringComparer.Ordinal.GetHashCode(remoteUrl + insteadOfKey));
+        var repo = TestRepositoryBuilder.FromTemplate(name, r =>
         {
             r.WriteFile("f.txt", "x").Stage().Commit("seed");
             r.Git("remote", "add", "origin", remoteUrl);
+            if (insteadOfKey is not null)
+                r.Git("config", insteadOfKey, "https://example.invalid/");
         });
         _repos.Add(repo);
-        return _host.Open(repo.Path);
+        return repo;
     }
 
     private GitGateway Gateway(RepositoryContext ctx, IGitCliService cli, ISshHostResolver? hosts = null) => new(
@@ -100,10 +105,27 @@ public sealed class GitGatewayNetworkTests : IAsyncDisposable
         Assert.Equal(GitErrorKind.AuthenticationFailed, ex.Kind);
         Assert.Equal(GitCliPriority.BackgroundNetwork, call.Priority);
         Assert.Equal("never", call.ExtraEnvironment!["GCM_INTERACTIVE"]);
-        Assert.False(call.ExtraEnvironment.ContainsKey("GIT_SSH_COMMAND"));
         Assert.DoesNotContain(call.Arguments, a => a.StartsWith("remote.origin.url=", StringComparison.Ordinal));
         foreach (var expected in BackgroundConfig)
             Assert.Contains(expected, ConfigOptions(call));
+    }
+
+    [Fact]
+    public async Task A_background_fetch_of_an_https_remote_that_insteadof_sends_to_ssh_runs_ssh_quietly()
+    {
+        var repo = NewRepository("https://example.invalid/o/r.git", "url.git@example.invalid:.insteadOf");
+        await using var ctx = _host.Open(repo.Path);
+        var cli = new RecordingCli(Fail(Unreachable), Ok());
+
+        await Assert.ThrowsAsync<HistoriaGitException>(() => Gateway(ctx, cli).FetchAsync("origin", Background, null));
+
+        var call = Assert.Single(cli.NetworkCalls);
+        var ssh = call.ExtraEnvironment!["GIT_SSH_COMMAND"];
+        Assert.Contains("-o BatchMode=yes", ssh);
+        Assert.Contains("-o ServerAliveInterval=15", ssh);
+        Assert.Contains("-o ServerAliveCountMax=4", ssh);
+        Assert.Contains("-o ConnectTimeout=20", ssh);
+        Assert.Equal("never", call.ExtraEnvironment["GCM_INTERACTIVE"]);
     }
 
     [Fact]
@@ -117,7 +139,7 @@ public sealed class GitGatewayNetworkTests : IAsyncDisposable
         var call = Assert.Single(cli.NetworkCalls);
         Assert.Equal(GitCliPriority.BackgroundNetwork, call.Priority);
         Assert.Equal("never", call.ExtraEnvironment!["GCM_INTERACTIVE"]);
-        Assert.False(call.ExtraEnvironment.ContainsKey("GIT_SSH_COMMAND"));
+        Assert.Contains("BatchMode=yes", call.ExtraEnvironment["GIT_SSH_COMMAND"]);
     }
 
     [Fact]
@@ -214,31 +236,113 @@ public sealed class GitGatewayNetworkTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task The_network_path_starts_git_off_the_callers_synchronization_context()
+    public async Task The_network_path_starts_git_off_a_pumping_synchronization_context()
+    {
+        var repo = NewRepository("git@example.invalid:o/r.git", null);
+        var threads = new ConcurrentQueue<(string Verb, int Thread, bool HadContext)>();
+        var cli = new InterceptingGitCliService(_host.Cli)
+        {
+            Intercept = request =>
+            {
+                var verb = request.Arguments.Contains("fetch") ? "fetch" : request.Arguments[0];
+                threads.Enqueue((verb, Environment.CurrentManagedThreadId, SynchronizationContext.Current is not null));
+                return verb == "fetch" ? Ok() : null;
+            },
+        };
+        await using var ctx = _host.Open(repo.Path, cli);
+        var gateway = Gateway(ctx, cli);
+        using var pump = new PumpingContext();
+
+        // Starts on the pump thread, the way a UI handler starts it. A call that did not leave that
+        // thread would run its first git command (the remote lookup) on it.
+        var fetch = await pump.InvokeAsync(() => gateway.FetchAsync("origin", User, null));
+        await fetch.WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.Contains(threads, t => t.Verb == "fetch");
+        Assert.All(threads, t => Assert.NotEqual(pump.ThreadId, t.Thread));
+        Assert.DoesNotContain(threads, t => t.HadContext);
+    }
+
+    [Theory]
+    [InlineData("Fetch", SelfOperationKind.GitDirectoryOnly)]
+    [InlineData("Push", SelfOperationKind.GitDirectoryOnly)]
+    [InlineData("Pull", SelfOperationKind.Full)]
+    public async Task Each_network_command_runs_in_its_own_self_operation_scope(string command, SelfOperationKind expected)
     {
         await using var ctx = Open("git@example.invalid:o/r.git");
-        var cli = new RecordingCli(Ok());
+        var observed = new List<SelfOperationKind?>();
+        var cli = new RecordingCli(Ok()) { OnNetworkCall = () => observed.Add(ScopeOf(ctx)) };
         var gateway = Gateway(ctx, cli);
-        var callerThread = Environment.CurrentManagedThreadId;
 
-        var prior = SynchronizationContext.Current;
-        SynchronizationContext.SetSynchronizationContext(new SynchronizationContext());
-        Task fetch;
-        try
+        switch (command)
         {
-            fetch = gateway.FetchAsync("origin", User, null);
-        }
-        finally
-        {
-            SynchronizationContext.SetSynchronizationContext(prior);
+            case "Fetch": await gateway.FetchAsync("origin", User, null); break;
+            case "Push": await gateway.PushAsync("origin", new PushSpec { RefSpec = "main" }, null); break;
+            default: await gateway.PullAsync("origin", "main", new GitPullOptions(), null); break;
         }
 
-        // Blocking the calling thread means a call that did not hop would have run on it.
-        Assert.True(((IAsyncResult)fetch).AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(30)));
-        await fetch;
-        Assert.Single(cli.NetworkCalls);
-        Assert.NotEqual(callerThread, cli.NetworkThreads[0]);
-        Assert.False(cli.NetworkHadSynchronizationContext[0]);
+        Assert.Equal(expected, Assert.Single(observed));
+        Assert.Null(ScopeOf(ctx));
+    }
+
+    [Fact]
+    public async Task Prune_and_remote_branch_delete_run_in_a_git_directory_scope()
+    {
+        await using var ctx = Open("git@example.invalid:o/r.git");
+        var observed = new List<SelfOperationKind?>();
+        var cli = new RecordingCli(Ok(), Ok()) { OnNetworkCall = () => observed.Add(ScopeOf(ctx)) };
+        var gateway = Gateway(ctx, cli);
+
+        await gateway.DeleteRemoteBranchAsync("origin", "topic", null);
+        await gateway.PruneRemoteAsync("origin", null);
+
+        Assert.Equal(2, observed.Count);
+        Assert.All(observed, kind => Assert.Equal(SelfOperationKind.GitDirectoryOnly, kind));
+    }
+
+    private static SelfOperationKind? ScopeOf(RepositoryContext ctx) =>
+        ctx.IsSelfOperationInProgress ? SelfOperationKind.Full
+        : ctx.IsGitDirectoryOperationInProgress ? SelfOperationKind.GitDirectoryOnly
+        : null;
+
+    /// <summary>A single-threaded synchronization context like the UI thread's: work posted to it
+    /// runs one item at a time on its own dedicated thread.</summary>
+    private sealed class PumpingContext : SynchronizationContext, IDisposable
+    {
+        private readonly BlockingCollection<(SendOrPostCallback Callback, object? State)> _queue = new();
+        private readonly Thread _thread;
+
+        public PumpingContext()
+        {
+            _thread = new Thread(Run) { IsBackground = true, Name = "test-pump" };
+            _thread.Start();
+            ThreadId = _thread.ManagedThreadId;
+        }
+
+        public int ThreadId { get; }
+
+        public override void Post(SendOrPostCallback d, object? state) => _queue.Add((d, state));
+
+        /// <summary>Runs <paramref name="start"/> on the pump thread and returns the task it started.</summary>
+        public Task<Task> InvokeAsync(Func<Task> start)
+        {
+            var started = new TaskCompletionSource<Task>(TaskCreationOptions.RunContinuationsAsynchronously);
+            Post(_ =>
+            {
+                try { started.SetResult(start()); }
+                catch (Exception ex) { started.SetException(ex); }
+            }, null);
+            return started.Task;
+        }
+
+        private void Run()
+        {
+            SetSynchronizationContext(this);
+            foreach (var (callback, state) in _queue.GetConsumingEnumerable())
+                callback(state);
+        }
+
+        public void Dispose() => _queue.CompleteAdding();
     }
 
     /// <summary>Answers each network invocation (push / pull / fetch) with the next scripted
@@ -248,8 +352,9 @@ public sealed class GitGatewayNetworkTests : IAsyncDisposable
         private int _next;
 
         public List<GitCliRequest> NetworkCalls { get; } = [];
-        public List<int> NetworkThreads { get; } = [];
-        public List<bool> NetworkHadSynchronizationContext { get; } = [];
+
+        /// <summary>Runs as each network command arrives, before it is answered.</summary>
+        public Action? OnNetworkCall { get; init; }
         public bool IsGitAvailable => true;
 
         public Task<GitCliResult> RunAsync(GitCliRequest request, CancellationToken ct = default)
@@ -264,14 +369,13 @@ public sealed class GitGatewayNetworkTests : IAsyncDisposable
                 var url = args.Last(a => a.StartsWith("remote.", StringComparison.Ordinal) && !a.EndsWith('=')).Split('=', 2)[1];
                 return Task.FromResult(new GitCliResult(0, url + "\n", "", GitErrorKind.None, TimeSpan.Zero));
             }
-            if (!args.Any(a => a is "push" or "pull" or "fetch"))
+            if (!args.Any(a => a is "push" or "pull" or "fetch" or "prune"))
                 return Task.FromResult(Ok());
 
             lock (NetworkCalls)
             {
                 NetworkCalls.Add(request);
-                NetworkThreads.Add(Environment.CurrentManagedThreadId);
-                NetworkHadSynchronizationContext.Add(SynchronizationContext.Current is not null);
+                OnNetworkCall?.Invoke();
                 var result = _next < results.Length ? results[_next] : Ok();
                 _next++;
                 return Task.FromResult(result);

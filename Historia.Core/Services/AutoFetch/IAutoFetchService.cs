@@ -34,7 +34,8 @@ public interface IAutoFetchHost
     /// by the caller.</summary>
     Task FetchAsync(RepositoryContext context, CancellationToken ct);
 
-    /// <summary>Lands the refs a successful <see cref="FetchAsync"/> brought in into the UI state.
+    /// <summary>Lands the refs a <see cref="FetchAsync"/> brought in — a successful one, or one that
+    /// failed only on a refused tag — into the UI state.
     /// Runs after the network gate is released, so it must not assume the gate is held.</summary>
     Task RefreshAfterFetchAsync(RepositoryContext context, CancellationToken ct);
 }

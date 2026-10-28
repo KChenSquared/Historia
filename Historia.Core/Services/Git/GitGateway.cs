@@ -359,19 +359,19 @@ public sealed partial class GitGateway(
         args.AddRange(options.ReplaceTags.Select(ForcedTagRefSpec));
         if (!options.Tags)
         {
-            await RunNetworkAsync(args, "Fetch", remote, progress, ct, options.Background).ConfigureAwait(false);
+            await RunNetworkAsync(args, "Fetch", SelfOperationKind.GitDirectoryOnly, remote, progress, ct, options.Background).ConfigureAwait(false);
             return;
         }
 
         try
         {
-            await RunNetworkAsync([.. args, "--tags"], "Fetch", remote, progress, ct, options.Background).ConfigureAwait(false);
+            await RunNetworkAsync([.. args, "--tags"], "Fetch", SelfOperationKind.GitDirectoryOnly, remote, progress, ct, options.Background).ConfigureAwait(false);
         }
         catch (HistoriaGitException ex) when (ex.Kind == GitErrorKind.TagConflict)
         {
             // Git applies a fetch's ref updates together, so one refused tag also holds back every
             // branch. Fetching again without --tags lands the branches; the tag is still reported.
-            await RunNetworkAsync(args, "Fetch", remote, progress, ct, options.Background).ConfigureAwait(false);
+            await RunNetworkAsync(args, "Fetch", SelfOperationKind.GitDirectoryOnly, remote, progress, ct, options.Background).ConfigureAwait(false);
             throw;
         }
     }
@@ -402,7 +402,7 @@ public sealed partial class GitGateway(
         args.Add(remote);
         args.Add(branch);
 
-        await RunNetworkAsync(args, "Pull", remote, progress, ct).ConfigureAwait(false);
+        await RunNetworkAsync(args, "Pull", SelfOperationKind.Full, remote, progress, ct).ConfigureAwait(false);
     }
 
     public async Task PushAsync(string remote, PushSpec spec, IProgress<GitProgress>? progress, CancellationToken ct = default)
@@ -421,17 +421,17 @@ public sealed partial class GitGateway(
         args.Add(remote);
         args.Add(spec.RefSpec);
 
-        await RunNetworkAsync(args, "Push", remote, progress, ct).ConfigureAwait(false);
+        await RunNetworkAsync(args, "Push", SelfOperationKind.GitDirectoryOnly, remote, progress, ct).ConfigureAwait(false);
     }
 
     // Fully qualified: an unqualified name resolves against every remote ref, so a branch already
     // gone on the remote would delete a same-named tag instead. A qualified delete of a missing
     // branch succeeds (the remote only warns) and still drops the stale remote-tracking ref.
     public Task DeleteRemoteBranchAsync(string remote, string branch, IProgress<GitProgress>? progress, CancellationToken ct = default)
-        => RunNetworkAsync(["push", "--progress", remote, "--delete", $"refs/heads/{branch}"], "Delete remote branch", remote, progress, ct);
+        => RunNetworkAsync(["push", "--progress", remote, "--delete", $"refs/heads/{branch}"], "Delete remote branch", SelfOperationKind.GitDirectoryOnly, remote, progress, ct);
 
     public Task PruneRemoteAsync(string name, IProgress<GitProgress>? progress, CancellationToken ct = default)
-        => RunNetworkAsync(["remote", "prune", name], "Prune", name, progress, ct);
+        => RunNetworkAsync(["remote", "prune", name], "Prune", SelfOperationKind.GitDirectoryOnly, name, progress, ct);
 
     /// <summary>Prefixes <paramref name="args"/> with a per-invocation override that makes
     /// <paramref name="url"/> the remote's only URL. remote.&lt;name&gt;.url is multi-valued, so a
@@ -491,7 +491,7 @@ public sealed partial class GitGateway(
     /// environment, or not at all when that URL is the one the SSH attempt already tried.
     /// </summary>
     private async Task RunNetworkAsync(
-        IReadOnlyList<string> args, string operation, string? remote,
+        IReadOnlyList<string> args, string operation, SelfOperationKind scope, string? remote,
         IProgress<GitProgress>? progress, CancellationToken ct, bool background = false)
     {
         await LeaveUiThreadAsync().ConfigureAwait(false);
@@ -512,10 +512,10 @@ public sealed partial class GitGateway(
             args = [.. BackgroundGitConfig, .. args];
         }
 
-        // A pull rewrites the working tree and index; fetch, push, prune and remote-branch delete
-        // write only inside the git directory, so edits made while they run still show.
-        using var _ = context.BeginSelfOperation(
-            operation == "Pull" ? SelfOperationKind.Full : SelfOperationKind.GitDirectoryOnly);
+        // A pull rewrites the working tree and index (scope Full); fetch, push, prune and
+        // remote-branch delete write only inside the git directory (GitDirectoryOnly), so edits
+        // made while they run still show.
+        using var _ = context.BeginSelfOperation(scope);
 
         var attempts = new List<NetworkAttempt>(plan.Count);
         foreach (var transport in plan)
@@ -593,11 +593,16 @@ public sealed partial class GitGateway(
             };
             if (background)
             {
-                // Stored credentials still work; only the interactive sign-in window is off.
-                env = new Dictionary<string, string>(env ?? ReadOnlyDictionary<string, string>.Empty)
+                // Stored credentials still work; only the interactive sign-in window is off. The
+                // SSH command is set whatever the transport: an HTTPS remote that url.insteadOf
+                // rewrites to SSH would otherwise run ssh with prompts and no keepalives.
+                var backgroundEnv = new Dictionary<string, string>(env ?? ReadOnlyDictionary<string, string>.Empty)
                 {
                     ["GCM_INTERACTIVE"] = "never",
                 };
+                foreach (var (key, value) in SshEnv(background: true))
+                    backgroundEnv[key] = value;
+                env = backgroundEnv;
             }
 
             var result = await cli.RunAsync(new GitCliRequest

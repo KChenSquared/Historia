@@ -165,8 +165,32 @@ public sealed class RepoNetworkTargetingTests
     private sealed class ManualDispatcher : IUiDispatcher
     {
         public ManualTimer? Timer { get; private set; }
-        public bool CheckAccess() => true;
-        public void Post(Action action) => action();
+
+        /// <summary>False models a reader thread: posts queue until <see cref="RunPosted"/>.</summary>
+        public bool OnUiThread { get; set; } = true;
+
+        public List<(Action Action, UiPriority Priority)> Posted { get; } = [];
+
+        public bool CheckAccess() => OnUiThread;
+
+        public void Post(Action action) => Post(action, UiPriority.Normal);
+
+        public void Post(Action action, UiPriority priority)
+        {
+            if (OnUiThread)
+                action();
+            else
+                Posted.Add((action, priority));
+        }
+
+        public void RunPosted()
+        {
+            var queued = Posted.ToArray();
+            Posted.Clear();
+            foreach (var (action, _) in queued)
+                action();
+        }
+
         public IUiTimer CreateTimer(TimeSpan interval, Action tick) => Timer = new ManualTimer(tick);
     }
 
@@ -284,6 +308,72 @@ public sealed class RepoNetworkTargetingTests
         for (var i = 1; i < deliveredAt.Count; i++)
             Assert.True(deliveredAt[i] - deliveredAt[i - 1] >= RepoNetworkActionRunner.ProgressThrottle.MinInterval,
                 $"Deliveries {i - 1} and {i} were {(deliveredAt[i] - deliveredAt[i - 1]).TotalMilliseconds} ms apart.");
+    }
+
+    [Fact]
+    public void Throttle_posts_at_most_ten_deliveries_per_second_when_offered_off_the_ui_thread()
+    {
+        var rig = new ThrottleRig();
+        rig.Ui.OnUiThread = false;
+        var timerStartedAt = TimeSpan.Zero;
+        var elapsed = TimeSpan.Zero;
+        var step = TimeSpan.FromMilliseconds(5);
+
+        for (var i = 0; i < 400; i++)
+        {
+            var wasRunning = rig.Ui.Timer?.Running == true;
+            rig.Throttle.Offer(ThrottleRig.Receiving(i));
+            if (rig.Ui.Timer!.Running && !wasRunning)
+                timerStartedAt = elapsed;
+
+            rig.Time.Advance(step);
+            elapsed += step;
+            if (rig.Timer.Running && elapsed - timerStartedAt >= RepoNetworkActionRunner.ProgressThrottle.MinInterval)
+            {
+                // The timer ticks on the UI thread.
+                rig.Ui.OnUiThread = true;
+                rig.Timer.FireIfRunning();
+                rig.Ui.OnUiThread = false;
+            }
+        }
+
+        Assert.InRange(rig.Ui.Posted.Count + rig.Delivered.Count, 15, 21); // 2 s of reports
+        Assert.All(rig.Ui.Posted, p => Assert.Equal(UiPriority.Background, p.Priority));
+        Assert.Empty(rig.Delivered);
+
+        rig.Ui.RunPosted();
+        Assert.InRange(rig.Delivered.Count, 15, 21);
+    }
+
+    [Fact]
+    public void Throttle_delivers_the_end_last_when_a_report_is_still_queued_off_the_ui_thread()
+    {
+        var rig = new ThrottleRig();
+        rig.Ui.OnUiThread = false;
+
+        rig.Throttle.Offer(ThrottleRig.Receiving(1));
+        rig.Throttle.Complete();
+        rig.Ui.RunPosted();
+
+        Assert.Single(rig.Delivered);
+        Assert.Null(rig.Delivered[0]);
+    }
+
+    [Fact]
+    public void Throttle_drops_an_offer_that_arrives_after_the_end_off_the_ui_thread()
+    {
+        var rig = new ThrottleRig();
+        rig.Ui.OnUiThread = false;
+
+        rig.Throttle.Offer(ThrottleRig.Receiving(1));
+        rig.Ui.RunPosted();
+        rig.Throttle.Complete();
+        rig.Throttle.Offer(ThrottleRig.Receiving(2));
+        rig.Ui.RunPosted();
+
+        Assert.Equal(2, rig.Delivered.Count);
+        Assert.Equal(1, rig.Delivered[0]!.ObjectsDone);
+        Assert.Null(rig.Delivered[^1]);
     }
 
     [Fact]
@@ -626,6 +716,75 @@ public sealed class RepoNetworkOperationTests
         await Rig.WaitUntilAsync(() => inFlight.Task.IsCompleted);
 
         Assert.False(rig.Done);
+        Assert.True(rig.Context.TryBeginNetworkOperation(new NetworkOperationInfo(NetworkOperationOwner.AutoFetch, "test"), out var lease));
+        lease!.Dispose();
+
+        release.SetResult();
+        await Rig.WaitUntilAsync(() => rig.Done);
+    }
+
+    [AvaloniaFact]
+    public async Task The_refresh_after_a_tag_conflict_runs_once_the_network_gate_is_free()
+    {
+        using var fixture = new Fixture();
+        TestGit.Run(fixture.LocalPath, ["tag", "v1"]);
+        Fixture.Commit(fixture.OtherPath, "o.txt", "other\n", "other commit");
+        TestGit.Run(fixture.OtherPath, ["tag", "v1"]);
+        TestGit.Run(fixture.OtherPath, ["push", "origin", "main", "v1"]);
+        await using var rig = new Rig(new AppSettings());
+        await rig.OpenAsync(fixture.LocalPath);
+
+        var fetched = false;
+        var inFlight = new TaskCompletionSource();
+        var release = new TaskCompletionSource();
+        rig.Cli.BeforeCall = async (verb, gateFree) =>
+        {
+            if (verb == "fetch")
+                fetched = true;
+            else if (fetched && gateFree && inFlight.TrySetResult())
+                await release.Task;
+        };
+
+        rig.Begin(RepoNetworkAction.Fetch);
+        await Rig.WaitUntilAsync(() => inFlight.Task.IsCompleted);
+
+        Assert.False(rig.Done);
+        Assert.Contains(rig.Notifications.Published, n => n.Severity == NotificationSeverity.Warning);
+        Assert.True(rig.Context.TryBeginNetworkOperation(new NetworkOperationInfo(NetworkOperationOwner.AutoFetch, "test"), out var lease));
+        lease!.Dispose();
+
+        release.SetResult();
+        await Rig.WaitUntilAsync(() => rig.Done);
+    }
+
+    [AvaloniaFact]
+    public async Task The_refresh_after_a_push_recovery_runs_once_the_network_gate_is_free()
+    {
+        using var fixture = new Fixture();
+        Fixture.Commit(fixture.OtherPath, "o.txt", "other\n", "other commit");
+        TestGit.Run(fixture.OtherPath, ["push", "origin", "main"]);
+        Fixture.Commit(fixture.LocalPath, "g.txt", "local\n", "local commit");
+        await using var rig = new Rig(new AppSettings { FetchAfterPull = false });
+        await rig.OpenAsync(fixture.LocalPath);
+
+        // The rejected push, then the recovery's pull and second push, all hold the gate; the first
+        // call after that second push is the refresh.
+        var pushes = 0;
+        var inFlight = new TaskCompletionSource();
+        var release = new TaskCompletionSource();
+        rig.Cli.BeforeCall = async (verb, gateFree) =>
+        {
+            if (verb == "push")
+                pushes++;
+            else if (pushes >= 2 && gateFree && inFlight.TrySetResult())
+                await release.Task;
+        };
+
+        rig.Begin(RepoNetworkAction.Push);
+        await Rig.WaitUntilAsync(() => inFlight.Task.IsCompleted);
+
+        Assert.False(rig.Done);
+        Assert.Equal(["push", "pull", "push"], rig.Cli.NetworkCalls);
         Assert.True(rig.Context.TryBeginNetworkOperation(new NetworkOperationInfo(NetworkOperationOwner.AutoFetch, "test"), out var lease));
         lease!.Dispose();
 

@@ -41,6 +41,7 @@ public sealed class RepositoryContext : IAsyncDisposable
     private NetworkOperationInfo? _networkOp;
     private int _selfOperationDepth;
     private int _gitDirectoryOperationDepth;
+    private int _anySelfOperationDepth;
     private long _completedOperations;
 
     // Signaled once the graph control's first paint for this context lands (success, failure,
@@ -388,6 +389,7 @@ public sealed class RepositoryContext : IAsyncDisposable
     public IDisposable BeginSelfOperation(SelfOperationKind kind = SelfOperationKind.Full)
     {
         Interlocked.Increment(ref kind == SelfOperationKind.Full ? ref _selfOperationDepth : ref _gitDirectoryOperationDepth);
+        Interlocked.Increment(ref _anySelfOperationDepth);
         return new SelfOperationScope(this, kind);
     }
 
@@ -468,9 +470,9 @@ public sealed class RepositoryContext : IAsyncDisposable
             else
                 Interlocked.Decrement(ref owner._gitDirectoryOperationDepth);
 
-            // Each scope decrements before it reads, so when scopes of both kinds end together at
-            // least the later one sees both depths at zero.
-            if (!owner.IsSelfOperationInProgress && !owner.IsGitDirectoryOperationInProgress)
+            // One counter across both kinds, so exactly one ending scope sees zero and fires the
+            // refresh even when scopes of different kinds end on different threads at once.
+            if (Interlocked.Decrement(ref owner._anySelfOperationDepth) == 0)
                 _ = RefreshQuietlyAsync(owner, operationEnd);
         }
 

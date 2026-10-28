@@ -172,6 +172,35 @@ public sealed class NetworkWatcherScopeTests : IAsyncDisposable
         Assert.Equal(before + 1, StatusRuns(cli));
     }
 
+    [Fact]
+    public async Task Scopes_of_mixed_kinds_ending_on_parallel_threads_fire_one_refresh()
+    {
+        var (ctx, cli, _, watcher) = Open();
+        await using var ctxScope = ctx;
+        await using var watcherScope = watcher;
+
+        var before = await SettleAsync(ctx, cli);
+
+        const int count = 8;
+        var scopes = Enumerable.Range(0, count)
+            .Select(i => ctx.BeginSelfOperation(i % 2 == 0 ? SelfOperationKind.Full : SelfOperationKind.GitDirectoryOnly))
+            .ToArray();
+        using var barrier = new Barrier(count);
+        var threads = scopes.Select(scope => Task.Factory.StartNew(() =>
+        {
+            barrier.SignalAndWait();
+            scope.Dispose();
+        }, TaskCreationOptions.LongRunning)).ToArray();
+        await Task.WhenAll(threads);
+
+        await WaitUntilAsync(() => StatusRuns(cli) > before, "no refresh ran after the last scope ended");
+        await Task.Delay(Quiet);
+
+        Assert.Equal(before + 1, StatusRuns(cli));
+        Assert.False(ctx.IsSelfOperationInProgress);
+        Assert.False(ctx.IsGitDirectoryOperationInProgress);
+    }
+
     private sealed class FakeWorkspace : IWorkspaceService
     {
         public int RefreshCalls { get; private set; }
