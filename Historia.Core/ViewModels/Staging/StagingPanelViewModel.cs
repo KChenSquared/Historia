@@ -213,18 +213,28 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
     }
 
     // The write lock's holder counts as another operation when it was already holding the lock as
-    // the busy state began and still is: the same label, held for at least as long.
+    // the busy state began and still is (the same label, held for at least as long), or when it took
+    // the lock since under a label that is not one of this panel's own writes.
     private string ComposeBusyText()
-        => _holderAtBusyStart is { } started
-           && _ctx.CurrentWriteHolder is { } now
-           && string.Equals(now.Label, started.Label, StringComparison.Ordinal)
-           && now.Held >= started.Held
+    {
+        if (_ctx.CurrentWriteHolder is not { } now)
+            return _busyBaseText;
+
+        var heldSinceBusyStart = _holderAtBusyStart is { } started
+            && string.Equals(now.Label, started.Label, StringComparison.Ordinal)
+            && now.Held >= started.Held;
+        return heldSinceBusyStart || !IsOwnWriteLabel(now.Label)
             ? $"Waiting for {DescribeHolder(now.Label)}…"
             : _busyBaseText;
+    }
+
+    // The gateway labels of the writes this panel starts; their holder is the panel's own work.
+    private static bool IsOwnWriteLabel(string label)
+        => label is "Stage" or "Unstage" or "Discard";
 
     /// <summary>
     /// Turns a write-lock holder label into words for the user. A label is an explicit name such as
-    /// <c>Refresh index</c> or a call-site name such as <c>GitGateway.WorkingTree.CommitAsync</c>; the
+    /// <c>Index refresh</c> or a call-site name such as <c>GitGateway.WorkingTree.CommitAsync</c>; the
     /// text after the last dot loses its <c>Async</c> suffix and its PascalCase words are separated
     /// (<c>Commit</c>, <c>Stage all</c>).
     /// </summary>

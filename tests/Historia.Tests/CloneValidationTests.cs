@@ -17,14 +17,14 @@ public class CloneValidationTests
     [Fact]
     public void DescribeUrlProblem_accepts_an_existing_local_directory()
     {
-        var dir = Directory.CreateTempSubdirectory("historia-clone-validation-");
+        var dir = TestScratch.NewDirectory("historia-clone-validation-");
         try
         {
-            Assert.Null(CloneValidation.DescribeUrlProblem(dir.FullName));
+            Assert.Null(CloneValidation.DescribeUrlProblem(dir));
         }
         finally
         {
-            dir.Delete(recursive: true);
+            TestScratch.Delete(dir);
         }
     }
 
@@ -46,21 +46,21 @@ public class CloneValidationTests
     [Fact]
     public void DescribeDestinationProblem_accepts_a_clean_new_folder()
     {
-        var root = Directory.CreateTempSubdirectory("historia-clone-validation-").FullName;
+        var root = TestScratch.NewDirectory("historia-clone-validation-");
         try
         {
             Assert.Null(CloneValidation.DescribeDestinationProblem(root, $"new-{Guid.NewGuid():N}"));
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestScratch.Delete(root);
         }
     }
 
     [Fact]
     public void DescribeDestinationProblem_rejects_an_existing_non_empty_folder()
     {
-        var root = Directory.CreateTempSubdirectory("historia-clone-validation-").FullName;
+        var root = TestScratch.NewDirectory("historia-clone-validation-");
         var folder = "existing";
         var target = Path.Combine(root, folder);
         Directory.CreateDirectory(target);
@@ -71,7 +71,7 @@ public class CloneValidationTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestScratch.Delete(root);
         }
     }
 
@@ -81,7 +81,7 @@ public class CloneValidationTests
         if (!OperatingSystem.IsWindows())
             return;
 
-        var root = Directory.CreateTempSubdirectory("historia-clone-unreadable-").FullName;
+        var root = TestScratch.NewDirectory("historia-clone-unreadable-");
         var target = Path.Combine(root, "unreadable");
         Directory.CreateDirectory(target);
         File.WriteAllText(Path.Combine(target, "file.txt"), "data");
@@ -107,7 +107,7 @@ public class CloneValidationTests
         {
             sec.RemoveAccessRule(denyRule);
             di.SetAccessControl(sec);
-            Directory.Delete(root, recursive: true);
+            TestScratch.Delete(root);
         }
     }
 

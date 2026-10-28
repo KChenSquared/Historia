@@ -263,11 +263,6 @@ public sealed class FileWatcherService : IAsyncDisposable
         var path = NormalizePath(fullPath);
         if (IsSameOrUnder(path, _gitDirRoot))
         {
-            // A fetch or push writes refs and objects here and refreshes once when it ends;
-            // working-tree events, which are the user's own edits, fall through and still count.
-            if (_context.IsGitDirectoryOperationInProgress)
-                return;
-
             QueueEvent(path.AsSpan(_gitDirRoot.Length), underGit: true);
             return;
         }
@@ -311,6 +306,13 @@ public sealed class FileWatcherService : IAsyncDisposable
                 // The index changes on every stage, unstage and stat refresh and says nothing about
                 // refs or the graph; it is a status change like a working-tree edit.
                 var statusOnly = rel is "index";
+
+                // A fetch or push writes refs here and refreshes once when it ends, so those events
+                // are dropped while it runs. The index is not something it writes: that event is an
+                // external stage or unstage, as visible as a working-tree edit.
+                if (!statusOnly && _context.IsGitDirectoryOperationInProgress)
+                    return;
+
                 var gitPath = new string(rel);
                 lock (_sync)
                 {

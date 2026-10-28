@@ -37,7 +37,7 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
     private readonly NulRecordReader _reader;
     private readonly StringBuilder _stderr;
     private readonly Task _stderrDrain;
-    private readonly Thread? _stdinWriter;
+    private readonly Task? _stdinWriter;
     private bool _disposed;
     private int _lowPriority;
 
@@ -53,7 +53,7 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
     /// the read/parse error. Null while it hasn't failed.</summary>
     public string? FailureReason { get; private set; }
 
-    private GitLogStream(Process process, Task stderrDrain, StringBuilder stderr, Thread? stdinWriter)
+    private GitLogStream(Process process, Task stderrDrain, StringBuilder stderr, Task? stdinWriter)
     {
         _process = process;
         try { _processId = process.Id; } catch (InvalidOperationException) { _processId = -1; }
@@ -130,9 +130,9 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
             return null;
         }
 
-        Thread? stdinWriter = null;
+        Task? stdinWriter = null;
         if (tipShas.Count > InlineTipLimit)
-            stdinWriter = StartBackgroundThread(() => WriteTips(process, tipShas), "GitLogStream stdin");
+            stdinWriter = StartStdinWriter(process, tipShas);
         else
             WriteTips(process, tipShas);
 
@@ -148,6 +148,19 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
         var thread = new Thread(body, maxStackSize: 256 * 1024) { IsBackground = true, Name = name };
         thread.Start();
         return thread;
+    }
+
+    // Like the stderr drain: a blocking write on its own thread, observed through a task so
+    // nothing has to Join it on a pool thread.
+    private static Task StartStdinWriter(Process process, IReadOnlyList<string> tipShas)
+    {
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        StartBackgroundThread(() =>
+        {
+            try { WriteTips(process, tipShas); }
+            finally { done.TrySetResult(); }
+        }, "GitLogStream stdin");
+        return done.Task;
     }
 
     private static void WriteTips(Process process, IReadOnlyList<string> tipShas)
@@ -387,20 +400,28 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
         _reader.Dispose();
     }
 
-    private static async Task FinishAfterKillAsync(Task killed, Task stderrDrain, Thread? stdinWriter, Process process)
+    private static async Task WaitBestEffortAsync(Task helper)
+    {
+        try { await helper.WaitAsync(TimeSpan.FromSeconds(1)).ConfigureAwait(false); }
+        catch { /* a timeout, or a helper that failed: nothing to do about either */ }
+    }
+
+    private static async Task FinishAfterKillAsync(Task killed, Task stderrDrain, Task? stdinWriter, Process process)
     {
         try
         {
             await killed.ConfigureAwait(false);
-            // Killing closes git's pipes, so both helpers end at once; the bounds cover a leftover
-            // child that keeps a pipe open.
-            await stderrDrain.WaitAsync(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
-            stdinWriter?.Join(1_000);
         }
         catch
         {
             // Best effort.
         }
+
+        // Killing closes git's pipes, so both helpers end at once; the bounds cover a leftover
+        // child that keeps a pipe open.
+        await WaitBestEffortAsync(stderrDrain).ConfigureAwait(false);
+        if (stdinWriter is not null)
+            await WaitBestEffortAsync(stdinWriter).ConfigureAwait(false);
 
         DisposeProcess(process);
     }

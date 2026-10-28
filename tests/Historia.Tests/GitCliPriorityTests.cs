@@ -14,7 +14,7 @@ public sealed class GitCliPriorityTests : IAsyncLifetime
     private static readonly TimeSpan Patience = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan Settle = TimeSpan.FromSeconds(1.5);
 
-    private readonly string _dir = Directory.CreateTempSubdirectory("historia-priority-").FullName;
+    private readonly string _dir = TestScratch.NewDirectory("historia-priority-");
     private readonly ConcurrentDictionary<string, ProcessPriorityClass> _priorities = new();
     private readonly List<(string Id, Task<GitCliResult> Task)> _calls = [];
     private GitCliService? _cli;
@@ -41,8 +41,7 @@ public sealed class GitCliPriorityTests : IAsyncLifetime
             Release(id);
         try { await Task.WhenAll(_calls.Select(c => c.Task)).WaitAsync(Patience); }
         catch { }
-        try { Directory.Delete(_dir, recursive: true); }
-        catch { }
+        TestScratch.Delete(_dir);
     }
 
     [Fact]

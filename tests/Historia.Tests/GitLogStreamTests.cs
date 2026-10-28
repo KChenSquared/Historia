@@ -418,8 +418,8 @@ public sealed class GitLogStreamProcessTests : IAsyncDisposable
 
 /// <summary>
 /// Disposing a running <see cref="GitLogStream"/> must leave no live git process, even when the
-/// shared <see cref="ProcessKiller"/> thread is busy. Serial: the test floods that one process-wide
-/// thread with kills, which would delay every other test's kills if it ran alongside them.
+/// shared <see cref="ProcessKiller"/> threads are busy. Serial: the test floods the killer's small
+/// fixed pool with kills, which would delay every other test's kills if it ran alongside them.
 /// </summary>
 [Trait("tier", "git")]
 [Collection("serial")]

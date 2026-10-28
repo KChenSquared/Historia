@@ -43,6 +43,7 @@ global using System.IO.Compression;
 global using System.IO.Pipes;
 global using System.Net;
 global using System.Runtime.CompilerServices;
+global using System.Runtime.ExceptionServices;
 global using System.Runtime.InteropServices;
 global using System.Runtime.Versioning;
 global using System.Security;

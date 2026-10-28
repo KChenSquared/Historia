@@ -26,7 +26,7 @@ public class TestTempUsageGuardTests
     private const string GuardFile = "Historia.Tests/TestTempUsageGuardTests.cs";
 
     private static readonly Regex TempPattern =
-        new(@"GetTemp(?:Path|FileName|Directory)\s*\(", RegexOptions.Compiled);
+        new(@"(?:GetTemp(?:Path|FileName|Directory)|CreateTempSubdirectory)\s*\(", RegexOptions.Compiled);
 
     private static readonly Regex DirectoryDeletePattern =
         new(@"Directory\.Delete\s*\(", RegexOptions.Compiled);

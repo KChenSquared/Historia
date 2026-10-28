@@ -313,6 +313,63 @@ public class GitCliServiceTests
         }, progress: null, onStdoutLine: _ => throw new InvalidOperationException("callback")));
     }
 
+    [Fact(Timeout = 60_000)]
+    public async Task A_throwing_line_callback_on_a_never_killed_write_keeps_draining_and_reports_the_failure()
+    {
+        var cli = await MakeAsync();
+        using var repo = TestRepositoryBuilder.FromTemplate("empty-repo", _ => { });
+        var calls = 0;
+
+        // Far more output than any pipe buffer holds: a reader that stopped at the first throw
+        // would leave git blocked on a full pipe, and a never-killed write would hang with it.
+        var run = cli.RunAsync(new GitCliRequest
+        {
+            Arguments = ["-c", "alias.noisy=!seq 1 200000", "noisy"],
+            WorkingDirectory = repo.Path,
+            CancelPolicy = GitCliCancelPolicy.NeverAfterStart,
+        }, progress: null, onStdoutLine: _ =>
+        {
+            Interlocked.Increment(ref calls);
+            throw new InvalidOperationException("callback");
+        });
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => run.WaitAsync(TimeSpan.FromSeconds(45)));
+
+        Assert.Equal("callback", ex.Message);
+        Assert.Equal(1, Volatile.Read(ref calls));
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task A_throwing_progress_report_on_a_never_killed_write_keeps_draining_and_reports_the_failure()
+    {
+        var cli = await MakeAsync();
+        using var repo = TestRepositoryBuilder.FromTemplate("empty-repo", _ => { });
+        var progress = new ThrowingProgress();
+
+        var run = cli.RunAsync(new GitCliRequest
+        {
+            Arguments = ["-c", "alias.noisy=!seq 1 100000 | sed 's|.*|Receiving objects:  42% (42/100)|' >&2", "noisy"],
+            WorkingDirectory = repo.Path,
+            CancelPolicy = GitCliCancelPolicy.NeverAfterStart,
+        }, progress, onStdoutLine: null);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => run.WaitAsync(TimeSpan.FromSeconds(45)));
+
+        Assert.Equal(1, progress.Reports);
+    }
+
+    private sealed class ThrowingProgress : IProgress<GitProgress>
+    {
+        private int _reports;
+        public int Reports => Volatile.Read(ref _reports);
+
+        public void Report(GitProgress value)
+        {
+            Interlocked.Increment(ref _reports);
+            throw new InvalidOperationException("progress");
+        }
+    }
+
     /// <summary>A blob whose bytes line mode would rewrite: a CRLF, a lone CR and a NUL.</summary>
     private static readonly byte[] AwkwardBytes = "a\r\nb\rc\0d\n"u8.ToArray();
 
