@@ -72,6 +72,7 @@ public class SettingsReachabilityTests
 
         Assert.Contains("IsChecked=\"{Binding FetchAfterPull}\"", gitSection);
         Assert.Contains("IsChecked=\"{Binding PruneOnFetch}\"", gitSection);
+        Assert.Contains("IsChecked=\"{Binding UseBundledGit}\"", gitSection);
     }
 
     [Theory]

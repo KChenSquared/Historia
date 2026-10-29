@@ -415,7 +415,7 @@ public sealed class App : Application
     {
         try
         {
-            var git = await locator.ResolveAsync(settings.Current.GitExecutablePath).ConfigureAwait(false);
+            var git = await locator.ResolveAsync(settings.Current.GitExecutablePath, settings.Current.UseBundledGit).ConfigureAwait(false);
             Historia.Diagnostics.PerfLog.Mark($"Git resolution complete: found={git.Found}, path={git.Path}");
             // The locator reports a git below the version floor as not found; its reason names
             // the found and required versions.
@@ -424,8 +424,18 @@ public sealed class App : Application
                 var reason = git.Path is not null && git.NotFoundReason is { } r
                     ? r
                     : "Git was not found on this system.";
-                notifications.Publish(NotificationSeverity.Warning,
-                    $"{reason} Network and history operations are disabled until a supported git is installed or its path is set in Settings.");
+                var advice = settings.Current.UseBundledGit
+                    ? "Network and history operations are disabled until a supported git is installed or its path is set in Settings."
+                    : "Network and history operations are disabled until a supported git is installed, its path is set in Settings, or \"Use the Git bundled with Historia\" is turned on.";
+                notifications.Publish(NotificationSeverity.Warning, $"{reason} {advice}");
+            }
+            else if (git.Source == GitSource.Bundled)
+            {
+                var versionStr = git.Version is not null ? $" ({git.Version})" : "";
+                var message = $"Using the Git bundled with Historia{versionStr}. Install Git for Windows to use your own.";
+                if (!string.IsNullOrEmpty(git.Notice))
+                    message = $"{message} {git.Notice}";
+                notifications.Publish(NotificationSeverity.Info, message);
             }
         }
         catch (Exception ex)

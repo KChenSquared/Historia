@@ -112,18 +112,22 @@ public class SettingsViewModelTests
             CmdrPathStatus? cmdrStatus = null,
             IDialogService? dialogs = null,
             FakeSettingsService? service = null,
-            bool cmdrThrows = false)
+            bool cmdrThrows = false,
+            IGitExecutableLocator? locator = null,
+            INotificationService? notifications = null)
         {
             Settings = service ?? new FakeSettingsService(settings);
             Theme = new FakeThemeService(Settings);
             Dialogs = dialogs as FakeDialogService ?? new FakeDialogService();
             Ui = ui ?? new ImmediateUiDispatcher();
+            Locator = locator;
+            Notifications = notifications as FakeNotificationService ?? new FakeNotificationService();
             if (cmdrStatus is not null)
                 Cmdr.StatusToReturn = cmdrStatus;
             Cmdr.ThrowFromGetStatus = cmdrThrows;
             Routes = [];
             Nav.NavigationRequested += Routes.Add;
-            Vm = new SettingsViewModel(Settings, Theme, dialogs ?? Dialogs, Cache, Cmdr, Ui, Nav, Workspace, developerMode, panel);
+            Vm = new SettingsViewModel(Settings, Theme, dialogs ?? Dialogs, Cache, Cmdr, Ui, Nav, Workspace, developerMode, panel, Locator, Notifications);
         }
 
         public FakeSettingsService Settings { get; }
@@ -136,6 +140,8 @@ public class SettingsViewModelTests
         public IUiDispatcher Ui { get; }
         public List<string> Routes { get; }
         public SettingsViewModel Vm { get; }
+        public IGitExecutableLocator? Locator { get; }
+        public FakeNotificationService Notifications { get; }
 
         /// <summary>Waits for the PATH status check and lets its result land.</summary>
         public async Task StatusAsync()
@@ -175,6 +181,7 @@ public class SettingsViewModelTests
         nameof(AppSettings.EnableGraphSplice),
         nameof(AppSettings.LightweightMode),
         nameof(AppSettings.DeveloperPanelEnabled),
+        nameof(AppSettings.UseBundledGit),
     ];
 
     [Theory]
@@ -1162,5 +1169,64 @@ public class SettingsViewModelTests
         ui.DrainPosted();
 
         Assert.False(rig.Vm.ShowCommandLine);
+    }
+
+    private sealed class ToggleableGitLocator : IGitExecutableLocator
+    {
+        private readonly GitExecutableInfo _bundledInfo;
+
+        public ToggleableGitLocator(GitExecutableInfo bundledInfo)
+        {
+            _bundledInfo = bundledInfo;
+            Current = bundledInfo;
+        }
+
+        public GitExecutableInfo Current { get; private set; }
+
+        public Task<GitExecutableInfo> ResolveAsync(string? userOverridePath, CancellationToken ct = default)
+            => ResolveAsync(userOverridePath, true, ct);
+
+        public Task<GitExecutableInfo> ResolveAsync(string? userOverridePath, bool allowBundled, CancellationToken ct = default)
+        {
+            Current = allowBundled ? _bundledInfo : GitExecutableInfo.NotFound;
+            return Task.FromResult(Current);
+        }
+
+        public Task<GitExecutableInfo> WhenResolvedAsync(CancellationToken ct = default)
+            => Task.FromResult(Current);
+    }
+
+    [Fact]
+    public async Task Toggling_use_bundled_git_off_with_only_bundled_git_resolves_to_not_found_and_publishes_warning()
+    {
+        var bundledInfo = new GitExecutableInfo
+        {
+            Found = true,
+            Path = @"C:\App\git\cmd\git.exe",
+            Version = new Version(2, 56, 0),
+            Source = GitSource.Bundled,
+            BundledRoot = @"C:\App\git",
+        };
+        var locator = new ToggleableGitLocator(bundledInfo);
+        using var rig = new Rig(locator: locator);
+
+        Assert.True(rig.Vm.UseBundledGit);
+        Assert.Contains("bundled with Historia", rig.Vm.GitInUseText);
+
+        rig.Vm.UseBundledGit = false;
+        await Task.Yield();
+
+        Assert.False(rig.Settings.Current.UseBundledGit);
+        Assert.False(locator.Current.Found);
+        Assert.Equal("Git not found", rig.Vm.GitInUseText);
+        Assert.Contains(rig.Notifications.Published, n => n.Severity == NotificationSeverity.Warning);
+
+        rig.Vm.UseBundledGit = true;
+        await Task.Yield();
+
+        Assert.True(rig.Settings.Current.UseBundledGit);
+        Assert.True(locator.Current.Found);
+        Assert.Contains("bundled with Historia", rig.Vm.GitInUseText);
+        Assert.Contains(rig.Notifications.Published, n => n.Severity == NotificationSeverity.Info);
     }
 }

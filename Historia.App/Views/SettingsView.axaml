@@ -194,6 +194,14 @@
                 <local:SettingsSectionHeader DataContext="{Binding Git}" />
                 <StackPanel Classes="body" IsVisible="{Binding Git.IsExpanded}">
                     <DockPanel Classes="hinted">
+                        <ctl:HelpHint Text="Includes Git LFS. Used only when no supported Git is installed. Turn off to require an installed Git." />
+                        <CheckBox Content="Use the Git bundled with Historia" IsChecked="{Binding UseBundledGit}" />
+                    </DockPanel>
+                    <StackPanel Margin="0,4,0,4">
+                        <TextBlock Classes="text muted" Text="{Binding GitInUseText}" />
+                        <TextBlock Classes="text muted" Text="{Binding GitNoticeText}" IsVisible="{Binding HasGitNotice}" />
+                    </StackPanel>
+                    <DockPanel Classes="hinted">
                         <ctl:HelpHint Text="On fetch and pull, removes remote branches that no longer exist on the server. Your local branches aren't touched." />
                         <CheckBox Content="Prune deleted remote branches on fetch" IsChecked="{Binding PruneOnFetch}" />
                     </DockPanel>
