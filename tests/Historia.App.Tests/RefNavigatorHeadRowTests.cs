@@ -46,7 +46,7 @@ public sealed class RefNavigatorHeadRowTests
                 RunGit("commit", "-m", "c2");
             }
 
-            RunGit("remote", "add", "origin", "https://HistoriaHQ.com/repo.git");
+            RunGit("remote", "add", "origin", "https://HistoriaHQ.dev/repo.git");
             RunGit("update-ref", "refs/remotes/origin/main", "HEAD");
             RunGit("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
 

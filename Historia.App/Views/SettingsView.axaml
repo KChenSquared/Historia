@@ -355,7 +355,7 @@
                         </StackPanel>
                     </DockPanel>
                     <DockPanel Classes="hinted" Margin="0,8,0,0">
-                        <ctl:HelpHint Text="Turns issue keys in commit messages into links. In the URL, $1, $2… insert the pattern's capture groups.&#10;&#10;Example: pattern #(\d+) with URL https://HistoriaHQ.com/autolink?issue=$1 turns #42 into a link." />
+                        <ctl:HelpHint Text="Turns issue keys in commit messages into links. In the URL, $1, $2… insert the pattern's capture groups.&#10;&#10;Example: pattern #(\d+) with URL https://HistoriaHQ.dev/autolink?issue=$1 turns #42 into a link." />
                         <TextBlock Classes="section" Text="Issue autolinks" />
                     </DockPanel>
                     <ItemsControl ItemsSource="{Binding IssueAutolinks}"
