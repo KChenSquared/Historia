@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/KChenSquared/GitHistoria/refs/heads/stor001-linuxReadme/assets/LinuxReadme/Linux.gif" alt="Historia scrolling the Linux kernel commit graph">
+  <img src="https://raw.githubusercontent.com/KChenSquared/Historia/refs/heads/stor001-linuxReadme/assets/LinuxReadme/Linux.gif" alt="Historia scrolling the Linux kernel commit graph">
 </p>
 
 # Historia
@@ -141,7 +141,7 @@ the graph at 30k commits for lower memory use is available in settings.
 
 ## Install
 
-Download pre-built packages from [GitHub Releases](https://github.com/KChenSquared/GitHistoria/releases). Windows is the only officially supported platform; pre-built release binaries are provided for `win-x64`.
+Download pre-built packages from [GitHub Releases](https://github.com/KChenSquared/Historia/releases). Windows is the only officially supported platform; pre-built release binaries are provided for `win-x64`.
 
 ### Windows (officially supported)
 - **Installer (`Historia-<version>-win-x64-setup.exe`):** Recommended. Provides a Start Menu shortcut and an **Add to PATH** option (enabled by default) for `Historia` and `historia-cmdr`. If the .NET 10 Desktop Runtime is not installed, the installer bundles and installs it during setup.
@@ -151,7 +151,7 @@ Download pre-built packages from [GitHub Releases](https://github.com/KChenSquar
 
 macOS and Linux packages are experimental and not included in release downloads. If you want packages for other platforms, you can build them using the GitHub Actions **Package** workflow:
 
-1. Go to the [**Actions**](https://github.com/KChenSquared/GitHistoria/actions/workflows/package.yml) tab in the repository (or your fork).
+1. Go to the [**Actions**](https://github.com/KChenSquared/Historia/actions/workflows/package.yml) tab in the repository (or your fork).
 2. Select the **Package** workflow in the left sidebar.
 3. Click **Run workflow**, choose your branch or tag, and select the desired operating systems (`osx-arm64`, `osx-x64`, `linux-x64`) and package kinds (archives or installers).
 4. When the run finishes, download the package artifacts from the workflow summary.

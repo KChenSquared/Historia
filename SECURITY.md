@@ -16,7 +16,7 @@ Please update to the newest release before reporting.
 
 Report privately through GitHub instead:
 
-1. Go to the [Security tab](https://github.com/KChenSquared/GitHistoria/security) of this
+1. Go to the [Security tab](https://github.com/KChenSquared/Historia/security) of this
    repository.
 2. Click **Report a vulnerability**.
 3. Describe the problem, the Historia and Git versions, your OS, and the steps to reproduce

@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Thanks for taking the time to report this. For security problems, please follow the
-        [security policy](https://github.com/KChenSquared/GitHistoria/security/policy) instead
+        [security policy](https://github.com/KChenSquared/Historia/security/policy) instead
         of opening a public issue.
 
   - type: textarea

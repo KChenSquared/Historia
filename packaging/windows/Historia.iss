@@ -1,7 +1,7 @@
 ; Inno Setup 6 installer script for Historia
 #define AppName "Historia"
 #define AppPublisher "Kevin Chen"
-#define AppURL "https://github.com/KChenSquared/GitHistoria"
+#define AppURL "https://github.com/KChenSquared/Historia"
 #define AppExeName "Historia.exe"
 #define AppCmdrExeName "historia-cmdr.exe"
 

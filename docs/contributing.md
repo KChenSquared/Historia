@@ -41,8 +41,8 @@ When contributing to Historia, keep these core tenets in mind:
 
 ### Clone the Repository
 ```bash
-git clone https://github.com/KChenSquared/GitHistoria.git
-cd GitHistoria
+git clone https://github.com/KChenSquared/Historia.git
+cd Historia
 ```
 
 ### Restore Dependencies & Build

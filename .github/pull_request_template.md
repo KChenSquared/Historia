@@ -8,4 +8,4 @@
 
 ## Checklist
 
-- [ ] I agree to the [contributor terms](https://github.com/KChenSquared/GitHistoria/blob/main/docs/contributing.md#9-license) for this contribution.
+- [ ] I agree to the [contributor terms](https://github.com/KChenSquared/Historia/blob/main/docs/contributing.md#9-license) for this contribution.

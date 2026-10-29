@@ -34,7 +34,7 @@ public sealed class SettingsHelpHintTests
         ["Context lines"] = "Unchanged lines shown around each change.",
         ["Wrap long lines"] = "Unified layout only.",
         ["Issue autolinks"] = "Turns issue keys in commit messages into links. In the URL, $1, $2… insert the pattern's capture groups."
-            + "\n\nExample: pattern #(\\d+) with URL https://GitHistoria.com/autolink?issue=$1 turns #42 into a link.",
+            + "\n\nExample: pattern #(\\d+) with URL https://HistoriaHQ.com/autolink?issue=$1 turns #42 into a link.",
         ["Prune deleted remote branches on fetch"] = "On fetch and pull, removes remote branches that no longer exist on the server. Your local branches aren't touched.",
         ["Pull with rebase"] = "Puts your local commits on top of the remote ones instead of creating a merge commit.",
         ["Fetch after pull"] = "Fetch all branches and tags after a pull.",
