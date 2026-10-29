@@ -202,6 +202,14 @@ public sealed record GitProgress
     public string? RawLine { get; init; }
 }
 
+/// <summary>Origin of the resolved Git executable.</summary>
+public enum GitSource
+{
+    UserSetting,
+    Installed,
+    Bundled,
+}
+
 /// <summary>Discovered <c>git.exe</c> location and version.</summary>
 public sealed record GitExecutableInfo
 {
@@ -209,6 +217,9 @@ public sealed record GitExecutableInfo
     public string? Path { get; init; }
     public Version? Version { get; init; }
     public string? NotFoundReason { get; init; }
+    public GitSource Source { get; init; }
+    public string? BundledRoot { get; init; }
+    public string? Notice { get; init; }
 
     /// <summary>
     /// Minimum supported version is 2.46, the release where an empty <c>remote.&lt;name&gt;.url</c>
