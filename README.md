@@ -2,7 +2,7 @@
   <img src="https://raw.githubusercontent.com/KChenSquared/GitHistoria/refs/heads/stor001-linuxReadme/assets/LinuxReadme/Linux.gif" alt="Historia scrolling the Linux kernel commit graph">
 </p>
 
-# Historia 📜
+# Historia
 
 > *The commit graph you love: every commit, no lag, no subscriptions.*
 
@@ -12,7 +12,7 @@ is on the way, and other platforms are part of the long-term plan.
 
 ---
 
-## 💡 Why Historia?
+## Why Historia?
 
 GitKraken has been my go-to Git client for both work and personal projects for years,
 mainly because its commit graph is so great for staying updated and sometimes to remind me
@@ -41,7 +41,7 @@ that matter are enforced by tests rather than convention.
 
 ---
 
-## 🚀 Vision & Mission
+## Vision & Mission
 
 My goal is to provide a desktop GUI with a fast and informative graph, available to all
 users on all repos. It is built around:
@@ -68,7 +68,7 @@ users on all repos. It is built around:
 
 ---
 
-## 💎 Core Pillars
+## Core Pillars
 
 - **Confirm Before Destroying Anything:** The project's highest rule (constitution Rule 00). No
   action that discards uncommitted work or rewrites history — discard, clean, hard reset,
@@ -102,7 +102,7 @@ users on all repos. It is built around:
 
 ---
 
-## 🧠 Trade-offs
+## Trade-offs
 
 Historia loads your entire commit history instead of capping it at the most recent few
 thousand commits. That means memory grows with the size of the repo: about 200 MB for a
@@ -112,22 +112,22 @@ the graph at 30k commits for lower memory use is available in settings.
 
 ---
 
-## 📚 Documentation
+## Documentation
 
-- 📜 [**Historia Constitution**](docs/constitution.md) — Architectural invariants, security
+- [**Historia Constitution**](docs/constitution.md) — Architectural invariants, security
   policies, and performance ceilings.
-- 🛣️ [**Roadmap**](docs/roadmap.md) — Planned features for upcoming releases.
-- 🗂️ [**Plans**](Historia-DevDocs/AdHocPlans/) — Active implementation plans; finished ones move to
+- [**Roadmap**](docs/roadmap.md) — Planned features for upcoming releases.
+- [**Plans**](Historia-DevDocs/AdHocPlans/) — Active implementation plans; finished ones move to
   `completed/`.
-- 🤖 [**AGENTS.md**](AGENTS.md) — The shared instructions for coding agents working on Historia.
-- 🔌 [**Agent integration**](docs/Historia-commander-skills/README.md) — `historia-cmdr` and sample skills
+- [**AGENTS.md**](AGENTS.md) — The shared instructions for coding agents working on Historia.
+- [**Agent integration**](docs/Historia-commander-skills/README.md) — `historia-cmdr` and sample skills
   for Claude Code and GitHub Copilot.
-- 🤝 [**Contributing Guide**](docs/contributing.md) — Environment setup, coding standards,
+- [**Contributing Guide**](docs/contributing.md) — Environment setup, coding standards,
   PR guidelines, and core tenets.
 
 ---
 
-## 📋 Requirements
+## Requirements
 
 - **Windows**: Windows 10 (1809+) or Windows 11
 - **macOS** (in progress): Apple Silicon or Intel; builds must be ad-hoc signed locally (see
@@ -139,7 +139,7 @@ the graph at 30k commits for lower memory use is available in settings.
 
 ---
 
-## 📦 Install
+## Install
 
 Download pre-built packages from [GitHub Releases](https://github.com/KChenSquared/GitHistoria/releases). Windows is the only officially supported platform; pre-built release binaries are provided for `win-x64`.
 
@@ -179,7 +179,7 @@ You can also package locally with `packaging/package.ps1` or build from source (
 
 ---
 
-## ⚡ Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -236,7 +236,7 @@ xattr -dr com.apple.quarantine Historia.app
 
 ---
 
-## ⌨️ Review agent work in Historia
+## Review agent work in Historia
 
 `historia-cmdr` (built beside `Historia.exe`) tells a running Historia what to show, so a script
 or a coding agent can point you at the exact commit, file or change to look at. It prints one
@@ -261,7 +261,7 @@ are in [`docs/Historia-commander-skills/`](docs/Historia-commander-skills/README
 
 ---
 
-## 📄 License
+## License
 
 Historia is released under the [MIT License](LICENSE).
 
@@ -277,7 +277,7 @@ Porta.Pty, and Microsoft.Windows.Console.ConPTY.
 
 ---
 
-## 🙏 Acknowledgements
+## Acknowledgements
 
 Historia stands on the shoulders of the open source Git clients that came before it.
 Thank you to everyone who has built and shared one. Special thanks to
