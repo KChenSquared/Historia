@@ -27,20 +27,38 @@ public sealed class SshHostResolver : ISshHostResolver
     internal readonly record struct Lookup(string? HostName, bool Definite);
 
     private readonly string? _configPath;
+    private readonly Func<GitExecutableInfo?>? _gitInfoProvider;
     private readonly Func<string, CancellationToken, Task<Lookup>> _lookup;
     private readonly ConcurrentDictionary<string, string?> _cache = new(StringComparer.OrdinalIgnoreCase);
     private int _processLaunches;
 
-    public SshHostResolver()
+    public SshHostResolver(IGitExecutableLocator? locator = null)
     {
+        if (locator is not null)
+            _gitInfoProvider = () => locator.Current;
+        _lookup = RunSshAsync;
+    }
+
+    public SshHostResolver(Func<GitExecutableInfo?> gitInfoProvider)
+    {
+        _gitInfoProvider = gitInfoProvider;
         _lookup = RunSshAsync;
     }
 
     /// <summary>Reads <paramref name="configPath"/> (<c>ssh -F</c>) instead of the user's and
     /// the system's config files.</summary>
-    internal SshHostResolver(string configPath)
+    internal SshHostResolver(string configPath, IGitExecutableLocator? locator = null)
     {
         _configPath = configPath;
+        if (locator is not null)
+            _gitInfoProvider = () => locator.Current;
+        _lookup = RunSshAsync;
+    }
+
+    internal SshHostResolver(string configPath, Func<GitExecutableInfo?> gitInfoProvider)
+    {
+        _configPath = configPath;
+        _gitInfoProvider = gitInfoProvider;
         _lookup = RunSshAsync;
     }
 
@@ -48,6 +66,25 @@ public sealed class SshHostResolver : ISshHostResolver
     internal SshHostResolver(Func<string, CancellationToken, Task<Lookup>> lookup) => _lookup = lookup;
 
     internal int ProcessLaunches => Volatile.Read(ref _processLaunches);
+
+    internal string? ResolveSshExecutable()
+    {
+        var info = _gitInfoProvider?.Invoke();
+        if (info is { Found: true, Source: GitSource.Bundled, BundledRoot: not null })
+        {
+            var bundledSsh = Path.Combine(info.BundledRoot, "usr", "bin", OperatingSystem.IsWindows() ? "ssh.exe" : "ssh");
+            if (File.Exists(bundledSsh))
+                return bundledSsh;
+            if (OperatingSystem.IsWindows())
+            {
+                var bundledCmd = Path.Combine(info.BundledRoot, "usr", "bin", "ssh.cmd");
+                if (File.Exists(bundledCmd))
+                    return bundledCmd;
+            }
+        }
+
+        return FindSshOnPath();
+    }
 
     /// <summary>The OpenSSH client <c>Process.Start</c> would find on PATH, or null.</summary>
     public static string? FindSshOnPath()
@@ -86,7 +123,7 @@ public sealed class SshHostResolver : ISshHostResolver
 
     private async Task<Lookup> RunSshAsync(string host, CancellationToken ct)
     {
-        var ssh = FindSshOnPath();
+        var ssh = ResolveSshExecutable();
         if (ssh is null)
         {
             AppLog.Write(AppLogLevel.Info, "network", $"ssh -G {host}: no ssh on PATH");

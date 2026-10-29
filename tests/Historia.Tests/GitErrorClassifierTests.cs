@@ -59,6 +59,8 @@ public class GitErrorClassifierTests
     [InlineData("fatal: not a git repository (or any of the parent directories): .git", GitErrorKind.NotAGitRepository)]
     [InlineData("fatal: detected dubious ownership in repository at '/repo'\nTo add an exception for this directory, call:\n\tgit config --global --add safe.directory /repo", GitErrorKind.UnsafeRepository)]
     [InlineData("This repository is configured for Git LFS but 'git-lfs' was not found on your path.", GitErrorKind.LfsMissing)]
+    [InlineData("error: cannot run gpg: No such file or directory\nfatal: failed to write commit object", GitErrorKind.SigningToolMissing)]
+    [InlineData("error: gpg failed to sign the data\nfatal: failed to write commit object", GitErrorKind.SigningToolMissing)]
     [InlineData("fatal: refusing to merge unrelated histories", GitErrorKind.UnrelatedHistories)]
     [InlineData("error: unable to delete 'b': remote ref does not exist", GitErrorKind.RefNotFound)]
     public void Classify_maps_known_stderr(string stderr, GitErrorKind expected)

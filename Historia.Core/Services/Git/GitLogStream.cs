@@ -112,7 +112,7 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
             psi.ArgumentList.Add(pathFilter!);
         }
 
-        GitCliProcessSetup.ComposeEnvironment(psi, profile, extraEnvironment: null);
+        GitCliProcessSetup.ComposeEnvironment(psi, profile, extraEnvironment: null, locator.Current);
         // Graph rows must name real commit objects consistently across details, diffs, and decorations;
         // ignore replace refs entirely.
         psi.Environment["GIT_NO_REPLACE_OBJECTS"] = "1";

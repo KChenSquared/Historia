@@ -96,4 +96,38 @@ public sealed class SshHostResolverTests : IDisposable
     [Fact]
     public void The_hostname_line_is_parsed_from_ssh_G_output()
         => Assert.Equal("github.com", SshHostResolver.ParseHostName("user git\r\nhostname github.com\r\nport 22\r\n"));
+
+    [Fact]
+    public async Task Bundled_git_launches_bundled_ssh_executable()
+    {
+        var root = TestScratch.NewDirectory("historia-ssh-bundled-");
+        try
+        {
+            var bundledRoot = Path.Combine(root, "git");
+            var usrBin = Path.Combine(bundledRoot, "usr", "bin");
+            Directory.CreateDirectory(usrBin);
+            var sshFile = Path.Combine(usrBin, OperatingSystem.IsWindows() ? "ssh.cmd" : "ssh");
+            File.WriteAllText(sshFile, "@echo hostname bundled.example.invalid\r\n");
+
+            var bundledInfo = new GitExecutableInfo
+            {
+                Found = true,
+                Source = GitSource.Bundled,
+                BundledRoot = bundledRoot,
+                Path = Path.Combine(bundledRoot, "ucrt64", "bin", "git.exe"),
+                Version = new Version(2, 56, 0),
+            };
+
+            var resolver = new SshHostResolver(() => bundledInfo);
+            Assert.Equal(sshFile, resolver.ResolveSshExecutable());
+
+            var resolvedHost = await resolver.ResolveHostNameAsync("some-host", CancellationToken.None);
+            Assert.Equal("bundled.example.invalid", resolvedHost);
+            Assert.Equal(1, resolver.ProcessLaunches);
+        }
+        finally
+        {
+            TestScratch.Delete(root);
+        }
+    }
 }

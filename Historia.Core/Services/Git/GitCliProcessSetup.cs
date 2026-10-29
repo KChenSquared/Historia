@@ -29,13 +29,38 @@ internal static class GitCliProcessSetup
     // The Historia executable re-invoked with a private switch acts as the askpass helper.
     // No separate binary is installed. Computed once — it never varies per invocation.
     private static readonly string AskPassHelperPath = Environment.ProcessPath ?? string.Empty;
+    private static readonly string[] BundledPrefixes = ["ucrt64", "mingw64", "clangarm64"];
 
     /// <summary>Built per invocation; the Historia process's own environment is never mutated.</summary>
     public static void ComposeEnvironment(
-        ProcessStartInfo psi, GitProfile? profile, IReadOnlyDictionary<string, string>? extraEnvironment)
+        ProcessStartInfo psi,
+        GitProfile? profile,
+        IReadOnlyDictionary<string, string>? extraEnvironment) =>
+        ComposeEnvironment(psi, profile, extraEnvironment, gitInfo: null);
+
+    /// <summary>Built per invocation; the Historia process's own environment is never mutated.</summary>
+    public static void ComposeEnvironment(
+        ProcessStartInfo psi,
+        GitProfile? profile,
+        IReadOnlyDictionary<string, string>? extraEnvironment,
+        GitExecutableInfo? gitInfo)
     {
         psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
         psi.Environment["LC_ALL"] = "C"; // Stable, parseable English message text.
+
+        if (gitInfo is { Found: true, Source: GitSource.Bundled, BundledRoot: not null })
+        {
+            var prefix = ResolveBundledPrefix(gitInfo.BundledRoot);
+            var binDir = Path.Combine(gitInfo.BundledRoot, prefix, "bin");
+            var usrBinDir = Path.Combine(gitInfo.BundledRoot, "usr", "bin");
+            var parentPath = psi.Environment.TryGetValue("PATH", out var existing) && !string.IsNullOrWhiteSpace(existing)
+                ? existing
+                : Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+
+            psi.Environment["PATH"] = string.IsNullOrEmpty(parentPath)
+                ? $"{binDir}{Path.PathSeparator}{usrBinDir}"
+                : $"{binDir}{Path.PathSeparator}{usrBinDir}{Path.PathSeparator}{parentPath}";
+        }
 
         if (!string.IsNullOrEmpty(AskPassHelperPath))
         {
@@ -57,6 +82,17 @@ internal static class GitCliProcessSetup
             foreach (var (k, v) in extraEnvironment)
                 psi.Environment[k] = v;
         }
+    }
+
+    private static string ResolveBundledPrefix(string bundledRoot)
+    {
+        foreach (var prefix in BundledPrefixes)
+        {
+            if (Directory.Exists(Path.Combine(bundledRoot, prefix)))
+                return prefix;
+        }
+
+        return "ucrt64";
     }
 
     /// <summary>Queues a kill of the whole process tree on <see cref="ProcessKiller"/>'s thread and

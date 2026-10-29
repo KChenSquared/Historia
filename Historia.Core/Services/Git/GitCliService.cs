@@ -168,7 +168,7 @@ public sealed class GitCliService : IGitCliService
         foreach (var arg in request.Arguments)
             psi.ArgumentList.Add(arg);
 
-        GitCliProcessSetup.ComposeEnvironment(psi, request.Profile, request.ExtraEnvironment);
+        GitCliProcessSetup.ComposeEnvironment(psi, request.Profile, request.ExtraEnvironment, _locator.Current);
 
         var neverKill = request.CancelPolicy == GitCliCancelPolicy.NeverAfterStart || inWriteScope;
 

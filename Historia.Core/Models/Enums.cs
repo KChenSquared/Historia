@@ -143,6 +143,11 @@ public enum GitErrorKind
     /// </summary>
     UnsafeRepository,
 
+    /// <summary>
+    /// A configured signing tool (such as GPG) was not found on PATH when creating a signed commit.
+    /// </summary>
+    SigningToolMissing,
+
     Unknown,
 }
 

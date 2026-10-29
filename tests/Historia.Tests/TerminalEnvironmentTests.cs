@@ -120,4 +120,36 @@ public class TerminalEnvironmentTests
         Assert.Equal("Historia", e["TERM_PROGRAM"]);
         Assert.Equal("5.1.0", e["TERM_PROGRAM_VERSION"]);
     }
+
+    [Fact]
+    public void TerminalHostEnvironment_prepends_cmd_to_path_only_when_bundled()
+    {
+        var bundledRoot = @"C:\app\git";
+        var bundledInfo = new GitExecutableInfo
+        {
+            Found = true,
+            Source = GitSource.Bundled,
+            BundledRoot = bundledRoot,
+            Path = @"C:\app\git\ucrt64\bin\git.exe",
+            Version = new Version(2, 56, 0),
+        };
+
+        var envBundled = TerminalHostEnvironment.SnapshotEnvironment(bundledInfo);
+        Assert.True(envBundled.ContainsKey("PATH"));
+        Assert.StartsWith(Path.Combine(bundledRoot, "cmd") + Path.PathSeparator, envBundled["PATH"]);
+
+        var installedInfo = new GitExecutableInfo
+        {
+            Found = true,
+            Source = GitSource.Installed,
+            Path = @"C:\Program Files\Git\cmd\git.exe",
+            Version = new Version(2, 51, 0),
+        };
+
+        var envInstalled = TerminalHostEnvironment.SnapshotEnvironment(installedInfo);
+        if (envInstalled.TryGetValue("PATH", out var path))
+        {
+            Assert.False(path.StartsWith(Path.Combine(bundledRoot, "cmd")));
+        }
+    }
 }

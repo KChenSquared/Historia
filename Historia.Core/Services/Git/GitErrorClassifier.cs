@@ -95,6 +95,7 @@ public static class GitErrorClassifier
         (GitErrorKind.LfsMissing, ["git-lfs", "this repository is configured for git lfs but"]),
         (GitErrorKind.UnrelatedHistories, ["refusing to merge unrelated histories"]),
         (GitErrorKind.DetachedHeadOperation, ["you are not currently on a branch", "detached head"]),
+        (GitErrorKind.SigningToolMissing, ["cannot run gpg", "gpg failed to sign the data"]),
         (GitErrorKind.HookFailed, ["hook declined", "hook failed", "cannot spawn hook", "pre-commit hook", "commit-msg hook"]),
         (GitErrorKind.InvalidRefName, ["is not a valid ref name", "cannot lock ref", "not a valid object name", "not a valid ref"]),
         (GitErrorKind.RefNotFound, [
