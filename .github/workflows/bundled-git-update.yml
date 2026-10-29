@@ -1,0 +1,74 @@
+name: Bundled Git Update
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force update to newest stable regardless of security fixes'
+        type: boolean
+        default: false
+
+concurrency:
+  group: bundled-git-update
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check-and-update:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: '3.12'
+
+      - name: Run script unit tests
+        run: |
+          python -I -m unittest discover -s .github/scripts -p "test_update_bundled_git.py"
+
+      - name: Check for upstream security releases
+        id: updater
+        env:
+          GITHUB_TOKEN: ${{ secrets.BUNDLED_GIT_PR_TOKEN || secrets.GITHUB_TOKEN }}
+          BUNDLED_GIT_PR_TOKEN: ${{ secrets.BUNDLED_GIT_PR_TOKEN }}
+        run: |
+          $forceArg = if ('${{ inputs.force }}' -eq 'true') { @('--force') } else { @() }
+          python .github/scripts/update_bundled_git.py @forceArg
+
+      - name: Create or update pull request
+        if: steps.updater.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.BUNDLED_GIT_PR_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout -B deps/bundled-git origin/main
+          git add packaging/bundled-git.json
+          git commit -m "build(deps): update bundled Git on security release"
+          git push --force-with-lease origin deps/bundled-git
+
+          $prExists = $false
+          try {
+              $null = gh pr view deps/bundled-git --json number 2>$null
+              if ($LASTEXITCODE -eq 0) { $prExists = $true }
+          } catch {
+              $prExists = $false
+          }
+
+          if ($prExists) {
+              gh pr edit deps/bundled-git --title "build(deps): update bundled Git on security release" --body-file bundled-git-pr-body.md
+          } else {
+              gh pr create --head deps/bundled-git --base main --title "build(deps): update bundled Git on security release" --body-file bundled-git-pr-body.md --label dependencies --label security
+          }
