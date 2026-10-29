@@ -28,15 +28,16 @@ One line each; the constitution has the full text.
 
 - Destructive actions confirm through `IDialogService.ConfirmDestructiveAsync` (Rule 00).
 - Offline first: no network URL in any `.cs` or `.axaml`, no unrequested network call (Rule 0).
-- Git access is the CLI only, with arguments in `ArgumentList`, `--` before paths (Rules 6 and 9).
-- Never block the UI thread; mutate off it and raise events on it (Rules 18 and 22).
-- Global usings only: every `using` directive lives in the project's `GlobalUsings.cs` (Rule 37).
+- Git access is the CLI only, with arguments in `ArgumentList`, `--` before paths (Rules 1 and 4).
+- Never block the UI thread; mutate off it and raise events on it (Rules 13 and 17).
+- Global usings only: every `using` directive lives in the project's `GlobalUsings.cs` (see
+  [Coding standards](docs/contributing.md#5-coding-standards--best-practices)).
 - Comments describe the present: no transition comments and no references to documents or rule
-  numbers (Rule 39).
+  numbers (Rule 26).
 - Views are AXAML bound to a view model in `Historia.Core/ViewModels`; no code-built views, no
-  `new Window`, no `Rebuild*` methods (Rule 30.2).
+  `new Window`, no `Rebuild*` methods (Rule 21).
 - Agent-facing surfaces navigate, propose and queue only; they never stage, commit or change
-  anything (Rule 40).
+  anything (Rule 27).
 
 ## Plans
 

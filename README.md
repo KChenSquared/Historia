@@ -87,7 +87,7 @@ users on all repos. It is built around:
 - **Built for Agentic Coding:** Agents can open Historia on the exact commit, file or
   uncommitted change they just produced, so you review it in a real diff viewer. They can stage
   their change and propose a commit message, but only you commit, and nothing they send can
-  change the repository ([constitution Rule 40](docs/constitution.md#automation--agents)). The
+  change the repository ([constitution Rule 27](docs/constitution.md#automation--agents)). The
   codebase is built for agent contributors too: see
   [Working with coding agents](docs/contributing.md#6-working-with-coding-agents) and
   [`AGENTS.md`](AGENTS.md).

@@ -21,7 +21,7 @@ When contributing to Historia, keep these core tenets in mind:
 2. **Never Block the UI Thread:** All Git operations, I/O, and heavy computations must execute on background threads and communicate via non-blocking asynchronous patterns.
 3. **Simplicity & Polish:** Strive for clean, intuitive UI interactions. Complex Git concepts should be rendered clearly and visually.
 4. **Progressive Disclosure:** Design interfaces that reveal complexity only as needed. Common workflows (staging, unstaging, committing, switching branches, reading the graph) must remain streamlined, clutter-free, and instantly approachable. Advanced capabilities (interactive rebase, worktree management, submodules, terminal access, deep diagnostic metadata) should be surfaced gracefully through context menus, collapsible drawers, or dedicated drill-downs rather than dominating the primary screen space. Errors must show clean, actionable human descriptions first, preserving raw Git stderr behind a details disclosure.
-5. **Built for Agentic Coding:** Two ways. Historia is where you review what coding agents wrote: `historia-cmdr` lets an agent queue the commit, diff or uncommitted change it just produced for you to review in Historia, or hand over staged files with a proposed commit message, and only you commit (constitution [Rule 40](constitution.md#automation--agents)). And the codebase is built for agent contributors: the constitution is written to be followed mechanically, tests enforce what can regress silently, and multi-file work follows a phased plan whose parallel milestones own disjoint files (see [Working with coding agents](#6-working-with-coding-agents)).
+5. **Built for Agentic Coding:** Two ways. Historia is where you review what coding agents wrote: `historia-cmdr` lets an agent queue the commit, diff or uncommitted change it just produced for you to review in Historia, or hand over staged files with a proposed commit message, and only you commit (constitution [Rule 27](constitution.md#automation--agents)). And the codebase is built for agent contributors: the constitution is written to be followed mechanically, tests enforce what can regress silently, and multi-file work follows a phased plan whose parallel milestones own disjoint files (see [Working with coding agents](#6-working-with-coding-agents)).
 
 ---
 
@@ -92,7 +92,7 @@ then launches Historia.
   16. `RuntimeStatsSamplerSwitchTests`
 - **Timeouts:** A `[Fact(Timeout = ...)]` guards against hangs only. Set it to at least 2x the test's duration under a full parallel run, not its duration alone.
 - **Scratch Root & Fixture Lifecycle:** Disk fixtures live under a per-test-project scratch root inside the build output directory (`bin\<TestProject>\scratch`, or `HISTORIA_TEST_TMP` override). Each test process creates a per-run `historia-run-<pid>-*` folder deleted on process exit (`TestScratch.NewDirectory()`, `NewPath()`, `Delete()`). Run folders of finished test processes older than 30 minutes are purged on first use (`TestScratch.PruneStale()`); nothing else under the root is touched, and the system temporary directory is never pruned. `GIT_CEILING_DIRECTORIES` isolates test repositories from the enclosing repository, and `TestTempUsageGuardTests` guards against test fixtures created in the system temporary directory.
-- **Performance & Timing Assertions:** Per Rule 25, performance tests record timing diagnostics to test output (`ITestOutputHelper`) rather than asserting hard wall-clock ratios (e.g. "must be 5x faster") that can flake under parallel I/O contention.
+- **Performance & Timing Assertions:** Per Rule 20, performance tests record timing diagnostics to test output (`ITestOutputHelper`) rather than asserting hard wall-clock ratios (e.g. "must be 5x faster") that can flake under parallel I/O contention.
 
 ---
 
@@ -124,6 +124,7 @@ Historia/
 - Use `readonly record struct` or `record class` for immutable data transfer objects.
 - Prefer `ValueTask` / `Task` for all async operations and pass `CancellationToken` throughout long-running operations.
 - In hot paths (graph calculation, diff parsing), use `Span<T>`, `ReadOnlySpan<T>`, and `ArrayPool<T>` where appropriate to avoid heap allocations.
+- **Global usings only.** Every `using` directive lives in the project's `GlobalUsings.cs` as a `global using` — plain namespace imports, `using static`, and alias directives (`using X = Y;`) alike. A `.cs` file contains no `using` directive of its own; `using` *statements* (`using var`, `using (...)`) are unaffected. `<ImplicitUsings>` already covers the BCL basics (`System`, `System.Linq`, `System.IO`, `System.Threading.Tasks`, …), so never re-add those. When a new dependency is introduced, add its `global using` to the relevant project's `GlobalUsings.cs`. When globalizing two namespaces makes a type name ambiguous (`CS0104`), resolve it with a `global using` alias pinned to the intended type (e.g. `global using Version = System.Version;`), or fully qualify at the one-off call site if only a single file wants the other type. This holds even for a namespace only one or two files use: the project prefers one uniform place for imports over making each file's dependencies visible in its own header.
 
 ### Avalonia UI Conventions
 - Views are AXAML bound to view models in `Historia.Core/ViewModels`; custom-drawn surfaces (graph, terminal, diff and conflict editors) are custom controls. `MvvmViewGuardTests` enforces it.
@@ -146,6 +147,8 @@ Agent-assisted contributions are welcome. This section is how the repository kee
 
 ### Plans for multi-file work
 Work that touches several files follows a phased plan:
+- Read the current code before planning against it. The design documents describe intent; the working tree is what exists.
+- Every change lands with acceptance criteria that state what "done" means in terms someone else can check.
 - Phases run in sequence; the milestones inside a phase run in parallel.
 - Parallel milestones own disjoint files, so each can run in its own git worktree.
 - Each milestone lists what it owns, its steps, its tests, its acceptance criteria and its commit.
