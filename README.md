@@ -134,8 +134,7 @@ the graph at 30k commits for lower memory use is available in settings.
   [macOS: ad-hoc signing](#macos-ad-hoc-signing))
 - [.NET 10 Runtime](https://dotnet.microsoft.com/download) (the Desktop Runtime on
   Windows)
-- [Git](https://git-scm.com/downloads) **2.46 or newer**. Historia checks the installed
-  version at startup and reports it if Git is missing or too old.
+- [Git](https://git-scm.com/downloads) **2.46 or newer** (used when installed). On Windows, the installer and zip include a fallback Git (MinGit + Git LFS) used only when no supported Git is installed and the setting allows it; macOS and Linux still require Git.
 
 ---
 
@@ -145,7 +144,7 @@ Download pre-built packages from [GitHub Releases](https://github.com/KChenSquar
 
 ### Windows (officially supported)
 - **Installer (`Historia-<version>-win-x64-setup.exe`):** Recommended. Provides a Start Menu shortcut and an **Add to PATH** option (enabled by default) for `Historia` and `historia-cmdr`. If the .NET 10 Desktop Runtime is not installed, the installer bundles and installs it during setup.
-- **Archive (`Historia-<version>-win-x64.zip`):** Extract and run. Requires [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download) and Git 2.46+.
+- **Archive (`Historia-<version>-win-x64.zip`):** Extract and run. Requires [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download). Git 2.46+ is used when installed; otherwise the bundled fallback Git (MinGit + Git LFS) is used if enabled.
 
 ### macOS & Linux (experimental)
 

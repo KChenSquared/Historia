@@ -102,6 +102,13 @@ jobs:
         with:
           global-json-file: global.json
 
+      - name: Cache bundled MinGit and git-lfs
+        if: matrix.rid == 'win-x64'
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: obj/bundled-git-cache
+          key: bundled-git-${{ hashFiles('packaging/bundled-git.json') }}
+
       - name: Prepare Windows installer dependencies
         if: matrix.rid == 'win-x64' && needs.plan.outputs.installers == 'true'
         shell: pwsh
