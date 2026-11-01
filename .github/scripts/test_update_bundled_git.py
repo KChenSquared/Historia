@@ -1,25 +1,37 @@
+import hashlib
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
+import zipfile
+from unittest import mock
 
+import update_bundled_git
 from update_bundled_git import (
-    parse_mingit_version,
-    parse_git_lfs_version,
     evaluate_component,
     main,
+    parse_mingit_version,
+    rewrite_license_tags,
+)
+
+LICENSES = (
+    "## Git for Windows (MinGit)\n\n"
+    "Pinned tag `v2.56.0.windows.4`, source at /tree/v2.56.0.windows.4\n\n"
+    "## Other Library\n\nAlso released as v3.8.1 and v2.56.0.windows.4.\n\n"
+    "## Git LFS\n\nPinned release `v3.8.1`.\n"
 )
 
 
 class TestUpdateBundledGit(unittest.TestCase):
     def setUp(self):
         self.test_dir = tempfile.mkdtemp(prefix="test_update_bundled_git_")
-        self.fixtures_dir = os.path.join(
-            os.path.dirname(__file__), "fixtures", "bundled-git"
-        )
+        self.fixtures_dir = os.path.join(os.path.dirname(__file__), "fixtures", "bundled-git")
         self.manifest_path = os.path.join(self.test_dir, "bundled-git.json")
-        self.initial_manifest = {
+        self.licenses_path = os.path.join(self.test_dir, "licenses.md")
+        self.pr_body_path = os.path.join(self.test_dir, "pr-body.md")
+        manifest = {
             "minimumGitVersion": "2.46",
             "mingit": {
                 "version": "v2.56.0.windows.4",
@@ -35,141 +47,159 @@ class TestUpdateBundledGit(unittest.TestCase):
             },
         }
         with open(self.manifest_path, "w", encoding="utf-8") as f:
-            json.dump(self.initial_manifest, f, indent=2)
+            json.dump(manifest, f, indent=2)
+        with open(self.licenses_path, "w", encoding="utf-8", newline="") as f:
+            f.write(LICENSES)
 
     def tearDown(self):
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
+    def run_main(self, fixture, *extra):
+        argv = [
+            "update_bundled_git.py",
+            "--manifest", self.manifest_path,
+            "--licenses-file", self.licenses_path,
+            "--releases-json", os.path.join(self.fixtures_dir, fixture),
+            "--pr-body-file", self.pr_body_path,
+            "--dry-run",
+            *extra,
+        ]
+        with mock.patch.object(sys, "argv", argv):
+            return main()
+
+    def manifest(self):
+        with open(self.manifest_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def pr_body(self):
+        with open(self.pr_body_path, "r", encoding="utf-8") as f:
+            return f.read()
+
+    def licenses(self):
+        with open(self.licenses_path, "r", encoding="utf-8", newline="") as f:
+            return f.read()
+
     def test_version_ordering_handles_windows_10_greater_than_windows_9(self):
-        v9 = parse_mingit_version("v2.56.0.windows.9")
-        v10 = parse_mingit_version("v2.56.0.windows.10")
-        self.assertIsNotNone(v9)
-        self.assertIsNotNone(v10)
-        self.assertGreater(v10, v9)
+        self.assertGreater(parse_mingit_version("v2.56.0.windows.10"), parse_mingit_version("v2.56.0.windows.9"))
 
     def test_only_non_security_newer_releases_reports_no_change(self):
-        fixtures_file = os.path.join(self.fixtures_dir, "releases_no_security.json")
-        pr_body_file = os.path.join(self.test_dir, "pr-body.md")
-        test_args = [
-            "update_bundled_git.py",
-            "--manifest", self.manifest_path,
-            "--releases-json", fixtures_file,
-            "--pr-body-file", pr_body_file,
-            "--dry-run",
-        ]
-        import sys
-        old_argv = sys.argv
-        try:
-            sys.argv = test_args
-            exit_code = main()
-            self.assertEqual(exit_code, 0)
-            self.assertFalse(os.path.exists(pr_body_file))
-            with open(self.manifest_path, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
-            self.assertEqual(manifest["mingit"]["version"], "v2.56.0.windows.4")
-        finally:
-            sys.argv = old_argv
+        self.assertEqual(self.run_main("releases_no_security.json"), 0)
+        self.assertFalse(os.path.exists(self.pr_body_path))
+        self.assertEqual(self.manifest()["mingit"]["version"], "v2.56.0.windows.4")
+        self.assertEqual(self.licenses(), LICENSES)
 
     def test_security_release_selects_newest_stable_and_lists_cves(self):
-        fixtures_file = os.path.join(self.fixtures_dir, "releases_with_security.json")
-        pr_body_file = os.path.join(self.test_dir, "pr-body.md")
-        test_args = [
-            "update_bundled_git.py",
-            "--manifest", self.manifest_path,
-            "--releases-json", fixtures_file,
-            "--pr-body-file", pr_body_file,
-            "--dry-run",
-        ]
-        import sys
-        old_argv = sys.argv
-        try:
-            sys.argv = test_args
-            exit_code = main()
-            self.assertEqual(exit_code, 0)
-            self.assertTrue(os.path.exists(pr_body_file))
-            with open(pr_body_file, "r", encoding="utf-8") as f:
-                body_content = f.read()
-            self.assertIn("CVE-2026-99991", body_content)
-            self.assertIn("v2.56.0.windows.6", body_content)
-
-            with open(self.manifest_path, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
-            self.assertEqual(manifest["mingit"]["version"], "v2.56.0.windows.6")
-            self.assertEqual(manifest["mingit"]["asset"], "MinGit-2.56.0.6-64-bit.zip")
-        finally:
-            sys.argv = old_argv
+        self.assertEqual(self.run_main("releases_with_security.json"), 0)
+        manifest = self.manifest()
+        self.assertEqual(manifest["mingit"]["version"], "v2.56.0.windows.6")
+        self.assertEqual(manifest["mingit"]["asset"], "MinGit-2.56.0.6-64-bit.zip")
+        body = self.pr_body()
+        self.assertIn("CVE-2026-99991", body)
+        self.assertIn("v2.56.0.windows.6", body)
+        self.assertIn("security fixes", body)
 
     def test_prereleases_and_backport_builds_ignored(self):
-        fixtures_file = os.path.join(self.fixtures_dir, "releases_prerelease_and_ordering.json")
-        pr_body_file = os.path.join(self.test_dir, "pr-body.md")
-        test_args = [
-            "update_bundled_git.py",
-            "--manifest", self.manifest_path,
-            "--releases-json", fixtures_file,
-            "--pr-body-file", pr_body_file,
-            "--dry-run",
-        ]
-        import sys
-        old_argv = sys.argv
-        try:
-            sys.argv = test_args
-            exit_code = main()
-            self.assertEqual(exit_code, 0)
-            with open(self.manifest_path, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
-            self.assertEqual(manifest["mingit"]["version"], "v2.56.0.windows.10")
-            with open(pr_body_file, "r", encoding="utf-8") as f:
-                body_content = f.read()
-            self.assertNotIn("v2.56.0.windows.11-rc1", body_content)
-            self.assertNotIn("v2.53.0.windows.4", body_content)
-            self.assertIn("CVE-2026-77777", body_content)
-        finally:
-            sys.argv = old_argv
+        self.assertEqual(self.run_main("releases_prerelease_and_ordering.json"), 0)
+        self.assertEqual(self.manifest()["mingit"]["version"], "v2.56.0.windows.10")
+        body = self.pr_body()
+        self.assertNotIn("v2.56.0.windows.11", body)
+        self.assertNotIn("CVE-2026-88888", body)
+        self.assertNotIn("CVE-2026-44444", body)
+        self.assertIn("CVE-2026-77777", body)
 
-    def test_force_updates_without_security_release(self):
-        fixtures_file = os.path.join(self.fixtures_dir, "releases_no_security.json")
-        pr_body_file = os.path.join(self.test_dir, "pr-body.md")
-        test_args = [
-            "update_bundled_git.py",
-            "--manifest", self.manifest_path,
-            "--releases-json", fixtures_file,
-            "--pr-body-file", pr_body_file,
-            "--force",
-            "--dry-run",
-        ]
-        import sys
-        old_argv = sys.argv
-        try:
-            sys.argv = test_args
-            exit_code = main()
-            self.assertEqual(exit_code, 0)
-            self.assertTrue(os.path.exists(pr_body_file))
-            with open(self.manifest_path, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
-            self.assertEqual(manifest["mingit"]["version"], "v2.56.0.windows.5")
-            self.assertEqual(manifest["gitLfs"]["version"], "v3.8.2")
-        finally:
-            sys.argv = old_argv
+    def test_a_security_prerelease_alone_does_not_trigger_an_update(self):
+        release = {
+            "tag_name": "v2.56.0.windows.5",
+            "prerelease": True,
+            "body": "Fixes CVE-2026-1.",
+            "assets": [],
+        }
+        result = evaluate_component(
+            "mingit", {"version": "v2.56.0.windows.4"}, [release], force=False, dry_run=True, minimum_git_version=(2, 46)
+        )
+        self.assertIsNone(result)
 
-    def test_digest_mismatch_fails(self):
-        fixtures_file = os.path.join(self.fixtures_dir, "releases_digest_mismatch.json")
-        pr_body_file = os.path.join(self.test_dir, "pr-body.md")
-        test_args = [
-            "update_bundled_git.py",
-            "--manifest", self.manifest_path,
-            "--releases-json", fixtures_file,
-            "--pr-body-file", pr_body_file,
-            "--dry-run",
-        ]
-        import sys
-        old_argv = sys.argv
-        try:
-            sys.argv = test_args
+    def test_force_updates_without_security_release_and_does_not_claim_one(self):
+        self.assertEqual(self.run_main("releases_no_security.json", "--force"), 0)
+        manifest = self.manifest()
+        self.assertEqual(manifest["mingit"]["version"], "v2.56.0.windows.5")
+        self.assertEqual(manifest["gitLfs"]["version"], "v3.8.2")
+        self.assertNotIn("security fixes", self.pr_body())
+
+    def test_digest_and_release_body_mismatch_fails(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.run_main("releases_digest_mismatch.json")
+        self.assertIn("does not match", str(ctx.exception).lower())
+
+    def test_licence_tags_follow_the_update_within_their_own_sections_only(self):
+        self.run_main("releases_no_security.json", "--force")
+        expected = (
+            "## Git for Windows (MinGit)\n\n"
+            "Pinned tag `v2.56.0.windows.5`, source at /tree/v2.56.0.windows.5\n\n"
+            "## Other Library\n\nAlso released as v3.8.1 and v2.56.0.windows.4.\n\n"
+            "## Git LFS\n\nPinned release `v3.8.2`.\n"
+        )
+        self.assertEqual(self.licenses(), expected)
+
+    def test_a_licence_section_without_the_pinned_tag_stops_before_anything_is_written(self):
+        with open(self.licenses_path, "w", encoding="utf-8", newline="") as f:
+            f.write("## Git for Windows (MinGit)\n\nNo tag.\n\n## Git LFS\n\nNo tag.\n")
+        with self.assertRaises(ValueError):
+            self.run_main("releases_no_security.json", "--force")
+        self.assertEqual(self.manifest()["mingit"]["version"], "v2.56.0.windows.4")
+
+    def test_rewrite_keeps_crlf_line_endings(self):
+        text = "## Git LFS\r\n\r\nPinned `v1.0.0`.\r\n"
+        updates = [{"component": "gitLfs", "old_version": "v1.0.0", "new_version": "v1.0.1"}]
+        self.assertEqual(rewrite_license_tags(text, updates), "## Git LFS\r\n\r\nPinned `v1.0.1`.\r\n")
+
+
+class TestDownloadPath(unittest.TestCase):
+    """The path a real run takes: bytes are downloaded, hashed and compared."""
+
+    ASSET = "git-lfs-windows-amd64-v3.8.2.zip"
+
+    def release(self, digest):
+        return {
+            "tag_name": "v3.8.2",
+            "body": "Security fix for CVE-2026-1.",
+            "assets": [{"name": self.ASSET, "browser_download_url": "https://example.invalid/a.zip", "digest": digest}],
+        }
+
+    @staticmethod
+    def fake_download(url, dest_path):
+        with zipfile.ZipFile(dest_path, "w") as z:
+            z.writestr("git-lfs-3.8.2/git-lfs.exe", b"fake")
+        with open(dest_path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    def evaluate(self, digest):
+        return evaluate_component(
+            "gitLfs", {"version": "v3.8.1"}, [self.release(digest)], force=False, dry_run=False, minimum_git_version=(2, 46)
+        )
+
+    def test_downloaded_bytes_that_do_not_match_the_digest_fail(self):
+        with mock.patch.object(update_bundled_git, "download_and_hash", self.fake_download):
             with self.assertRaises(ValueError) as ctx:
-                main()
-            self.assertIn("does not match", str(ctx.exception).lower())
-        finally:
-            sys.argv = old_argv
+                self.evaluate("sha256:" + "0" * 64)
+        self.assertIn("does not match api digest", str(ctx.exception).lower())
+
+    def test_matching_bytes_are_smoke_tested_and_pinned(self):
+        captured = {}
+
+        def download(url, dest_path):
+            captured["hash"] = self.fake_download(url, dest_path)
+            return captured["hash"]
+
+        ran = mock.Mock(return_value=mock.Mock(stdout="git-lfs/3.8.2"))
+        with mock.patch.object(update_bundled_git, "download_and_hash", download), \
+                mock.patch.object(update_bundled_git.subprocess, "run", ran), \
+                mock.patch.object(update_bundled_git.sys, "platform", "win32"):
+            result = self.evaluate(None)
+
+        self.assertEqual(result["sha256"], captured["hash"])
+        self.assertEqual(ran.call_count, 1)
+        self.assertTrue(ran.call_args.args[0][0].endswith("git-lfs.exe"))
 
 
 if __name__ == "__main__":

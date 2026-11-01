@@ -27,6 +27,9 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          # The token checkout persists is the one git push uses; a push with GITHUB_TOKEN starts
+          # no CI on the pull request.
+          token: ${{ secrets.BUNDLED_GIT_PR_TOKEN || github.token }}
 
       - name: Set up Python
         uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
@@ -51,24 +54,48 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.BUNDLED_GIT_PR_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
+          # pwsh only stops on a native command's failure when told to.
+          function Assert-Success { if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+
+          $title = "build(deps): update bundled Git"
+          $changedFiles = @("packaging/bundled-git.json", "docs/third-party-licenses.md")
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git checkout -B deps/bundled-git origin/main
-          git add packaging/bundled-git.json
-          git commit -m "build(deps): update bundled Git on security release"
-          git push --force-with-lease origin deps/bundled-git
-
-          $prExists = $false
-          try {
-              $null = gh pr view deps/bundled-git --json number 2>$null
-              if ($LASTEXITCODE -eq 0) { $prExists = $true }
-          } catch {
-              $prExists = $false
+          # A branch already proposing this exact update keeps its commit, so a daily run does not
+          # restart CI or dismiss reviews.
+          $alreadyPushed = $false
+          git rev-parse --verify --quiet origin/deps/bundled-git *> $null
+          if ($LASTEXITCODE -eq 0) {
+              git diff --quiet origin/deps/bundled-git -- @changedFiles
+              $alreadyPushed = $LASTEXITCODE -eq 0
           }
 
-          if ($prExists) {
-              gh pr edit deps/bundled-git --title "build(deps): update bundled Git on security release" --body-file bundled-git-pr-body.md
+          if (-not $alreadyPushed) {
+              git checkout -B deps/bundled-git origin/main
+              Assert-Success
+              git add @changedFiles
+              Assert-Success
+              git commit -m $title
+              Assert-Success
+              git push --force-with-lease origin deps/bundled-git
+              Assert-Success
+          }
+
+          # gh pr create fails on a label the repository does not have.
+          gh label create dependencies --force --color 0366d6 --description "Dependency updates"
+          Assert-Success
+          gh label create security --force --color d73a4a --description "Security fixes"
+          Assert-Success
+
+          # Open only: gh pr view <branch> also finds a merged or closed pull request, and editing
+          # that one would open nothing for this update.
+          $openPrs = gh pr list --head deps/bundled-git --state open --json number --jq "length"
+          Assert-Success
+
+          if ([int]$openPrs -gt 0) {
+              gh pr edit deps/bundled-git --title $title --body-file bundled-git-pr-body.md
           } else {
-              gh pr create --head deps/bundled-git --base main --title "build(deps): update bundled Git on security release" --body-file bundled-git-pr-body.md --label dependencies --label security
+              gh pr create --head deps/bundled-git --base main --title $title --body-file bundled-git-pr-body.md --label dependencies --label security
           }

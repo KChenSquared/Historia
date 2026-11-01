@@ -6,7 +6,7 @@
       "draft": false,
       "prerelease": false,
       "html_url": "https://github.com/git-for-windows/git/releases/tag/v2.56.0.windows.6",
-      "body": "Follow-up stability release after security fixes.\n| MinGit-2.56.0.6-64-bit.zip | 6666666666666666666666666666666666666666666666666666666666666666 |",
+      "body": "Follow-up stability release.\n| MinGit-2.56.0.6-64-bit.zip | 6666666666666666666666666666666666666666666666666666666666666666 |",
       "assets": [
         {
           "name": "MinGit-2.56.0.6-64-bit.zip",

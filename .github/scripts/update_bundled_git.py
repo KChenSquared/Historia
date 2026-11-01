@@ -15,6 +15,7 @@ MINGIT_TAG_RE = re.compile(r"^v(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)\.w
 GIT_LFS_TAG_RE = re.compile(r"^v(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)$")
 SECURITY_RE = re.compile(r"(?i)\bsecurity\b|CVE-\d{4}-\d+")
 CVE_RE = re.compile(r"CVE-\d{4}-\d+")
+LICENSE_SECTIONS = {"mingit": "## Git for Windows (MinGit)", "gitLfs": "## Git LFS"}
 
 
 def parse_mingit_version(tag: str) -> tuple[int, int, int, int] | None:
@@ -55,11 +56,10 @@ def fetch_github_releases(repo: str, token: str | None = None) -> list[dict]:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def download_and_hash(url: str, dest_path: str, token: str | None = None) -> str:
+def download_and_hash(url: str, dest_path: str) -> str:
+    # No token: release assets are public, and urllib would forward it across the CDN redirect.
     req = urllib.request.Request(url)
     req.add_header("User-Agent", "Historia-Bundled-Git-Updater")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
 
     hasher = hashlib.sha256()
     with urllib.request.urlopen(req, timeout=120) as resp, open(dest_path, "wb") as f:
@@ -76,7 +76,6 @@ def evaluate_component(
     force: bool,
     dry_run: bool,
     minimum_git_version: tuple[int, int],
-    token: str | None = None,
 ) -> dict | None:
     is_mingit = component_name == "mingit"
     version_parser = parse_mingit_version if is_mingit else parse_git_lfs_version
@@ -155,7 +154,7 @@ def evaluate_component(
     else:
         with tempfile.TemporaryDirectory() as tmpdir:
             archive_path = os.path.join(tmpdir, asset_name)
-            final_hash = download_and_hash(download_url, archive_path, token=token)
+            final_hash = download_and_hash(download_url, archive_path)
 
             if expected_digest_hash and final_hash != expected_digest_hash:
                 raise ValueError(
@@ -216,10 +215,29 @@ def evaluate_component(
     }
 
 
+def rewrite_license_tags(text: str, updates: list[dict]) -> str:
+    """Moves each updated component's section of the licence file to its new tag; the MinGit
+    section's tag is also the GPL source link, so it has to follow the shipped version."""
+    for u in updates:
+        heading = LICENSE_SECTIONS[u["component"]]
+        start = text.find(heading)
+        if start < 0:
+            raise ValueError(f"Licence file has no section '{heading}'")
+        end = text.find("\n## ", start + len(heading))
+        if end < 0:
+            end = len(text)
+        section = text[start:end]
+        if u["old_version"] not in section:
+            raise ValueError(f"Licence section '{heading}' does not name the pinned tag {u['old_version']}")
+        text = text[:start] + section.replace(u["old_version"], u["new_version"]) + text[end:]
+    return text
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", default="packaging/bundled-git.json")
     parser.add_argument("--output-manifest", default=None)
+    parser.add_argument("--licenses-file", default="docs/third-party-licenses.md")
     parser.add_argument("--pr-body-file", default="bundled-git-pr-body.md")
     parser.add_argument("--releases-json", default=None, help="Path to fixture JSON holding releases for testing")
     parser.add_argument("--force", action="store_true", help="Force update to newest stable regardless of security fixes")
@@ -259,7 +277,6 @@ def main() -> int:
             force=args.force,
             dry_run=args.dry_run,
             minimum_git_version=min_ver_tuple,
-            token=args.github_token,
         )
         if result:
             updates.append(result)
@@ -280,14 +297,27 @@ def main() -> int:
         manifest[comp]["url"] = u["url"]
         manifest[comp]["sha256"] = u["sha256"]
 
+    # Rewritten first: a licence file that no longer names the pinned tag stops the run before
+    # anything is written.
+    with open(args.licenses_file, "r", encoding="utf-8", newline="") as f:
+        licenses = rewrite_license_tags(f.read(), updates)
+
+    with open(args.licenses_file, "w", encoding="utf-8", newline="") as f:
+        f.write(licenses)
+
     with open(output_manifest, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
         f.write("\n")
 
+    purpose = (
+        "to address upstream security fixes"
+        if any(u["is_security"] for u in updates)
+        else "to their newest stable releases (manual run; no security release required it)"
+    )
     pr_lines = [
         "## Bundled Git Dependency Update",
         "",
-        "This automated pull request updates the pinned bundled Git dependencies to address upstream security fixes:",
+        f"This automated pull request updates the pinned bundled Git dependencies {purpose}:",
         "",
     ]
 
