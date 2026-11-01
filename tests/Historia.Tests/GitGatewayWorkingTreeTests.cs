@@ -204,6 +204,39 @@ public sealed class GitGatewayWorkingTreeTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Commit_with_a_hook_whose_interpreter_is_missing_says_it_could_not_start()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        using var repo = TestRepositoryBuilder.FromTemplate("gw-hooks-seed", r =>
+        {
+            r.WriteFile("a.txt", "initial\n").Stage().Commit("init");
+        });
+
+        var hooks = Path.Combine(repo.Path, ".git", "hooks");
+        Directory.CreateDirectory(hooks);
+        await File.WriteAllTextAsync(Path.Combine(hooks, "pre-commit"), "#!/no/such/interpreter\nexit 0\n");
+
+        await File.WriteAllTextAsync(Path.Combine(repo.Path, "a.txt"), "modified\n");
+        var ctx = _host.Open(repo.Path);
+        await ctx.Gateway.StageAsync(["a.txt"]);
+
+        var ex = await Assert.ThrowsAsync<HistoriaGitException>(async () =>
+        {
+            await ctx.Gateway.CommitAsync(new CommitRequest
+            {
+                Message = "test hook interpreter",
+                AuthorName = "Bob",
+                AuthorEmail = "bob@example.com",
+            });
+        });
+
+        Assert.Equal(GitErrorKind.HookFailed, ex.Kind);
+        Assert.Contains("could not start", ex.Message);
+    }
+
+    [Fact]
     public async Task Signed_commit_args_unchanged()
     {
         using var repo = TestRepositoryBuilder.FromTemplate("gw-signed-seed", r =>

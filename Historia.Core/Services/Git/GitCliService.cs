@@ -114,7 +114,7 @@ public sealed class GitCliService : IGitCliService
         // Only background work outside a write waits for a slot: a write, an interactive request
         // and a network request never queue behind the cap.
         if (request.Priority != GitCliPriority.Background || inWriteScope)
-            return await StartAndRunAsync(request, git.Path, inWriteScope, progress, onStdoutLine, ct).ConfigureAwait(false);
+            return await StartAndRunAsync(request, git, inWriteScope, progress, onStdoutLine, ct).ConfigureAwait(false);
 
         try
         {
@@ -133,7 +133,7 @@ public sealed class GitCliService : IGitCliService
             $"git {string.Join(' ', request.Arguments)}", BackgroundSlotWarning, Timeout.InfiniteTimeSpan);
         try
         {
-            return await StartAndRunAsync(request, git.Path, inWriteScope, progress, onStdoutLine, ct).ConfigureAwait(false);
+            return await StartAndRunAsync(request, git, inWriteScope, progress, onStdoutLine, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -143,7 +143,7 @@ public sealed class GitCliService : IGitCliService
 
     private async Task<GitCliResult> StartAndRunAsync(
         GitCliRequest request,
-        string gitPath,
+        GitExecutableInfo git,
         bool inWriteScope,
         IProgress<GitProgress>? progress,
         Action<string>? onStdoutLine,
@@ -151,7 +151,7 @@ public sealed class GitCliService : IGitCliService
     {
         var raw = request.RawStandardOutput;
 
-        var psi = new ProcessStartInfo(gitPath)
+        var psi = new ProcessStartInfo(git.Path!)
         {
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -168,7 +168,7 @@ public sealed class GitCliService : IGitCliService
         foreach (var arg in request.Arguments)
             psi.ArgumentList.Add(arg);
 
-        GitCliProcessSetup.ComposeEnvironment(psi, request.Profile, request.ExtraEnvironment);
+        GitCliProcessSetup.ComposeEnvironment(psi, request.Profile, request.ExtraEnvironment, git);
 
         var neverKill = request.CancelPolicy == GitCliCancelPolicy.NeverAfterStart || inWriteScope;
 

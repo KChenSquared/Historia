@@ -50,6 +50,10 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "addtopath"; Description: "Add Historia and historia-cmdr to PATH"; GroupDescription: "Additional tasks:"
 Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "Additional icons:"; Flags: unchecked
 
+[InstallDelete]
+; The bundled Git is replaced whole, so an upgrade leaves no file a newer MinGit dropped.
+Type: filesandordirs; Name: "{app}\git"
+
 [Files]
 #if Defined(RuntimeInstaller) && RuntimeInstaller != ""
 Source: "{#RuntimeInstaller}"; DestDir: "{tmp}"; DestName: "dotnet-desktop-runtime-win-x64.exe"; Flags: dontcopy noencryption

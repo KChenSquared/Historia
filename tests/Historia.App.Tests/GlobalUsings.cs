@@ -70,3 +70,4 @@ global using RepositoryStatus = Historia.Models.RepositoryStatus;
 global using SubmoduleStatus = Historia.Models.SubmoduleStatus;
 global using TestScratch = Historia.Tests.TestScratch;
 global using TestGit = Historia.Tests.TestGit;
+global using Version = System.Version;

@@ -30,6 +30,9 @@ public sealed partial class SettingsViewModel : ViewModelBase
     private readonly INavigationBus _nav;
     private readonly IWorkspaceService _workspace;
     private readonly IAiIntegrationsPanel? _aiPanel;
+    private readonly IGitExecutableLocator? _locator;
+    private readonly INotificationService? _notifications;
+    private readonly SemaphoreSlim _gitResolveGate = new(1, 1);
 
     private CmdrPathStatus? _cmdrStatus;
     private bool _cmdrApplyInProgress;
@@ -51,7 +54,9 @@ public sealed partial class SettingsViewModel : ViewModelBase
         INavigationBus nav,
         IWorkspaceService workspace,
         bool developerMode = false,
-        IAiIntegrationsPanel? aiPanel = null)
+        IAiIntegrationsPanel? aiPanel = null,
+        IGitExecutableLocator? locator = null,
+        INotificationService? notifications = null)
     {
         _cfg = cfg;
         _theme = theme;
@@ -62,6 +67,8 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _nav = nav;
         _workspace = workspace;
         _aiPanel = aiPanel;
+        _locator = locator;
+        _notifications = notifications;
 
         var generalHint = "Graph columns are set in Repository settings: click the cog in the graph's GRAPH header.";
         if (developerMode)
@@ -108,6 +115,14 @@ public sealed partial class SettingsViewModel : ViewModelBase
         TerminalShellArgs = "";
         TerminalFontFamily = "";
         Refresh();
+        if (_locator is not null && !_locator.Current.Found)
+        {
+            _ = _locator.WhenResolvedAsync().ContinueWith(t =>
+            {
+                if (t.IsCompletedSuccessfully)
+                    _ui.Post(() => UpdateGitStatus(t.Result));
+            }, TaskScheduler.Default);
+        }
         _syncing = false;
         RefreshCmdrStatus();
 
@@ -275,6 +290,96 @@ public sealed partial class SettingsViewModel : ViewModelBase
     partial void OnDiffWordWrapChanged(bool value) => Save(s => s with { DiffWordWrap = value });
 
     // ── Git ──
+
+    [ObservableProperty]
+    public partial bool UseBundledGit { get; set; }
+
+    partial void OnUseBundledGitChanged(bool value)
+    {
+        if (_syncing)
+            return;
+
+        Save(s => s with { UseBundledGit = value });
+        if (_locator is not null)
+            _ = ApplyBundledGitChangeAsync(value);
+    }
+
+    [ObservableProperty]
+    public partial string GitInUseText { get; private set; } = "";
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasGitNotice))]
+    public partial string GitNoticeText { get; private set; } = "";
+
+    public bool HasGitNotice => !string.IsNullOrWhiteSpace(GitNoticeText);
+
+    private async Task ApplyBundledGitChangeAsync(bool allowBundled)
+    {
+        // One at a time, in toggle order: the last toggle must be the last resolution to land.
+        await _gitResolveGate.WaitAsync();
+        try
+        {
+            var previous = _locator!.Current;
+            var current = await _locator.ResolveAsync(_cfg.Current.GitExecutablePath, allowBundled);
+            UpdateGitStatus(current);
+
+            var sourceChanged = previous is null || previous.Found != current.Found || (current.Found && previous.Source != current.Source);
+            if (sourceChanged)
+            {
+                if (!current.Found)
+                {
+                    var reason = current.NotFoundReason ?? "Git was not found on this system.";
+                    _notifications?.Publish(NotificationSeverity.Warning,
+                        $"{reason} Install a supported Git, set gitExecutablePath in settings.json, or turn on \"Use the Git bundled with Historia\".");
+                }
+                else
+                {
+                    var sourceDesc = current.Source switch
+                    {
+                        GitSource.Bundled => "the Git bundled with Historia",
+                        GitSource.Installed => "installed Git",
+                        GitSource.UserSetting => "Git set in settings",
+                        _ => "Git",
+                    };
+                    var versionDesc = current.Version is not null ? $" ({current.Version})" : "";
+                    var notice = string.IsNullOrEmpty(current.Notice) ? "" : $" {current.Notice}";
+                    _notifications?.Publish(NotificationSeverity.Info, $"Using {sourceDesc}{versionDesc}.{notice}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write(AppLogLevel.Warn, "settings", "Could not re-resolve Git after changing bundled setting", ex);
+        }
+        finally
+        {
+            _gitResolveGate.Release();
+        }
+    }
+
+    private void UpdateGitStatus(GitExecutableInfo? info)
+    {
+        if (info is null || !info.Found)
+        {
+            GitInUseText = info?.NotFoundReason ?? "Git not found";
+            GitNoticeText = "";
+            return;
+        }
+
+        var version = info.Version is not null ? $"Git {info.Version}" : "Git";
+        var sourceText = info.Source switch
+        {
+            GitSource.Bundled => "bundled with Historia",
+            GitSource.Installed => "installed",
+            GitSource.UserSetting => "set in settings",
+            _ => "unknown",
+        };
+
+        GitInUseText = string.IsNullOrEmpty(info.Path)
+            ? $"{version} — {sourceText}"
+            : $"{version} — {sourceText} ({info.Path})";
+        GitNoticeText = info.Notice ?? "";
+    }
 
     [ObservableProperty]
     public partial bool PruneOnFetch { get; set; }
@@ -677,6 +782,8 @@ public sealed partial class SettingsViewModel : ViewModelBase
             FetchAfterPull = c.FetchAfterPull;
             RestoreSessionTabs = c.RestoreSessionTabs;
             UseCustomStashNames = c.UseCustomStashNames;
+            UseBundledGit = c.UseBundledGit;
+            UpdateGitStatus(_locator?.Current);
 
             TerminalShellPath = c.TerminalShellPath ?? "";
             TerminalShellArgs = string.Join(' ', c.TerminalShellArgs);

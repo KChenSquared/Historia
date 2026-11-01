@@ -1,0 +1,66 @@
+{
+  "mingit": [
+    {
+      "tag_name": "v2.56.0.windows.6",
+      "name": "Git for Windows v2.56.0.windows.6",
+      "draft": false,
+      "prerelease": false,
+      "html_url": "https://github.com/git-for-windows/git/releases/tag/v2.56.0.windows.6",
+      "body": "Follow-up stability release.\n| MinGit-2.56.0.6-64-bit.zip | 6666666666666666666666666666666666666666666666666666666666666666 |",
+      "assets": [
+        {
+          "name": "MinGit-2.56.0.6-64-bit.zip",
+          "browser_download_url": "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.6/MinGit-2.56.0.6-64-bit.zip",
+          "digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+        }
+      ]
+    },
+    {
+      "tag_name": "v2.56.0.windows.5",
+      "name": "Git for Windows v2.56.0.windows.5",
+      "draft": false,
+      "prerelease": false,
+      "html_url": "https://github.com/git-for-windows/git/releases/tag/v2.56.0.windows.5",
+      "body": "Critical security bug fix release addressing CVE-2026-99991 and arbitrary code execution.\n| MinGit-2.56.0.5-64-bit.zip | 5555555555555555555555555555555555555555555555555555555555555555 |",
+      "assets": [
+        {
+          "name": "MinGit-2.56.0.5-64-bit.zip",
+          "browser_download_url": "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.5/MinGit-2.56.0.5-64-bit.zip",
+          "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+        }
+      ]
+    },
+    {
+      "tag_name": "v2.56.0.windows.4",
+      "name": "Git for Windows v2.56.0.windows.4",
+      "draft": false,
+      "prerelease": false,
+      "html_url": "https://github.com/git-for-windows/git/releases/tag/v2.56.0.windows.4",
+      "body": "Pinned release.",
+      "assets": [
+        {
+          "name": "MinGit-2.56.0.4-64-bit.zip",
+          "browser_download_url": "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.4/MinGit-2.56.0.4-64-bit.zip",
+          "digest": "sha256:e3bf78351fe777fba47ddee5950082f8a98bb0f02604fdc7ba3ee2cb68ffa877"
+        }
+      ]
+    }
+  ],
+  "gitLfs": [
+    {
+      "tag_name": "v3.8.1",
+      "name": "v3.8.1",
+      "draft": false,
+      "prerelease": false,
+      "html_url": "https://github.com/git-lfs/git-lfs/releases/tag/v3.8.1",
+      "body": "Maintenance release.",
+      "assets": [
+        {
+          "name": "git-lfs-windows-amd64-v3.8.1.zip",
+          "browser_download_url": "https://github.com/git-lfs/git-lfs/releases/download/v3.8.1/git-lfs-windows-amd64-v3.8.1.zip",
+          "digest": "sha256:5bb771c12b3dacc535e912d0270a010c209d4da2e63819c5918e3547c2defed9"
+        }
+      ]
+    }
+  ]
+}

@@ -273,6 +273,40 @@ public class TerminalSessionServiceTests
         Assert.NotNull(s.StartupNotice);
     }
 
+    private sealed class FixedGitLocator(GitExecutableInfo info) : IGitExecutableLocator
+    {
+        public GitExecutableInfo Current => info;
+        public Task<GitExecutableInfo> ResolveAsync(string? userOverridePath, CancellationToken ct = default) => Task.FromResult(info);
+        public Task<GitExecutableInfo> WhenResolvedAsync(CancellationToken ct = default) => Task.FromResult(info);
+    }
+
+    [Fact]
+    public async Task Built_by_the_container_a_session_gets_the_bundled_git_on_its_PATH()
+    {
+        var backend = new FakeTerminalBackend();
+        var bundledRoot = Path.Combine("historia-app", "git");
+        var services = new ServiceCollection();
+        services.AddSingleton<ITerminalBackend>(backend);
+        services.AddSingleton<ISettingsService>(new FakeSettingsService());
+        services.AddSingleton<IUiDispatcher>(new ImmediateUiDispatcher());
+        services.AddSingleton<IGitExecutableLocator>(new FixedGitLocator(new GitExecutableInfo
+        {
+            Found = true,
+            Source = GitSource.Bundled,
+            BundledRoot = bundledRoot,
+            Path = Path.Combine(bundledRoot, "ucrt64", "bin", "git.exe"),
+            Version = new Version(2, 56, 0),
+        }));
+        services.AddSingleton<ITerminalSessionService, TerminalSessionService>();
+        using var provider = services.BuildServiceProvider();
+
+        await provider.GetRequiredService<ITerminalSessionService>().OpenOrFocusAsync(Repo());
+
+        var path = backend.Starts[0].Environment
+            .First(kv => string.Equals(kv.Key, "PATH", StringComparison.OrdinalIgnoreCase)).Value;
+        Assert.StartsWith(Path.Combine(bundledRoot, "cmd") + Path.PathSeparator, path);
+    }
+
     // ── OSC 52 write / Kitty keyboard settings ──
 
     private const string Osc52Hi = "\x1b]52;c;aGk=\x07";

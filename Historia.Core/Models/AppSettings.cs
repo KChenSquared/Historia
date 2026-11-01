@@ -140,6 +140,10 @@ public sealed record AppSettings
     /// <summary>Overrides discovery.</summary>
     public string? GitExecutablePath { get; init; }
 
+    /// <summary>When on (the default), Historia falls back to its bundled MinGit when no supported
+    /// Git is installed on the machine. Turn off to require an installed Git.</summary>
+    public bool UseBundledGit { get; init; } = true;
+
     /// <summary>On by default. Restore opens only the
     /// focused repository; every other tab is a placeholder until first focused.</summary>
     public bool RestoreSessionTabs { get; init; } = true;

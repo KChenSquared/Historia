@@ -28,7 +28,7 @@ internal sealed class SettingsViewRig : IDisposable
         public CmdrPathApplyResult Apply(PathChange confirmed) => new CmdrPathApplyResult.Failed("Unavailable");
     }
 
-    public SettingsViewRig(AppSettings settings, ScriptedDialogs? dialog = null)
+    public SettingsViewRig(AppSettings settings, ScriptedDialogs? dialog = null, IGitExecutableLocator? locator = null)
     {
         Settings = new InMemorySettingsService(settings);
         Dialog = dialog ?? new ScriptedDialogs();
@@ -51,8 +51,12 @@ internal sealed class SettingsViewRig : IDisposable
         sc.AddSingleton<IWorkspaceService, WorkspaceService>();
         sc.AddSingleton<IProfileService, ProfileService>();
         sc.AddSingleton<IGitCliService, GitCliService>();
-        var locator = new GitExecutableLocator();
-        locator.ResolveAsync(null).GetAwaiter().GetResult();
+        if (locator is null)
+        {
+            var defaultLocator = new GitExecutableLocator();
+            defaultLocator.ResolveAsync(null).GetAwaiter().GetResult();
+            locator = defaultLocator;
+        }
         sc.AddSingleton<IGitExecutableLocator>(locator);
         sc.AddSingleton<IBackgroundWorkGate, BackgroundWorkGate>();
         sc.AddSingleton<IGraphLayoutService, GraphLayoutService>();

@@ -27,12 +27,14 @@ public sealed class SshHostResolver : ISshHostResolver
     internal readonly record struct Lookup(string? HostName, bool Definite);
 
     private readonly string? _configPath;
+    private readonly IGitExecutableLocator? _locator;
     private readonly Func<string, CancellationToken, Task<Lookup>> _lookup;
     private readonly ConcurrentDictionary<string, string?> _cache = new(StringComparer.OrdinalIgnoreCase);
     private int _processLaunches;
 
-    public SshHostResolver()
+    public SshHostResolver(IGitExecutableLocator? locator = null)
     {
+        _locator = locator;
         _lookup = RunSshAsync;
     }
 
@@ -48,6 +50,20 @@ public sealed class SshHostResolver : ISshHostResolver
     internal SshHostResolver(Func<string, CancellationToken, Task<Lookup>> lookup) => _lookup = lookup;
 
     internal int ProcessLaunches => Volatile.Read(ref _processLaunches);
+
+    /// <summary>The ssh git itself would run: the bundled one while the bundled Git is active,
+    /// otherwise the one on PATH.</summary>
+    internal string? ResolveSshExecutable()
+    {
+        if (_locator?.Current is { Found: true, Source: GitSource.Bundled, BundledRoot: not null } info)
+        {
+            var bundledSsh = Path.Combine(info.BundledRoot, "usr", "bin", OperatingSystem.IsWindows() ? "ssh.exe" : "ssh");
+            if (File.Exists(bundledSsh))
+                return bundledSsh;
+        }
+
+        return FindSshOnPath();
+    }
 
     /// <summary>The OpenSSH client <c>Process.Start</c> would find on PATH, or null.</summary>
     public static string? FindSshOnPath()
@@ -86,7 +102,7 @@ public sealed class SshHostResolver : ISshHostResolver
 
     private async Task<Lookup> RunSshAsync(string host, CancellationToken ct)
     {
-        var ssh = FindSshOnPath();
+        var ssh = ResolveSshExecutable();
         if (ssh is null)
         {
             AppLog.Write(AppLogLevel.Info, "network", $"ssh -G {host}: no ssh on PATH");

@@ -36,6 +36,7 @@ public sealed class SettingsHelpHintTests
         ["Issue autolinks"] = "Turns issue keys in commit messages into links. In the URL, $1, $2… insert the pattern's capture groups."
             + "\n\nExample: pattern #(\\d+) with URL https://HistoriaHQ.dev/autolink?issue=$1 turns #42 into a link.",
         ["Prune deleted remote branches on fetch"] = "On fetch and pull, removes remote branches that no longer exist on the server. Your local branches aren't touched.",
+        ["Use the Git bundled with Historia"] = "Includes Git LFS. Used only when no supported Git is installed. Turn off to require an installed Git.",
         ["Pull with rebase"] = "Puts your local commits on top of the remote ones instead of creating a merge commit.",
         ["Fetch after pull"] = "Fetch all branches and tags after a pull.",
         ["Ask for a stash message"] = "When off, the Stash button names the stash \"Stash of <branch>\".",
@@ -61,7 +62,7 @@ public sealed class SettingsHelpHintTests
         "Tab width (px)", "Show author date", "Scroll direction", "Match system", "Standard", "Inverted",
         "Cache sidebar between launches", "Privacy & Network", "Auto-fetch open repositories", "Allow command-line control (historia-cmdr)", "Diff viewer",
         "Layout", "Unified", "Side by side", "Context lines", "Wrap long lines", "Issue autolinks",
-        "Pattern (regex)", "Link URL ($1 = first group)", "Git", "Prune deleted remote branches on fetch",
+        "Pattern (regex)", "Link URL ($1 = first group)", "Git", "Use the Git bundled with Historia", "Prune deleted remote branches on fetch",
         "Pull with rebase", "Fetch after pull", "Reopen tabs on launch", "Ask for a stash message", "Terminal", "Shell",
         "Shell arguments", "Separated by spaces", "Font family", "Font size", "Scrollback (lines)",
         "Cursor style", "Blinking cursor", "Advanced", "Enable logging", "Auto hide notices", "Show splash screen", "Keep commit details on disk",

@@ -18,6 +18,9 @@
 [Aa]rtifacts/
 .artifacts/
 [Oo]ut/
+# Bundled Git updater: Python bytecode and the pull request body it writes
+__pycache__/
+/bundled-git-pr-body.md
 [Bb]ld/
 [Dd]ebug/
 [Dd]ebugPublic/

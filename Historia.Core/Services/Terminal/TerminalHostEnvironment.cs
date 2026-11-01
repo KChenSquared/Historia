@@ -19,7 +19,7 @@ public sealed record TerminalHostEnvironment
     public required string ExecutablePath { get; init; }
     public required string Version { get; init; }
 
-    public static TerminalHostEnvironment System { get; } = new()
+    public static TerminalHostEnvironment CreateSystem(Func<GitExecutableInfo?>? gitInfoProvider = null) => new()
     {
         Platform = OperatingSystem.IsWindows() ? OSPlatformKind.Windows
                  : OperatingSystem.IsMacOS() ? OSPlatformKind.MacOS
@@ -29,14 +29,16 @@ public sealed record TerminalHostEnvironment
         GetEnvironmentVariable = Environment.GetEnvironmentVariable,
         FindOnPath = FindExecutableOnPath,
         GetPasswdShell = () => null,
-        GetInheritedEnvironment = SnapshotEnvironment,
+        GetInheritedEnvironment = () => SnapshotEnvironment(gitInfoProvider?.Invoke()),
         HomeDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         CurrentDirectory = Environment.CurrentDirectory,
         ExecutablePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName ?? "Historia",
         Version = AppVersion.Current,
     };
 
-    private static IReadOnlyDictionary<string, string> SnapshotEnvironment()
+    public static TerminalHostEnvironment System { get; } = CreateSystem();
+
+    internal static IReadOnlyDictionary<string, string> SnapshotEnvironment(GitExecutableInfo? gitInfo = null)
     {
         var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
         var result = new Dictionary<string, string>(comparer);
@@ -45,6 +47,14 @@ public sealed record TerminalHostEnvironment
             if (kv.Key is string k && kv.Value is string v)
                 result[k] = v;
         }
+
+        if (gitInfo is { Found: true, Source: GitSource.Bundled, BundledRoot: not null })
+        {
+            var cmdDir = Path.Combine(gitInfo.BundledRoot, "cmd");
+            var existingPath = result.TryGetValue("PATH", out var p) ? p : "";
+            result["PATH"] = string.IsNullOrEmpty(existingPath) ? cmdDir : $"{cmdDir}{Path.PathSeparator}{existingPath}";
+        }
+
         return result;
     }
 

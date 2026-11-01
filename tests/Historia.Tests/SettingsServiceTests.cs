@@ -22,6 +22,7 @@ public class SettingsServiceTests : IDisposable
         Assert.False(svc.Current.DeveloperPanelEnabled); // default off
         Assert.False(svc.Current.EnableGraphSplice); // Default off
         Assert.Equal(DiffViewMode.Unified, svc.Current.DefaultDiffView);
+        Assert.True(svc.Current.UseBundledGit);
     }
 
     [Fact]
@@ -85,6 +86,39 @@ public class SettingsServiceTests : IDisposable
         await svc.FlushAsync();
 
         Assert.True(SettingsService.Load().Current.FetchAfterPull);
+    }
+
+    [Fact]
+    public void Use_bundled_git_defaults_to_on()
+    {
+        Assert.True(new AppSettings().UseBundledGit);
+        Assert.True(SettingsService.Load().Current.UseBundledGit);
+    }
+
+    [Fact]
+    public void A_settings_file_without_useBundledGit_reads_it_as_on()
+    {
+        File.WriteAllText(AppPaths.SettingsFile, "{ \"schemaVersion\": 24, \"pullWithRebase\": true }");
+
+        var settings = SettingsService.Load().Current;
+
+        Assert.True(settings.PullWithRebase);
+        Assert.True(settings.UseBundledGit);
+    }
+
+    [Fact]
+    public async Task Use_bundled_git_round_trips()
+    {
+        var svc = SettingsService.Load();
+        await svc.UpdateAsync(s => s with { UseBundledGit = false });
+        await svc.FlushAsync();
+
+        Assert.False(SettingsService.Load().Current.UseBundledGit);
+
+        await svc.UpdateAsync(s => s with { UseBundledGit = true });
+        await svc.FlushAsync();
+
+        Assert.True(SettingsService.Load().Current.UseBundledGit);
     }
 
     [Fact]

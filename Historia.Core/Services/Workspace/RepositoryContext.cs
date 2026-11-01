@@ -162,7 +162,8 @@ public sealed class RepositoryContext : IAsyncDisposable
                 this,
                 services.GetRequiredService<IGitCliService>(),
                 services.GetRequiredService<Historia.Services.Settings.IRepoLayoutService>(),
-                services.GetRequiredService<Historia.Services.Profiles.ICredentialVaultService>()),
+                services.GetRequiredService<Historia.Services.Profiles.ICredentialVaultService>(),
+                services.GetService<ISshHostResolver>()),
             RepositoryPath);
 
         var state = new RepositoryStateService(

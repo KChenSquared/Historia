@@ -33,7 +33,7 @@ if (-not $Archives -and -not $Installers) {
 }
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
-$ResolvedOutDir = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $OutDir))
+$ResolvedOutDir = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($RepoRoot, $OutDir))
 if (-not (Test-Path $ResolvedOutDir)) {
     New-Item -ItemType Directory -Path $ResolvedOutDir -Force | Out-Null
 }
@@ -80,6 +80,16 @@ Write-Host "Packaging version: $version"
 
 # Assert staging invariants
 $isWinRid = $Rid -eq 'win-x64'
+
+if ($isWinRid) {
+    Write-Host "Fetching and configuring bundled Git for $Rid..."
+    $fetchScript = Join-Path $RepoRoot "packaging/windows/Fetch-BundledGit.ps1"
+    & $fetchScript -Staging $Staging -CacheDir (Join-Path $RepoRoot "obj/bundled-git-cache")
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Fetch-BundledGit failed with exit code $LASTEXITCODE"
+        exit 1
+    }
+}
 # Only Windows packages are supported; every other platform is marked experimental in its file name.
 $platformTag = if ($isWinRid) { '' } else { '-experimental' }
 $cmdrExeName = if ($isWinRid) { 'historia-cmdr.exe' } else { 'historia-cmdr' }
@@ -99,6 +109,13 @@ if (-not (Test-Path $cmdrConfigPath)) {
 if (-not (Test-Path $licensesPath)) {
     Write-Error "Assertion failed: staging directory is missing third-party-licenses.md"
     exit 1
+}
+if ($isWinRid) {
+    $stagingGit = Join-Path $Staging 'git'
+    if (-not (Test-Path $stagingGit)) {
+        Write-Error "Assertion failed: staging directory is missing git"
+        exit 1
+    }
 }
 if (Test-Path $devModePath) {
     Write-Error "Assertion failed: staging directory must not contain enableDevMode"

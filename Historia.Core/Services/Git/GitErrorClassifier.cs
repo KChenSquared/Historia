@@ -92,10 +92,16 @@ public static class GitErrorClassifier
         (GitErrorKind.LockedIndex, ["index.lock", "another git process seems to be running"]),
         (GitErrorKind.NotAGitRepository, ["not a git repository"]),
         (GitErrorKind.UnsafeRepository, ["detected dubious ownership"]),
-        (GitErrorKind.LfsMissing, ["git-lfs", "this repository is configured for git lfs but"]),
+        // A bare "git-lfs" is deliberately not a needle: an LFS that is installed and failing names
+        // itself too ("external filter 'git-lfs filter-process' failed").
+        (GitErrorKind.LfsMissing, ["git-lfs: command not found", "'lfs' is not a git command", "this repository is configured for git lfs but"]),
         (GitErrorKind.UnrelatedHistories, ["refusing to merge unrelated histories"]),
         (GitErrorKind.DetachedHeadOperation, ["you are not currently on a branch", "detached head"]),
-        (GitErrorKind.HookFailed, ["hook declined", "hook failed", "cannot spawn hook", "pre-commit hook", "commit-msg hook"]),
+        // "gpg failed to sign the data" is deliberately not a needle: git prints it for every gpg
+        // failure, including a missing secret key or a cancelled passphrase with gpg installed.
+        (GitErrorKind.SigningToolMissing, ["cannot run gpg", "cannot spawn gpg"]),
+        (GitErrorKind.SshSigningToolMissing, ["cannot run ssh-keygen", "cannot spawn ssh-keygen"]),
+        (GitErrorKind.HookFailed, ["hook declined", "hook failed", "cannot spawn hook", "cannot spawn .git/hooks/", "env: 'bash': no such file", "pre-commit hook", "commit-msg hook"]),
         (GitErrorKind.InvalidRefName, ["is not a valid ref name", "cannot lock ref", "not a valid object name", "not a valid ref"]),
         (GitErrorKind.RefNotFound, [
             "unknown revision or path",
