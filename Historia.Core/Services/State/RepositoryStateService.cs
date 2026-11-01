@@ -177,17 +177,14 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
 
     public void SetSelectedConflictPath(string? path)
     {
-        bool changed;
         lock (_sync)
         {
             if (string.Equals(_selectedConflictPath, path, StringComparison.Ordinal))
                 return;
             _selectedConflictPath = path;
-            changed = true;
         }
 
-        if (changed)
-            Raise(() => SelectedConflictPathChanged?.Invoke(this, new SelectedConflictPathChangedEventArgs(path)));
+        Raise(() => SelectedConflictPathChanged?.Invoke(this, new SelectedConflictPathChangedEventArgs(path)));
     }
 
     private void HandleConflictSessionFlipped(bool nowActive, bool closedCleared)

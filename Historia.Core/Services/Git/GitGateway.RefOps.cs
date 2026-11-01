@@ -451,7 +451,7 @@ public sealed partial class GitGateway
 
             if (inRefspecs)
             {
-                if (line.StartsWith("\t") || line.StartsWith("  "))
+                if (line.StartsWith('\t') || line.StartsWith("  ", StringComparison.Ordinal))
                 {
                     var trimmed = line.Trim();
                     if (!string.IsNullOrEmpty(trimmed) && !trimmed.StartsWith("Please", StringComparison.OrdinalIgnoreCase))

@@ -143,11 +143,10 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
         return stream;
     }
 
-    private static Thread StartBackgroundThread(ThreadStart body, string name)
+    private static void StartBackgroundThread(ThreadStart body, string name)
     {
         var thread = new Thread(body, maxStackSize: 256 * 1024) { IsBackground = true, Name = name };
         thread.Start();
-        return thread;
     }
 
     // Like the stderr drain: a blocking write on its own thread, observed through a task so

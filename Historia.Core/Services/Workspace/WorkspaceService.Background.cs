@@ -527,7 +527,8 @@ public sealed partial class WorkspaceService
             needsInit = false;
             if (!context.FirstFullLoad.IsCompleted)
             {
-                var wasQueued = _deferredInit.Remove(context) | (_bgQueue.RemoveAll(x => ReferenceEquals(x.Context, context)) > 0);
+                var removedFromQueue = _bgQueue.RemoveAll(x => ReferenceEquals(x.Context, context)) > 0;
+                var wasQueued = _deferredInit.Remove(context) || removedFromQueue;
                 if (wasQueued)
                 {
                     needsInit = true;

@@ -8,7 +8,7 @@ public sealed class RebaseService(IGitCliService cli) : IRebaseService
     /// built. Signature is (mode, tempDir) → shell command. Defaults to re-invoking the Historia
     /// executable with the given switch.
     /// </summary>
-    public static Func<string, string, string>? EditorCommandOverride;
+    internal static Func<string, string, string>? EditorCommandOverride;
 
     private static string BuildEditorCommand(string mode, string dir)
     {

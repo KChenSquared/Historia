@@ -16,7 +16,6 @@ public sealed class FileWatcherService : IAsyncDisposable
 
     private readonly RepositoryContext _context;
     private readonly IRepositoryStateService _state;
-    private readonly ISettingsService _settings;
     private readonly IWorkspaceService? _workspace;
     private readonly List<FileSystemWatcher> _watchers = [];
     private readonly object _sync = new();
@@ -61,9 +60,8 @@ public sealed class FileWatcherService : IAsyncDisposable
     public FileWatcherService(
         RepositoryContext context,
         IRepositoryStateService state,
-        ISettingsService settings,
         IWorkspaceService? workspace = null)
-        : this(context, state, settings, workspace, watchFilesystem: true)
+        : this(context, state, workspace, watchFilesystem: true)
     {
     }
 
@@ -72,13 +70,11 @@ public sealed class FileWatcherService : IAsyncDisposable
     internal FileWatcherService(
         RepositoryContext context,
         IRepositoryStateService state,
-        ISettingsService settings,
         IWorkspaceService? workspace,
         bool watchFilesystem)
     {
         _context = context;
         _state = state;
-        _settings = settings;
         _workspace = workspace ?? context.Workspace;
         _watchFilesystem = watchFilesystem;
         _gitDirRoot = NormalizePath(context.GitDirectory);

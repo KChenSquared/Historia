@@ -5,7 +5,7 @@ namespace Historia.Services.Graph;
 /// (~8 bytes/row) and pages <c>.dat</c> on demand behind a bounded decode cache. Grows in
 /// place via <see cref="SetCount"/> after an <see cref="GraphMetaWriter.Append"/>.
 /// </summary>
-internal sealed class DiskCommitStore : ICommitStore, IDisposable
+internal sealed class DiskCommitStore : ICommitStore
 {
     private const int DecodeCacheCap = 8192;
 

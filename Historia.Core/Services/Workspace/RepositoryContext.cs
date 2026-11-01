@@ -180,10 +180,7 @@ public sealed class RepositoryContext : IAsyncDisposable
 
         Workspace = services.GetService<IWorkspaceService>();
 
-        Watcher = new FileWatcherService(
-            this,
-            State,
-            services.GetRequiredService<ISettingsService>());
+        Watcher = new FileWatcherService(this, State);
     }
 
     /// <summary>

@@ -497,13 +497,13 @@ public static class ConflictMarkerParser
                 offset = nextBreak + delimLen;
                 if (offset == length)
                 {
-                    lines.Add(new LineInfo(lineIndex++, offset, 0, 0));
+                    lines.Add(new LineInfo(lineIndex, offset, 0, 0));
                     break;
                 }
             }
             else
             {
-                lines.Add(new LineInfo(lineIndex++, lineStart, length - lineStart, 0));
+                lines.Add(new LineInfo(lineIndex, lineStart, length - lineStart, 0));
                 break;
             }
         }

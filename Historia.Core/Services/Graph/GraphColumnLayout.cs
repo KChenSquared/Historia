@@ -154,14 +154,6 @@ public static class GraphColumnLayout
 
             widths[msgIdx] += slack;
         }
-        else if (slack < 0 && newSequenceApplies)
-        {
-            // ── 4. Shrink under the sequence: Graph and Message are already at their 150 floor
-            //        (step 1 gave Graph its floor, not the auto-size), so the whole deficit
-            //        runs the priority pass — Message and Graph first, then Date/Author/Sha. ──
-            var deficit = -slack;
-            ShrinkByPriority(ref deficit, widths, visible, manuallySized, refsFloor);
-        }
         else if (slack > 0)
         {
             // ── 3. Grow (legacy): Graph and Message at an equal rate until Graph reaches
@@ -181,8 +173,11 @@ public static class GraphColumnLayout
         }
         else if (slack < 0)
         {
-            // ── 4. Shrink (legacy): take the deficit from non-manually-sized columns, in
-            //        priority order, each down to its minimum. Any residue becomes band overflow. ──
+            // ── 4. Shrink: take the deficit from non-manually-sized columns, in priority order,
+            //        each down to its minimum. Under the sequence, Graph and Message are already
+            //        at their 150 floor (step 1 gave Graph its floor, not the auto-size), so the
+            //        whole deficit runs the priority pass — Message and Graph first, then
+            //        Date/Author/Sha. Any residue becomes band overflow. ──
             var deficit = -slack;
             ShrinkByPriority(ref deficit, widths, visible, manuallySized, refsFloor);
         }
