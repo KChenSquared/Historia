@@ -159,7 +159,9 @@ public sealed class TerminalSessionService : ITerminalSessionService, IDisposabl
             {
                 // The delay task won. Cancel the spawn best-effort, let the orphan clean up its
                 // own connection if it ever completes, and free the key so a retry is possible.
+#pragma warning disable S6966 // synchronous cancel is intended; it keeps the order here
                 spawnCts.Cancel();
+#pragma warning restore S6966
                 _ = spawnTask.ContinueWith(
                     t => { if (t.IsCompletedSuccessfully) t.Result.Dispose(); },
                     CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);

@@ -191,7 +191,9 @@ public sealed partial class StagingPanelViewModel
 
     private async Task LoadModelsAsync(AiServiceProfile profile)
     {
+#pragma warning disable S6966 // synchronous cancel keeps the order; an await would let a re-entrant load run first
         _modelLoadCts?.Cancel();
+#pragma warning restore S6966
         _modelLoadCts?.Dispose();
         var cts = CancellationTokenSource.CreateLinkedTokenSource(_ctx.Lifetime);
         _modelLoadCts = cts;
@@ -238,7 +240,9 @@ public sealed partial class StagingPanelViewModel
     {
         if (_generateCts is { } running)
         {
+#pragma warning disable S6966 // synchronous cancel is intended; it keeps the order here
             running.Cancel();
+#pragma warning restore S6966
             return;
         }
         var profile = _aiProfiles?.ActiveProfile;

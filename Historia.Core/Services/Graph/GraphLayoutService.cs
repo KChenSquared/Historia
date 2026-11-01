@@ -647,7 +647,9 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
             _caches.Remove(context);
         }
 
+#pragma warning disable S6966 // synchronous cancel is intended; it keeps the order here
         try { cache.Cts.Cancel(); } catch (ObjectDisposedException) { }
+#pragma warning restore S6966
 
         // Let the background spill observe the cancellation and finish its own turn before
         // this touches LiveWalk — disposing it while a chunk may still be mid-MoveNext is exactly

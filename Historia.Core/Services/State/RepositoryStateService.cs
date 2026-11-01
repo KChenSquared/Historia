@@ -745,7 +745,9 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
                 // Outside the lock: cancelling runs the work's cancellation callbacks.
                 if (abandon)
                 {
+#pragma warning disable S6966 // synchronous cancel is intended; it keeps the order here
                     try { run.Abandoned.Cancel(); }
+#pragma warning restore S6966
                     catch (ObjectDisposedException) { }
                 }
             }

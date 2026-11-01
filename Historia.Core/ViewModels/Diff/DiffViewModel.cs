@@ -199,7 +199,9 @@ public sealed partial class DiffViewModel : ViewModelBase
                 return;
 
             Diff = diff;
+#pragma warning disable S6966 // synchronous cancel is intended; it keeps the order here
             _loadingCts.Cancel();
+#pragma warning restore S6966
             var model = await BuildModelAsync(diff);
             if (IsDisposed)
                 return;

@@ -91,7 +91,9 @@ public sealed partial class CmdrQueueViewModel : ViewModelBase
 
         var cts = new CancellationTokenSource();
         var previous = Interlocked.Exchange(ref _openCts, cts);
+#pragma warning disable S6966 // synchronous cancel is intended; it keeps the order here
         previous?.Cancel();
+#pragma warning restore S6966
 
         _queue.MarkSeen(item.Id);
         try

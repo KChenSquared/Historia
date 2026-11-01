@@ -41,7 +41,9 @@ public sealed partial class ConflictResolverViewModel : ViewModelBase
     // Cancelled on dispose to signal in-flight work, but not disposed so in-flight tasks
     // observing its token do not throw ObjectDisposedException. A plain CTS with no timer
     // or wait handle holds no unmanaged resources.
+#pragma warning disable S2930 // no timer or wait handle to release; in-flight work keeps reading its token
     private readonly CancellationTokenSource _viewCts = new();
+#pragma warning restore S2930
     private CancellationTokenSource? _switchCts;
     private int _switchGeneration;
 
@@ -598,7 +600,9 @@ public sealed partial class ConflictResolverViewModel : ViewModelBase
     private async Task SwitchToFileAsync(ConflictFile file)
     {
         int gen = ++_switchGeneration;
+#pragma warning disable S6966 // synchronous cancel keeps the order; an await would let a re-entrant switch run first
         _switchCts?.Cancel();
+#pragma warning restore S6966
         _switchCts?.Dispose();
         _switchCts = CancellationTokenSource.CreateLinkedTokenSource(_viewCts.Token);
         var ct = _switchCts.Token;
