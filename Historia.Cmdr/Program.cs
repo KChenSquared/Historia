@@ -18,13 +18,13 @@ internal static class Program
         var parsed = ControlArgs.Parse(args, Directory.GetCurrentDirectory());
         if (parsed.ShowHelp)
         {
-            Console.Out.WriteLine(ControlArgs.UsageText);
+            await Console.Out.WriteLineAsync(ControlArgs.UsageText).ConfigureAwait(false);
             return ControlExitCode.Ok;
         }
 
         if (parsed.ShowVersion)
         {
-            Console.Out.WriteLine(Historia.Diagnostics.AppVersion.Current);
+            await Console.Out.WriteLineAsync(Historia.Diagnostics.AppVersion.Current).ConfigureAwait(false);
             return ControlExitCode.Ok;
         }
 
@@ -149,7 +149,7 @@ internal static class Program
 
         try
         {
-            if (GetNamedPipeServerProcessId(client.SafePipeHandle.DangerousGetHandle(), out var pid))
+            if (GetNamedPipeServerProcessId(client.SafePipeHandle, out var pid))
                 AllowSetForegroundWindow(pid);
         }
         catch
@@ -160,7 +160,7 @@ internal static class Program
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetNamedPipeServerProcessId(IntPtr pipe, out uint serverProcessId);
+    private static extern bool GetNamedPipeServerProcessId(SafeHandle pipe, out uint serverProcessId);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
