@@ -101,7 +101,9 @@ internal sealed class GraphJumpWorkload(CommitGraphControl graph, double seconds
 
     public void Begin()
     {
+#pragma warning disable S2245 // a repeatable seeded sequence for the benchmark, not a security use
         _random = new Random(seed);
+#pragma warning restore S2245
         _nextJump = 0;
         _jumps = 0;
         _maxOffsetSeen = 0;

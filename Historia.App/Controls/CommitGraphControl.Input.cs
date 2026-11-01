@@ -243,12 +243,16 @@ public sealed partial class CommitGraphControl
     private void ResetGraphView()
     {
         if (_hScrollOffset == 0 && _graphPanOffset == 0
+#pragma warning disable S1244 // the reset assigns these exact constants; a near miss only resets again
             && _rowHeight == DefaultRowHeight && _laneWidth == DefaultLaneWidth)
+#pragma warning restore S1244
         {
             return;
         }
 
+#pragma warning disable S1244 // the reset assigns these exact constants; a near miss only resets again
         if (_rowHeight != DefaultRowHeight || _laneWidth != DefaultLaneWidth)
+#pragma warning restore S1244
         {
             var topRow = _scrollOffset / _rowHeight;
             _rowHeight = DefaultRowHeight;

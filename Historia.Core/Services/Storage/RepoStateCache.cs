@@ -169,7 +169,9 @@ public sealed class RepoStateCache(ISettingsService settings) : IRepoStateCache
         var norm = full.Replace('\\', '/').TrimEnd('/');
         if (OperatingSystem.IsWindows())
             norm = norm.ToLowerInvariant();
+#pragma warning disable S4790 // names a cache file; no security depends on this hash
         var hash = Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(norm)));
+#pragma warning restore S4790
         return Path.Combine(AppPaths.CacheDirectory, $"repo-{kind}-{hash}.json.gz");
     }
 

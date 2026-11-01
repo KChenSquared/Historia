@@ -108,7 +108,9 @@ public sealed partial class CommitGraphControl
             // A transient cause clears within a few frames. Cap the auto-repaints so a
             // *deterministic* fault in here (a stale scroll window, a lane-index bug) surfaces
             // once and leaves a blank frame instead of spinning a core forever on Background.
+#pragma warning disable S2583 // the render can throw before the streak resets, so this can be false
             if (++_renderFailStreak <= MaxRenderRetries)
+#pragma warning restore S2583
             {
                 Dispatcher.UIThread.Post(InvalidateVisual, DispatcherPriority.Background);
             }
@@ -456,7 +458,9 @@ public sealed partial class CommitGraphControl
             foreach (var r in _multiSelect)
             {
                 selectedRow = r;
+#pragma warning disable S1751 // takes the first element through the struct enumerator
                 break;
+#pragma warning restore S1751
             }
         }
         int focusLane = -1;

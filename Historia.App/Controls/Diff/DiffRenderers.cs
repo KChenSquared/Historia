@@ -111,7 +111,9 @@ public sealed class DiffLineNumberMargin : AbstractMargin
         var foregroundBrush = PaletteBrushes.Get("ColorTextFaint");
 
         var typeface = new Typeface(_presenter.FontFamily, _presenter.FontStyle, _presenter.FontWeight);
+#pragma warning disable S1244 // exact compare against the stored copy
         if (_presenter.FontSize != _lastFontSize || !typeface.Equals(_typeface))
+#pragma warning restore S1244
         {
             _lastFontSize = _presenter.FontSize;
             _typeface = typeface;
@@ -232,7 +234,9 @@ public sealed class DiffLineModifyTypeMargin : AbstractMargin
         var rows = _presenter.Rows;
 
         var typeface = new Typeface(_presenter.FontFamily, _presenter.FontStyle, _presenter.FontWeight);
+#pragma warning disable S1244 // exact compare against the stored copy
         if (_presenter.FontSize != _lastFontSize || !typeface.Equals(_typeface))
+#pragma warning restore S1244
         {
             _lastFontSize = _presenter.FontSize;
             _typeface = typeface;

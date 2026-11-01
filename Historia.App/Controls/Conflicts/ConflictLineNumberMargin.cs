@@ -67,7 +67,9 @@ public sealed class ConflictLineNumberMargin : AbstractMargin
         }
 
         var typeface = new Typeface(_editor.FontFamily, _editor.FontStyle, _editor.FontWeight);
+#pragma warning disable S1244 // exact compare against the stored copy
         if (_editor.FontSize != _lastFontSize || !typeface.Equals(_typeface))
+#pragma warning restore S1244
         {
             _lastFontSize = _editor.FontSize;
             _typeface = typeface;

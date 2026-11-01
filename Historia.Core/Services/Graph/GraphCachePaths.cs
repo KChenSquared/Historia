@@ -25,7 +25,9 @@ internal static class GraphCachePaths
         // Case-fold only where the filesystem does (cheap 99%-correct proxy — see GraphWalkCache).
         if (OperatingSystem.IsWindows())
             norm = norm.ToLowerInvariant();
+#pragma warning disable S4790 // names a cache file; no security depends on this hash
         var hash = Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(norm)));
+#pragma warning restore S4790
         return $"graph-{hash}";
     }
 

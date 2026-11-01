@@ -35,9 +35,13 @@ public sealed class ShapedTextCache
         public bool Equals(Key a, Key b) =>
             string.Equals(a.Text, b.Text, StringComparison.Ordinal)
             && a.Typeface.Equals(b.Typeface)
+#pragma warning disable S1244 // a cache key needs exact identity; a tolerance would break the hash contract
             && a.FontSize.Equals(b.FontSize)
+#pragma warning restore S1244
             && ReferenceEquals(a.Foreground, b.Foreground)
+#pragma warning disable S1244 // a cache key needs exact identity; a tolerance would break the hash contract
             && a.MaxWidth.Equals(b.MaxWidth)
+#pragma warning restore S1244
             && ReferenceEquals(a.Trimming, b.Trimming)
             && a.MaxLines == b.MaxLines;
 

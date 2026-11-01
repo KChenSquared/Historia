@@ -180,7 +180,7 @@ internal static class FrameBenchRunner
         if (!head.IsSuccess || !string.Equals(headSha, pin.Head, StringComparison.OrdinalIgnoreCase))
         {
             Log($"HEAD {(head.IsSuccess ? headSha : "unreadable")} does not match the pin {pin.Head}");
-            Console.Error.WriteLine($"frame-bench: {options.Repo} HEAD is not {pin.Head}.");
+            await Console.Error.WriteLineAsync($"frame-bench: {options.Repo} HEAD is not {pin.Head}.").ConfigureAwait(true);
             return FrameBenchExitCodes.HeadMismatch;
         }
 
@@ -363,7 +363,9 @@ internal static class FrameBenchRunner
             return viewer is not null && viewer.Extent.Height > viewer.Viewport.Height && viewer.Viewport.Height > 0;
         }, PrepareTimeout).ConfigureAwait(true);
 
+#pragma warning disable S2583 // the wait's lambda sets this
         if (problem is not null)
+#pragma warning restore S2583
             throw new InvalidOperationException($"{pin.Diff.Path} at {pin.Diff.Commit}: {problem}");
         if (!ready || viewer is null || editor is null)
             throw new TimeoutException($"the diff of {pin.Diff.Path} did not open");
@@ -381,7 +383,7 @@ internal static class FrameBenchRunner
         IServiceProvider services, Window window, RepositoryContext context, FrameBenchOptions options)
     {
         var terminals = services.GetRequiredService<ITerminalSessionService>();
-        var session = await terminals.OpenOrFocusAsync(RepoTerminalOrigin.For(context)).ConfigureAwait(true);
+        var session = await terminals.OpenOrFocusAsync(RepoTerminalOrigin.For(context), CancellationToken.None).ConfigureAwait(true);
         var ready = await WaitUntilAsync(() =>
             session.State == TerminalSessionState.Running
             && window.GetVisualDescendants().OfType<TerminalDockView>().Any(d => d.IsVisible && d.Bounds.Height > 0)

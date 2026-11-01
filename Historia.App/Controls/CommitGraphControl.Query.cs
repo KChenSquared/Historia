@@ -889,7 +889,9 @@ public sealed partial class CommitGraphControl
     /// Shapes text, so it runs when a tip is shown and never from the render path.</summary>
     private (int MaxLines, bool Truncated) MeasureMessageTip(string text, double budget)
     {
+#pragma warning disable S1244 // exact compare against the stored copy
         if (_msgTipMeasure is { } m && string.Equals(m.Text, text, StringComparison.Ordinal) && m.Budget == budget)
+#pragma warning restore S1244
             return (m.MaxLines, m.Truncated);
 
         var typeface = new Typeface(FontFamily.Default);
@@ -951,7 +953,9 @@ public sealed partial class CommitGraphControl
 
         _hoverMsgId = id;
         var budget = MessageTipContentBudget();
+#pragma warning disable S1244 // exact compare against the stored copy
         if (string.Equals(_msgTipText, text, StringComparison.Ordinal) && _msgTipBudget == budget)
+#pragma warning restore S1244
         {
             ToolTip.SetIsOpen(this, true);
             return;
