@@ -946,8 +946,9 @@ public sealed partial class CommitGraphControl
             CancelHoverFetch();
             if (_context is { } ctx)
             {
-                _hoverFetchCts = CancellationTokenSource.CreateLinkedTokenSource(ctx.Lifetime);
-                _ = FetchMessageAsync(id, subject, _hoverFetchCts.Token);
+                var cts = CancellationTokenSource.CreateLinkedTokenSource(ctx.Lifetime);
+                _hoverFetchCts = cts;
+                _ = FetchMessageAsync(id, subject, cts.Token);
             }
         }
 
