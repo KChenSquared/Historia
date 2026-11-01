@@ -102,7 +102,7 @@ public sealed class ShapedTextCache
             var last = _lru.Last!;
             _lru.RemoveLast();
             _map.Remove(last.Value.Key);
-            Dispose(last.Value.Layout);
+            DisposeLayout(last.Value.Layout);
         }
 
         _map[key] = _lru.AddFirst((key, layout));
@@ -127,7 +127,7 @@ public sealed class ShapedTextCache
         _lru.Clear();
         foreach (var layout in layouts)
         {
-            Dispose(layout);
+            DisposeLayout(layout);
         }
     }
 
@@ -137,7 +137,7 @@ public sealed class ShapedTextCache
         Misses = 0;
     }
 
-    private void Dispose(TextLayout layout)
+    private void DisposeLayout(TextLayout layout)
     {
         layout.Dispose();
         DisposedForTesting?.Invoke(layout);

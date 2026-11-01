@@ -231,7 +231,7 @@ public sealed partial class CommitGraphControl
         if (row < 0 || _layout is not { } stepLayout || row >= stepLayout.Layout.RowCount)
             return;
         ScrollRowIntoView(row);
-        _state?.SetSelectedCommit(_layout!.Layout.Commits[row].Id);
+        _state?.SetSelectedCommit(_layout.Layout.Commits[row].Id);
         UpdateMatchLabel();
         InvalidateVisual();
     }
@@ -337,7 +337,6 @@ public sealed partial class CommitGraphControl
                     var target = leftIsFlex && b + 1 < _resolvedColumns.Length ? b + 1 : b;
                     _resizeInverted = target != b;
                     _resizing = true;
-                    _resizeBoundary = b;
                     _resizeKind = _resolvedColumns[target].Kind;
                     _resizeStartX = pos.X;
                     _resizeStartWidth = _resolvedColumns[target].Width;
@@ -430,7 +429,6 @@ public sealed partial class CommitGraphControl
         if (_resizing)
         {
             _resizing = false;
-            _resizeBoundary = -1;
             _resizeInverted = false;
             _manuallySized.Add(_resizeKind);
             _capturedPointer?.Capture(null);

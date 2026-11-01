@@ -7,7 +7,6 @@ namespace Historia;
 /// </summary>
 public partial class MainWindow : Window
 {
-    private readonly IServiceProvider _services = default!;
     private readonly IThemeService? _theme;
     private readonly IKeyboardCommandRouter? _keyboard;
     private readonly IScrollDirectionProbe? _scrollProbe;
@@ -27,7 +26,6 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
-        _services = services;
         ViewModel = services is null
             ? new MainWindowViewModel()
             : ActivatorUtilities.CreateInstance<MainWindowViewModel>(services);

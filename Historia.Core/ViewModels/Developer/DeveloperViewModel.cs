@@ -23,7 +23,7 @@ public sealed partial class DeveloperViewModel : ViewModelBase
 
     private int _selectedThemeIndex;
     private bool _autoFetchStatusFallback;
-    private bool _ready;
+    private readonly bool _ready;
 
     /// <param name="getAutoFetchStatus">Reads the session-wide switch for the auto-fetch colour bar on tabs;
     /// without one the switch is kept in this view model.</param>

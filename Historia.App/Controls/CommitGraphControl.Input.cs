@@ -352,7 +352,6 @@ public sealed partial class CommitGraphControl
         if (e.Key == Key.Escape && (_resizing || _reorderKind is not null))
         {
             _resizing = false;
-            _resizeBoundary = -1;
             _resizeInverted = false;
             _reorderKind = null;
             _reorderCandidate = null;

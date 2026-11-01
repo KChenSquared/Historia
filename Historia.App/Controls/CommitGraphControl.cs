@@ -93,7 +93,6 @@ public sealed partial class CommitGraphControl : Control
     private double _graphColLeft;
     private double _graphColWidth;
 
-    private int _resizeBoundary = -1;
     private bool _resizing;
     private double _resizeStartX;
     private double _resizeStartWidth;
@@ -447,7 +446,6 @@ public sealed partial class CommitGraphControl : Control
     private SolidColorBrush _bg = new(Colors.Black);
     private SolidColorBrush _chrome = new(Colors.Black);
     private Pen _borderPen = new(new SolidColorBrush(Colors.Gray), 1);
-    private SolidColorBrush _nodeFill = new(Colors.White);
     private SolidColorBrush _text = new(Colors.Gray);
     private SolidColorBrush _textMuted = new(Colors.DimGray);
     private SolidColorBrush _pillText = new(Colors.White);
@@ -1772,7 +1770,6 @@ public sealed partial class CommitGraphControl : Control
         _bg = new SolidColorBrush(bg);
         _chrome = new SolidColorBrush(ToColor(palette["chrome"]));
         _borderPen = new Pen(new SolidColorBrush(ToColor(palette["border"])), 1);
-        _nodeFill = new SolidColorBrush(bg);
         _text = new SolidColorBrush(text);
         _textMuted = new SolidColorBrush(muted);
         _pillText = new SolidColorBrush(ToColor(palette["ref-label"]));
