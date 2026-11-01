@@ -113,7 +113,7 @@ public sealed class LogTrimmer : ILogTrimmer
                 }
 
                 _failureCount = 0;
-                _failureStore!.Save(0);
+                _failureStore.Save(0);
             }
         }
     }

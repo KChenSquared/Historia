@@ -169,8 +169,8 @@ public sealed class App : Application
             _singleInstanceCts = new CancellationTokenSource();
             // Loading the agent queue removes its expired items, once per launch, before any
             // control request can add to it.
-            _provider!.GetRequiredService<ICmdrQueueService>();
-            var control = _provider!.GetRequiredService<ExternalControlHost>();
+            _provider.GetRequiredService<ICmdrQueueService>();
+            var control = _provider.GetRequiredService<ExternalControlHost>();
             _ = SingleInstance.RunServerAsync(OnForwardedArguments, control.HandleAsync, _singleInstanceCts.Token);
         }
         OnForwardedArguments(NonSwitchArgs(Environment.GetCommandLineArgs().Skip(1)));
@@ -346,7 +346,7 @@ public sealed class App : Application
             var dark = ct.BaseTheme == Historia.Models.EffectiveTheme.Dark;
             var uri = string.IsNullOrWhiteSpace(ct.SplashImagePath)
                 ? Historia.Models.CustomTheme.BuiltInSplashLocation(ct.Base)
-                : ct.SplashImagePath!;
+                : ct.SplashImagePath;
             return (secs > 0, dark, uri, TimeSpan.FromSeconds(secs));
         }
 

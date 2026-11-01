@@ -159,7 +159,7 @@ public sealed partial class StagingPanelViewModel
 
             await _ctx.Gateway.CommitAsync(new CommitRequest
             {
-                Message = MessageText!.Trim(),
+                Message = MessageText.Trim(),
                 AuthorName = name,
                 AuthorEmail = email,
                 CommitterName = profile?.GitUserName ?? name,

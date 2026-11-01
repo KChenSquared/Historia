@@ -531,7 +531,7 @@ public sealed class ProfileService : IProfileService, IAsyncDisposable
 
         if (profile.SignCommits && !string.IsNullOrWhiteSpace(profile.GpgSigningKeyId))
         {
-            await SetConfigAsync(repoPath, scopeArg, "user.signingkey", profile.GpgSigningKeyId!, ct).ConfigureAwait(false);
+            await SetConfigAsync(repoPath, scopeArg, "user.signingkey", profile.GpgSigningKeyId, ct).ConfigureAwait(false);
             await SetConfigAsync(repoPath, scopeArg, "commit.gpgsign", "true", ct).ConfigureAwait(false);
         }
         else
