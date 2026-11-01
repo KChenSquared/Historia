@@ -33,7 +33,7 @@ if (-not $Archives -and -not $Installers) {
 }
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
-$ResolvedOutDir = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $OutDir))
+$ResolvedOutDir = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($RepoRoot, $OutDir))
 if (-not (Test-Path $ResolvedOutDir)) {
     New-Item -ItemType Directory -Path $ResolvedOutDir -Force | Out-Null
 }

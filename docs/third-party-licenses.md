@@ -593,6 +593,10 @@ On Windows, the package bundles MinGit (Git for Windows for Applications) at pin
 Source code is available at: https://github.com/git-for-windows/git/tree/v2.56.0.windows.4
 Individual component and third-party licences for bundled tools and libraries are shipped under `git\ucrt64\share\licenses` and `git\usr\share\licenses`.
 
+`git\etc\package-versions.txt` lists every package and version MinGit contains. The tools in `git\usr\bin` include GNU coreutils, sed, grep, gawk, findutils and diffutils, licensed under GPL version 3 or later; the licence text ships at `git\usr\share\licenses\gcc-libs\COPYING3`. Their source is published per package and version at `https://repo.msys2.org/msys/sources/` (for example `coreutils-8.32-5.src.tar.zst`) and `https://repo.msys2.org/mingw/sources/`, with Git for Windows' packaging at https://github.com/git-for-windows/MSYS2-packages, https://github.com/git-for-windows/MINGW-packages and https://github.com/git-for-windows/build-extra.
+
+No MinGit program is changed. Packaging appends two settings to `git\etc\gitconfig`: `core.fscache` and `credential.https://dev.azure.com.useHttpPath`.
+
 ```
 GNU GENERAL PUBLIC LICENSE
 Version 2, June 1991
@@ -881,7 +885,7 @@ END OF TERMS AND CONDITIONS
 
 ## Git Credential Manager
 
-MinGit includes Git Credential Manager (`git-credential-manager.exe`) under `ucrt64\bin` ([git-ecosystem/git-credential-manager](https://github.com/git-ecosystem/git-credential-manager)).
+MinGit includes Git Credential Manager (`git-credential-manager.exe`) under `ucrt64\bin` ([git-ecosystem/git-credential-manager](https://github.com/git-ecosystem/git-credential-manager)). Its licence also ships at `git\ucrt64\doc\git-credential-manager\LICENSE`.
 
 Copyright (c) Microsoft Corporation. All rights reserved.
 
@@ -911,7 +915,7 @@ SOFTWARE.
 
 ## OpenSSH
 
-MinGit includes OpenSSH binaries (`ssh.exe`, `ssh-agent.exe`, `ssh-add.exe`) under `usr\bin` ([OpenSSH](https://www.openssh.com/)).
+MinGit includes OpenSSH binaries (`ssh.exe`, `ssh-agent.exe`, `ssh-add.exe`) under `usr\bin` ([OpenSSH](https://www.openssh.com/)). The text below is an excerpt; the full licence ships at `git\usr\share\licenses\openssh\LICENCE`.
 
 ```
 The licences which components of this software may come under are detailed
@@ -956,7 +960,7 @@ below.
 
 ## Git LFS
 
-On Windows, the package bundles Git LFS (`git-lfs.exe` and its license under `git\licenses\git-lfs\`) at pinned release `v3.8.1` ([git-lfs/git-lfs](https://github.com/git-lfs/git-lfs)).
+On Windows, the package bundles Git LFS (`git-lfs.exe` under `git\ucrt64\bin`; its release archive has no licence file, so its licence is the text below) at pinned release `v3.8.1` ([git-lfs/git-lfs](https://github.com/git-lfs/git-lfs)).
 
 Copyright (c) 2014-2024 GitHub, Inc. and Git LFS contributors
 

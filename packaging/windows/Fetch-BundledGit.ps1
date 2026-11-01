@@ -106,13 +106,6 @@ try {
 
     $destLfs = Join-Path $gitStaging "$prefix\bin\git-lfs.exe"
     Copy-Item -Path $lfsExe.FullName -Destination $destLfs -Force
-
-    $lfsLicense = Get-ChildItem -Path $tempLfsDir -Filter "LICENSE*" -Recurse | Select-Object -First 1
-    if ($lfsLicense) {
-        $licenseDir = Join-Path $gitStaging "licenses\git-lfs"
-        New-Item -ItemType Directory -Path $licenseDir -Force | Out-Null
-        Copy-Item -Path $lfsLicense.FullName -Destination (Join-Path $licenseDir $lfsLicense.Name) -Force
-    }
 } finally {
     if (Test-Path $tempLfsDir) {
         Remove-Item -Recurse -Force $tempLfsDir
@@ -122,12 +115,32 @@ try {
 $cmdGit = Join-Path $gitStaging "cmd\git.exe"
 $binGit = Join-Path $gitStaging "$prefix\bin\git.exe"
 $binLfs = Join-Path $gitStaging "$prefix\bin\git-lfs.exe"
-$licenseTxt = Join-Path $gitStaging "LICENSE.txt"
+$systemConfig = Join-Path $gitStaging "etc\gitconfig"
 
-if (-not (Test-Path $cmdGit)) { throw "Assertion failed: missing $cmdGit" }
-if (-not (Test-Path $binGit)) { throw "Assertion failed: missing $binGit" }
-if (-not (Test-Path $binLfs)) { throw "Assertion failed: missing $binLfs" }
-if (-not (Test-Path $licenseTxt)) { throw "Assertion failed: missing $licenseTxt" }
+$requiredFiles = @(
+    $cmdGit,
+    $binGit,
+    $binLfs,
+    $systemConfig,
+    (Join-Path $gitStaging "LICENSE.txt"),
+    (Join-Path $gitStaging "etc\package-versions.txt"),
+    (Join-Path $gitStaging "usr\share\licenses\gcc-libs\COPYING3"),
+    (Join-Path $gitStaging "usr\share\licenses\openssh\LICENCE"),
+    (Join-Path $gitStaging "$prefix\doc\git-credential-manager\LICENSE")
+)
+foreach ($required in $requiredFiles) {
+    if (-not (Test-Path $required)) { throw "Assertion failed: missing $required" }
+}
+
+# Two settings the Git for Windows installer writes and MinGit's config lacks: Git Credential
+# Manager cannot sign in to a dev.azure.com URL without the path, and status is slower without the
+# file cache.
+[System.IO.File]::AppendAllText($systemConfig, "[core]`n`tfscache = true`n[credential `"https://dev.azure.com`"]`n`tuseHttpPath = true`n")
+
+$fscache = & $binGit config --system --get core.fscache
+if ($fscache -ne 'true') { throw "Assertion failed: core.fscache is '$fscache' in $systemConfig" }
+$useHttpPath = & $binGit config --system --get-urlmatch credential.useHttpPath https://dev.azure.com/org/project/_git/repo
+if ($useHttpPath -ne 'true') { throw "Assertion failed: credential.useHttpPath is '$useHttpPath' for dev.azure.com in $systemConfig" }
 
 Write-Host "Running smoke check for bundled git and git-lfs..."
 $gitVersionOut = & $cmdGit --version
