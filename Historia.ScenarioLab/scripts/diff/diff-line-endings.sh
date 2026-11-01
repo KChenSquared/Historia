@@ -48,7 +48,7 @@ lab_commit "$SCENARIO_LOCAL1" "chore: add line endings baseline files"
 # ── 5. Edit crlf/index-crlf.txt: 1 staged hunk, 2 unstaged hunks ──
 # Stage hunk at line 5 (pure CRLF)
 for i in $(seq -w 1 30); do
-    if [ "$i" -eq 5 ]; then
+    if [[ "$i" == 05 ]]; then
         printf "line %s STAGED CRLF\r\n" "$i"
     else
         printf "line %s with CRLF\r\n" "$i"
@@ -58,11 +58,11 @@ git -C "$SCENARIO_LOCAL1" add crlf/index-crlf.txt
 
 # Unstaged hunks at line 15 and line 25 (pure CRLF)
 for i in $(seq -w 1 30); do
-    if [ "$i" -eq 5 ]; then
+    if [[ "$i" == 05 ]]; then
         printf "line %s STAGED CRLF\r\n" "$i"
-    elif [ "$i" -eq 15 ]; then
+    elif [[ "$i" == 15 ]]; then
         printf "line %s UNSTAGED 1 CRLF\r\n" "$i"
-    elif [ "$i" -eq 25 ]; then
+    elif [[ "$i" == 25 ]]; then
         printf "line %s UNSTAGED 2 CRLF\r\n" "$i"
     else
         printf "line %s with CRLF\r\n" "$i"

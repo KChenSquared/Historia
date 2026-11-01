@@ -19,7 +19,7 @@ lab_begin() {
     )
 
     for var in "${required_vars[@]}"; do
-        if [ -z "${!var:-}" ]; then
+        if [[ -z "${!var:-}" ]]; then
             echo "[FAIL] Required environment variable '$var' is not set." >&2
             exit 1
         fi
@@ -28,7 +28,7 @@ lab_begin() {
     # 2. Verify that scratch directories are empty
     local check_dirs=("$SCENARIO_LOCAL1" "$SCENARIO_LOCAL2" "$SCENARIO_REMOTES")
     for dir in "${check_dirs[@]}"; do
-        if [ -d "$dir" ] && [ "$(ls -A "$dir" 2>/dev/null)" ]; then
+        if [[ -d "$dir" ]] && [[ -n "$(ls -A "$dir" 2>/dev/null)" ]]; then
             echo "[FAIL] Scratch folder '$dir' is not empty. Execute purges first." >&2
             exit 1
         fi
@@ -81,7 +81,7 @@ lab_clone() {
 _lab_ensure_git_dirs() {
     local target="$1"
     mkdir -p "$target/refs/heads" "$target/refs/tags" "$target/objects/info" "$target/objects/pack"
-    if [ -d "$target/modules" ]; then
+    if [[ -d "$target/modules" ]]; then
         find "$target/modules" -type d -name "refs" 2>/dev/null | while read -r d; do
             mkdir -p "$d/heads" "$d/tags"
         done
@@ -93,20 +93,20 @@ _lab_ensure_git_dirs() {
 
 lab_has_template() {
     local name="${1:-$SCENARIO_NAME}"
-    [ -d "$SCENARIO_TEMPLATES/$name" ]
+    [[ -d "$SCENARIO_TEMPLATES/$name" ]]
 }
 
 lab_use_template() {
     local name="${1:-$SCENARIO_NAME}"
     local tmpl_dir="$SCENARIO_TEMPLATES/$name"
 
-    if [ ! -d "$tmpl_dir" ]; then
+    if [[ ! -d "$tmpl_dir" ]]; then
         echo "[FAIL] Template '$name' not found at '$tmpl_dir'." >&2
         exit 1
     fi
 
     # 1. Bare mainRemote
-    if [ -d "$tmpl_dir/remote-git" ]; then
+    if [[ -d "$tmpl_dir/remote-git" ]]; then
         mkdir -p "$SCENARIO_REMOTES/mainRemote"
         cp -r "$tmpl_dir/remote-git/." "$SCENARIO_REMOTES/mainRemote/"
         _lab_ensure_git_dirs "$SCENARIO_REMOTES/mainRemote"
@@ -114,11 +114,11 @@ lab_use_template() {
 
     # 2. Submodule bare remotes (<sub>-git)
     for sub_dir in "$tmpl_dir"/*-git; do
-        if [ -d "$sub_dir" ]; then
+        if [[ -d "$sub_dir" ]]; then
             local base
             base="$(basename "$sub_dir")"
             local sub_name="${base%-git}"
-            if [ "$sub_name" != "local1" ] && [ "$sub_name" != "local2" ] && [ "$sub_name" != "remote" ]; then
+            if [[ "$sub_name" != "local1" ]] && [[ "$sub_name" != "local2" ]] && [[ "$sub_name" != "remote" ]]; then
                 mkdir -p "$SCENARIO_REMOTES/$sub_name"
                 cp -r "$sub_dir/." "$SCENARIO_REMOTES/$sub_name/"
                 _lab_ensure_git_dirs "$SCENARIO_REMOTES/$sub_name"
@@ -127,7 +127,7 @@ lab_use_template() {
     done
 
     # 3. Local 1
-    if [ -d "$tmpl_dir/local1-git" ]; then
+    if [[ -d "$tmpl_dir/local1-git" ]]; then
         mkdir -p "$SCENARIO_LOCAL1/.git"
         cp -r "$tmpl_dir/local1-git/." "$SCENARIO_LOCAL1/.git/"
         _lab_ensure_git_dirs "$SCENARIO_LOCAL1/.git"
@@ -139,7 +139,7 @@ lab_use_template() {
     fi
 
     # 4. Local 2
-    if [ -d "$tmpl_dir/local2-git" ]; then
+    if [[ -d "$tmpl_dir/local2-git" ]]; then
         mkdir -p "$SCENARIO_LOCAL2/.git"
         cp -r "$tmpl_dir/local2-git/." "$SCENARIO_LOCAL2/.git/"
         _lab_ensure_git_dirs "$SCENARIO_LOCAL2/.git"
@@ -159,7 +159,7 @@ _lab_clean_git_copy() {
 }
 
 lab_save_template() {
-    if [ "${SCENARIO_HEADLESS:-0}" = "1" ]; then
+    if [[ "${SCENARIO_HEADLESS:-0}" = "1" ]]; then
         echo "[INFO] headless run: template not saved"
         return 0
     fi
@@ -169,13 +169,13 @@ lab_save_template() {
     mkdir -p "$out_dir"
 
     # Save Remotes (mainRemote -> remote-git, <sub> -> <sub>-git)
-    if [ -d "$SCENARIO_REMOTES" ]; then
+    if [[ -d "$SCENARIO_REMOTES" ]]; then
         for r_dir in "$SCENARIO_REMOTES"/*; do
-            if [ -d "$r_dir" ]; then
+            if [[ -d "$r_dir" ]]; then
                 local r_name
                 r_name="$(basename "$r_dir")"
                 local target_name
-                if [ "$r_name" = "mainRemote" ]; then
+                if [[ "$r_name" = "mainRemote" ]]; then
                     target_name="remote-git"
                 else
                     target_name="${r_name}-git"
@@ -192,7 +192,7 @@ lab_save_template() {
     fi
 
     # Save Local 1 (Local1/.git -> local1-git)
-    if [ -d "$SCENARIO_LOCAL1/.git" ]; then
+    if [[ -d "$SCENARIO_LOCAL1/.git" ]]; then
         git -C "$SCENARIO_LOCAL1" pack-refs --all 2>/dev/null || true
         local dest="$out_dir/local1-git"
         rm -rf "$dest"
@@ -204,7 +204,7 @@ lab_save_template() {
     fi
 
     # Save Local 2 (Local2/.git -> local2-git)
-    if [ -d "$SCENARIO_LOCAL2/.git" ]; then
+    if [[ -d "$SCENARIO_LOCAL2/.git" ]]; then
         git -C "$SCENARIO_LOCAL2" pack-refs --all 2>/dev/null || true
         local dest="$out_dir/local2-git"
         rm -rf "$dest"
@@ -218,7 +218,7 @@ lab_save_template() {
     # Check for ignored files (F8)
     local ignored
     ignored="$(git -C "$SCENARIO_ROOT" status --ignored --porcelain "$out_dir" 2>/dev/null | grep '^!!' || true)"
-    if [ -n "$ignored" ]; then
+    if [[ -n "$ignored" ]]; then
         echo "[WARN] Ignored files detected in saved template '$name':" >&2
         echo "$ignored" >&2
     fi
@@ -247,7 +247,7 @@ lab_pin_config() {
     # affected by user-specific or system-wide git configuration.
     git -C "$dir" config core.autocrlf false
     git -C "$dir" config merge.conflictStyle merge
-    while [ "$#" -ge 2 ]; do
+    while [[ "$#" -ge 2 ]]; do
         git -C "$dir" config "$1" "$2"
         shift 2
     done
@@ -265,7 +265,7 @@ lab_expect_conflict() {
     printf '%s\n' "$out"
     local unmerged
     unmerged="$(git -C "$dir" ls-files -u 2>/dev/null || true)"
-    if [ -z "$unmerged" ]; then
+    if [[ -z "$unmerged" ]]; then
         echo "[FAIL] $desc: expected conflict, but ls-files -u was empty (exit code $status)" >&2
         exit 1
     fi
@@ -289,7 +289,7 @@ lab_count_markers() {
     local size="${3:-7}"
     local enc="${4:-}"
     local input_cmd="cat \"$file\""
-    if [ -n "$enc" ]; then
+    if [[ -n "$enc" ]]; then
         input_cmd="iconv -f \"$enc\" -t UTF-8 \"$file\""
     fi
     eval "$input_cmd" | awk -v ch="$char" -v n="$size" '
@@ -316,7 +316,7 @@ _lab_resolve_git_dir() {
     local dir="$1"
     local git_dir
     git_dir="$(git -C "$dir" rev-parse --git-dir 2>/dev/null || true)"
-    if [ -n "$git_dir" ]; then
+    if [[ -n "$git_dir" ]]; then
         if [[ "$git_dir" != /* && "$git_dir" != [A-Za-z]:* ]]; then
             git_dir="$dir/$git_dir"
         fi
@@ -328,20 +328,20 @@ _lab_detect_op() {
     local dir="$1"
     local git_dir
     git_dir="$(_lab_resolve_git_dir "$dir")"
-    if [ -z "$git_dir" ] || [ ! -d "$git_dir" ]; then
+    if [[ -z "$git_dir" ]] || [[ ! -d "$git_dir" ]]; then
         echo "none"
         return 0
     fi
 
-    if [ -d "$git_dir/rebase-merge" ] || [ -d "$git_dir/rebase-apply" ]; then
+    if [[ -d "$git_dir/rebase-merge" ]] || [[ -d "$git_dir/rebase-apply" ]]; then
         echo "rebase"
-    elif [ -f "$git_dir/CHERRY_PICK_HEAD" ]; then
+    elif [[ -f "$git_dir/CHERRY_PICK_HEAD" ]]; then
         echo "cherry-pick"
-    elif [ -f "$git_dir/REVERT_HEAD" ]; then
+    elif [[ -f "$git_dir/REVERT_HEAD" ]]; then
         echo "revert"
-    elif [ -f "$git_dir/MERGE_HEAD" ]; then
+    elif [[ -f "$git_dir/MERGE_HEAD" ]]; then
         echo "merge"
-    elif [ -f "$git_dir/BISECT_LOG" ]; then
+    elif [[ -f "$git_dir/BISECT_LOG" ]]; then
         echo "bisect"
     else
         echo "none"
@@ -353,7 +353,7 @@ lab_assert_op() {
     local expected="$2"
     local actual
     actual="$(_lab_detect_op "$dir")"
-    if [ "$actual" != "$expected" ]; then
+    if [[ "$actual" != "$expected" ]]; then
         echo "[FAIL] Expected operation state '$expected' in '$dir', but got '$actual'" >&2
         exit 1
     fi
@@ -383,7 +383,7 @@ lab_gen_lines() {
 _lab_report_local() {
     local label="$1"
     local dir="$2"
-    if [ -d "$dir/.git" ]; then
+    if [[ -d "$dir/.git" ]]; then
         local op
         op="$(_lab_detect_op "$dir")"
         echo "[$label Operation State: $op]"
@@ -397,21 +397,21 @@ lab_done() {
     echo ""
     echo "── ScenarioLab Result Summary ──"
 
-    if [ -d "$SCENARIO_LOCAL1/.git" ]; then
+    if [[ -d "$SCENARIO_LOCAL1/.git" ]]; then
         echo "[Local 1 Log]"
         git -C "$SCENARIO_LOCAL1" log --oneline --graph --all -n 15 || true
         echo ""
     fi
 
-    if [ -d "$SCENARIO_LOCAL2/.git" ]; then
+    if [[ -d "$SCENARIO_LOCAL2/.git" ]]; then
         echo "[Local 2 Log]"
         git -C "$SCENARIO_LOCAL2" log --oneline --graph --all -n 15 || true
         echo ""
     fi
 
-    if [ -d "$SCENARIO_REMOTES" ]; then
+    if [[ -d "$SCENARIO_REMOTES" ]]; then
         for r in "$SCENARIO_REMOTES"/*; do
-            if [ -d "$r" ]; then
+            if [[ -d "$r" ]]; then
                 local r_name
                 r_name="$(basename "$r")"
                 echo "[Remote: $r_name Log]"

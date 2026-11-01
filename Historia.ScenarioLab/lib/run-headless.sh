@@ -13,7 +13,7 @@ KEEP=0
 LINT_ONLY=0
 PATHS=()
 
-while [ "$#" -gt 0 ]; do
+while [[ "$#" -gt 0 ]]; do
     case "$1" in
         --twice)
             TWICE=1
@@ -34,7 +34,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-if [ "${#PATHS[@]}" -eq 0 ]; then
+if [[ "${#PATHS[@]}" -eq 0 ]]; then
     PATHS=("$SCENARIO_ROOT/scripts")
 fi
 
@@ -42,16 +42,16 @@ fi
 SCRIPT_FILES=()
 for p in "${PATHS[@]}"; do
     target="$p"
-    if [ ! -e "$target" ] && [ -e "$SCENARIO_ROOT/$p" ]; then
+    if [[ ! -e "$target" ]] && [[ -e "$SCENARIO_ROOT/$p" ]]; then
         target="$SCENARIO_ROOT/$p"
     fi
 
-    if [ -d "$target" ]; then
+    if [[ -d "$target" ]]; then
         abs_dir="$(cd "$target" && pwd)"
         while IFS= read -r f; do
-            [ -n "$f" ] && SCRIPT_FILES+=("$f")
+            [[ -n "$f" ]] && SCRIPT_FILES+=("$f")
         done < <(find "$abs_dir" -type f -name "*.sh" | sort)
-    elif [ -f "$target" ]; then
+    elif [[ -f "$target" ]]; then
         abs_file="$(cd "$(dirname "$target")" && pwd)/$(basename "$target")"
         SCRIPT_FILES+=("$abs_file")
     else
@@ -60,18 +60,18 @@ for p in "${PATHS[@]}"; do
     fi
 done
 
-if [ "${#SCRIPT_FILES[@]}" -eq 0 ]; then
+if [[ "${#SCRIPT_FILES[@]}" -eq 0 ]]; then
     echo "[WARN] No scenario scripts found."
     exit 0
 fi
 
 # Build tree-wide basename index under scripts/ to check uniqueness
 declare -A ALL_SCRIPTS_MAP
-if [ -d "$SCENARIO_ROOT/scripts" ]; then
+if [[ -d "$SCENARIO_ROOT/scripts" ]]; then
     while IFS= read -r f; do
-        if [ -n "$f" ]; then
+        if [[ -n "$f" ]]; then
             base="$(basename "$f" .sh)"
-            if [ -n "${ALL_SCRIPTS_MAP[$base]:-}" ]; then
+            if [[ -n "${ALL_SCRIPTS_MAP[$base]:-}" ]]; then
                 ALL_SCRIPTS_MAP["$base"]="${ALL_SCRIPTS_MAP[$base]}|$f"
             else
                 ALL_SCRIPTS_MAP["$base"]="$f"
@@ -96,7 +96,7 @@ lint_single_script() {
     # Line 1: shebang
     local line1
     line1="$(head -n 1 "$script" | tr -d '\r')"
-    if [ "$line1" != "#!/usr/bin/env bash" ]; then
+    if [[ "$line1" != "#!/usr/bin/env bash" ]]; then
         errs+=("Line 1 must be '#!/usr/bin/env bash' (got: '$line1')")
     fi
 
@@ -109,7 +109,7 @@ lint_single_script() {
         local text="${line2#\# @short:}"
         # trim leading whitespace
         text="${text#"${text%%[![:space:]]*}"}"
-        if [ "${#text}" -gt 72 ]; then
+        if [[ "${#text}" -gt 72 ]]; then
             errs+=("# @short: text length (${#text}) exceeds 72 characters: '$text'")
         fi
     fi
@@ -132,7 +132,7 @@ lint_single_script() {
     if [[ "$base" == _* ]]; then
         errs+=("Basename '$base' cannot start with an underscore")
     fi
-    if [ -n "${ALL_SCRIPTS_MAP[$base]:-}" ] && [[ "${ALL_SCRIPTS_MAP[$base]}" == *"|"* ]]; then
+    if [[ -n "${ALL_SCRIPTS_MAP[$base]:-}" ]] && [[ "${ALL_SCRIPTS_MAP[$base]}" == *"|"* ]]; then
         errs+=("Basename '$base' is not unique under scripts/: ${ALL_SCRIPTS_MAP[$base]}")
     fi
 
@@ -140,10 +140,10 @@ lint_single_script() {
     if grep -U -q $'\r' "$script"; then
         errs+=("File contains carriage return (CR) bytes")
     fi
-    if [ "$(head -c 3 "$script")" = "$(printf '\xef\xbb\xbf')" ]; then
+    if [[ "$(head -c 3 "$script")" = "$(printf '\xef\xbb\xbf')" ]]; then
         errs+=("File contains a UTF-8 BOM")
     fi
-    if [ "$(wc -c < "$script")" -ne "$(tr -d '\0' < "$script" | wc -c)" ]; then
+    if [[ "$(wc -c < "$script")" -ne "$(tr -d '\0' < "$script" | wc -c)" ]]; then
         errs+=("File contains NUL bytes")
     fi
 
@@ -157,14 +157,14 @@ lint_single_script() {
         errs+=("File calls lab_save_template")
     fi
     while IFS= read -r match; do
-        if [ -n "$match" ]; then
+        if [[ -n "$match" ]]; then
             if ! [[ "$match" =~ ^[[:space:]]*lab_use_template[[:space:]]+_base([[:space:]]|$) ]]; then
                 errs+=("Illegal lab_use_template call (only 'lab_use_template _base' allowed): '$match'")
             fi
         fi
     done < <(grep -E '^[[:space:]]*lab_use_template' "$script" || true)
 
-    if [ "${#errs[@]}" -gt 0 ]; then
+    if [[ "${#errs[@]}" -gt 0 ]]; then
         echo "[LINT FAIL] $rel" >&2
         for e in "${errs[@]}"; do
             echo "  - $e" >&2
@@ -179,8 +179,8 @@ for s in "${SCRIPT_FILES[@]}"; do
     lint_single_script "$s" || true
 done
 
-if [ "$LINT_ONLY" -eq 1 ]; then
-    if [ "$LINT_ERRORS" -gt 0 ]; then
+if [[ "$LINT_ONLY" -eq 1 ]]; then
+    if [[ "$LINT_ERRORS" -gt 0 ]]; then
         echo "Lint failed with $LINT_ERRORS error(s)." >&2
         exit 1
     fi
@@ -188,7 +188,7 @@ if [ "$LINT_ONLY" -eq 1 ]; then
     exit 0
 fi
 
-if [ "$LINT_ERRORS" -gt 0 ]; then
+if [[ "$LINT_ERRORS" -gt 0 ]]; then
     echo "Aborting run due to $LINT_ERRORS lint error(s)." >&2
     exit 1
 fi
@@ -204,11 +204,11 @@ generate_fingerprint() {
     local fp_file="$2"
 
     local repos=()
-    if [ -d "$sandbox/local1" ]; then repos+=("$sandbox/local1"); fi
-    if [ -d "$sandbox/local2" ]; then repos+=("$sandbox/local2"); fi
-    if [ -d "$sandbox/remotes" ]; then
+    if [[ -d "$sandbox/local1" ]]; then repos+=("$sandbox/local1"); fi
+    if [[ -d "$sandbox/local2" ]]; then repos+=("$sandbox/local2"); fi
+    if [[ -d "$sandbox/remotes" ]]; then
         for r in "$sandbox/remotes"/*; do
-            if [ -d "$r" ]; then repos+=("$r"); fi
+            if [[ -d "$r" ]]; then repos+=("$r"); fi
         done
     fi
 
@@ -217,33 +217,33 @@ generate_fingerprint() {
         echo "=== REPO: $rel_name ===" >> "$fp_file"
         git -C "$r" for-each-ref --format='%(refname) %(objectname)' 2>/dev/null | sort >> "$fp_file" || true
         (git -C "$r" rev-parse HEAD 2>/dev/null || echo "HEAD: empty") >> "$fp_file"
-        if [ -d "$r/.git" ]; then
+        if [[ -d "$r/.git" ]]; then
             git -C "$r" ls-files -s 2>/dev/null | sort >> "$fp_file" || true
             git -C "$r" status --porcelain=v1 2>/dev/null >> "$fp_file" || true
         fi
 
         local gdir
         gdir="$(git -C "$r" rev-parse --git-dir 2>/dev/null || true)"
-        if [ -n "$gdir" ]; then
+        if [[ -n "$gdir" ]]; then
             if [[ "$gdir" != /* && "$gdir" != [A-Za-z]:* ]]; then
                 gdir="$r/$gdir"
             fi
         fi
-        if [ -n "$gdir" ] && [ -d "$gdir" ]; then
+        if [[ -n "$gdir" ]] && [[ -d "$gdir" ]]; then
             for sf in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD REBASE_HEAD rebase-merge/msgnum BISECT_LOG; do
-                if [ -f "$gdir/$sf" ]; then
+                if [[ -f "$gdir/$sf" ]]; then
                     echo "[$sf]" >> "$fp_file"
                     cat "$gdir/$sf" >> "$fp_file"
                 fi
             done
         fi
 
-        if [ -d "$r/.git" ]; then
+        if [[ -d "$r/.git" ]]; then
             (
                 cd "$r"
                 find . -name '.git' -prune -o -type f -print | sort | while read -r f; do
                     rel="${f#./}"
-                    sha="$(sha1sum "$f" | awk '{print $1}')"
+                    sha="$(sha256sum "$f" | awk '{print $1}')"
                     echo "$sha  $rel"
                 done
             ) >> "$fp_file"
@@ -290,7 +290,7 @@ run_in_sandbox() {
 
 cleanup_sandbox() {
     local sb="$1"
-    if [ "$KEEP" -eq 1 ]; then
+    if [[ "$KEEP" -eq 1 ]]; then
         echo "[INFO] Kept sandbox: $sb"
     else
         rm -rf "$sb"
@@ -304,7 +304,7 @@ for script in "${SCRIPT_FILES[@]}"; do
         rel_path="${script#$SCENARIO_ROOT/}"
     fi
 
-    if [ "$TWICE" -eq 1 ]; then
+    if [[ "$TWICE" -eq 1 ]]; then
         sb1="$(mktemp -d)"
         sb2="$(mktemp -d)"
 
@@ -313,7 +313,7 @@ for script in "${SCRIPT_FILES[@]}"; do
         code1=$?
         set -e
 
-        if [ "$code1" -eq 3 ]; then
+        if [[ "$code1" -eq 3 ]]; then
             skip_msg="$(tail -n 5 "$sb1/output.log" | grep '\[SKIP\]' | head -n 1 || echo "[SKIP]")"
             echo "SKIP: $rel_path ($skip_msg)"
             SKIP_COUNT=$(( SKIP_COUNT + 1 ))
@@ -322,7 +322,7 @@ for script in "${SCRIPT_FILES[@]}"; do
             continue
         fi
 
-        if [ "$code1" -ne 0 ]; then
+        if [[ "$code1" -ne 0 ]]; then
             echo "FAIL: $rel_path (run 1 exited with code $code1)" >&2
             tail -n 40 "$sb1/output.log" >&2
             FAIL_COUNT=$(( FAIL_COUNT + 1 ))
@@ -336,7 +336,7 @@ for script in "${SCRIPT_FILES[@]}"; do
         code2=$?
         set -e
 
-        if [ "$code2" -ne 0 ]; then
+        if [[ "$code2" -ne 0 ]]; then
             echo "FAIL: $rel_path (run 2 exited with code $code2)" >&2
             tail -n 40 "$sb2/output.log" >&2
             FAIL_COUNT=$(( FAIL_COUNT + 1 ))
@@ -368,10 +368,10 @@ for script in "${SCRIPT_FILES[@]}"; do
         code=$?
         set -e
 
-        if [ "$code" -eq 0 ]; then
+        if [[ "$code" -eq 0 ]]; then
             echo "PASS: $rel_path"
             PASS_COUNT=$(( PASS_COUNT + 1 ))
-        elif [ "$code" -eq 3 ]; then
+        elif [[ "$code" -eq 3 ]]; then
             skip_msg="$(tail -n 5 "$sb/output.log" | grep '\[SKIP\]' | head -n 1 || echo "[SKIP]")"
             echo "SKIP: $rel_path ($skip_msg)"
             SKIP_COUNT=$(( SKIP_COUNT + 1 ))
@@ -388,7 +388,7 @@ done
 echo ""
 echo "PASS $PASS_COUNT · SKIP $SKIP_COUNT · FAIL $FAIL_COUNT"
 
-if [ "$FAIL_COUNT" -gt 0 ]; then
+if [[ "$FAIL_COUNT" -gt 0 ]]; then
     exit 1
 fi
 exit 0
