@@ -1555,7 +1555,7 @@ public sealed partial class CommitGraphControl : Control
                                 InvalidateMeasure();
                                 InvalidateArrange(); // lane count can grow -> auto Graph width
                                 InvalidateVisual();
-                            }, quiet ? DispatcherPriority.Background : DispatcherPriority.Default);
+                            }, quiet ? DispatcherPriority.Background : DispatcherPriority.Default, CancellationToken.None);
                         }
                         req.Completion?.TrySetResult();
                     }
