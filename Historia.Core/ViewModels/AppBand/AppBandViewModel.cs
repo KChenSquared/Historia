@@ -436,7 +436,7 @@ public sealed partial class AppBandViewModel : ViewModelBase
         try
         {
             _workspace.Focus(context);
-            await _terminals.OpenOrFocusAsync(RepoTerminalOrigin.For(context));
+            await _terminals.OpenOrFocusAsync(RepoTerminalOrigin.For(context), CancellationToken.None);
         }
         catch (Exception ex)
         {

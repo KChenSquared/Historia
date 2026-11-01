@@ -262,7 +262,7 @@ public sealed partial class CommitDetailViewModel : ViewModelBase
 
         try
         {
-            await _settings.UpdateAsync(s => s with { CommitFilesView = mode });
+            await _settings.UpdateAsync(s => s with { CommitFilesView = mode }, CancellationToken.None);
         }
         catch (Exception ex)
         {

@@ -257,7 +257,7 @@ public sealed class AtomicFileWriter : IAsyncDisposable
         try
         {
             using (Historia.Diagnostics.PerfLog.Scope($"AtomicFileWriter FlushAsync ({System.IO.Path.GetFileName(FilePath)})"))
-                await FlushAsync().ConfigureAwait(false);
+                await FlushAsync(CancellationToken.None).ConfigureAwait(false);
         }
         catch
         {

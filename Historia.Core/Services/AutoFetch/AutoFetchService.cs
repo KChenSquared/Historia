@@ -73,7 +73,7 @@ public sealed class AutoFetchService : IAutoFetchService
             _started = true;
             _runCts = new CancellationTokenSource();
             var ct = _runCts.Token;
-            _loop = Task.Run(() => RunAsync(ct));
+            _loop = Task.Run(() => RunAsync(ct), CancellationToken.None);
         }
     }
 
@@ -88,7 +88,7 @@ public sealed class AutoFetchService : IAutoFetchService
             run = _runCts;
             _runCts = null;
             _cycleCts?.Cancel();
-            _firstRepo?.TrySetCanceled();
+            _firstRepo?.TrySetCanceled(CancellationToken.None);
         }
 
         try { run?.Cancel(); }

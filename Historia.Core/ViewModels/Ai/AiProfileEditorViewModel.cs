@@ -346,7 +346,7 @@ public sealed partial class AiProfileEditorViewModel : ViewModelBase
     private Task CommitAsync(Func<AiServiceProfile, AiServiceProfile> mutate)
     {
         ModelNote = null;
-        var task = _profiles.UpdateAsync(Id, mutate);
+        var task = _profiles.UpdateAsync(Id, mutate, CancellationToken.None);
         if (_profiles.Profiles.FirstOrDefault(p => p.Id == Id) is { } saved)
             Snapshot = saved;
         _committed();

@@ -154,7 +154,7 @@ public sealed partial class StagingPanelViewModel
     {
         try
         {
-            await _aiProfiles!.UpdateAsync(profileId, p => p with { Model = model });
+            await _aiProfiles!.UpdateAsync(profileId, p => p with { Model = model }, CancellationToken.None);
         }
         catch (Exception ex)
         {

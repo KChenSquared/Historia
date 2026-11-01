@@ -66,7 +66,7 @@ public sealed partial class CmdrQueueViewModel : ViewModelBase
         var newestFirst = !NewestFirst;
         NewestFirst = newestFirst;
         Sync();
-        return _settings.UpdateAsync(s => s with { CmdrQueueNewestFirst = newestFirst });
+        return _settings.UpdateAsync(s => s with { CmdrQueueNewestFirst = newestFirst }, CancellationToken.None);
     }
 
     /// <summary>Removes the item from the queue. No confirmation: the item is only a pointer.</summary>

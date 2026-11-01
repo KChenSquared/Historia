@@ -163,7 +163,7 @@ public sealed partial class DiffViewModel : ViewModelBase
 
         try
         {
-            await _settings.UpdateAsync(s => s with { DefaultDiffView = mode });
+            await _settings.UpdateAsync(s => s with { DefaultDiffView = mode }, CancellationToken.None);
         }
         catch (Exception ex)
         {
@@ -219,7 +219,7 @@ public sealed partial class DiffViewModel : ViewModelBase
     {
         LastModelCreationThreadId = Environment.CurrentManagedThreadId;
         return DiffDisplayModel.Create(diff);
-    });
+    }, CancellationToken.None);
 
     // Moves the body to the state the loaded diff calls for: a message for a diff that cannot be
     // shown, otherwise the presenters.
