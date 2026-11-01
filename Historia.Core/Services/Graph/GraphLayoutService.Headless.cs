@@ -77,7 +77,7 @@ public sealed partial class GraphLayoutService
     {
         await RunHeadlessCacheCoreAsync(context, query, ct).ConfigureAwait(false);
         // The job ran to its end (not cancelled by focus or close): check the commit-graph too.
-        _backgroundWriter?.EnsureCurrent(context);
+        _backgroundWriter?.QueueCommitGraphCheck(context);
     }
 
     private async Task RunHeadlessCacheCoreAsync(RepositoryContext context, GraphQuery query, CancellationToken ct)

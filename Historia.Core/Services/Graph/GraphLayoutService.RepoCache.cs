@@ -177,11 +177,11 @@ public sealed partial class GraphLayoutService
                 return;
             _ = Task.Run(async () =>
             {
-                await WalkLock.WaitAsync().ConfigureAwait(false);
+                await WalkLock.WaitAsync(CancellationToken.None).ConfigureAwait(false);
                 try { walk.Dispose(); }
                 catch { /* best effort */ }
                 finally { WalkLock.Release(); }
-            });
+            }, CancellationToken.None);
         }
 
         /// <summary>The ids of rows <c>[0, n)</c> when they came from a proven prefix walk (see

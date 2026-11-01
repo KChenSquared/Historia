@@ -6,7 +6,7 @@ namespace Historia.Services.Graph;
 /// never fans out several concurrent <c>git commit-graph write</c> invocations, nor several
 /// concurrent headless walks, at once:
 /// <list type="bullet">
-/// <item><b>Keeping a repository's commit-graph current</b> (<see cref="EnsureCurrent"/>) — every
+/// <item><b>Keeping a repository's commit-graph current</b> (<see cref="QueueCommitGraphCheck"/>) — every
 /// repository, whatever its size, always. A missing graph (no <c>commit-graph</c> file and no
 /// <c>commit-graphs/</c> chain in the <i>common</i> directory's <c>objects/info</c>, so a linked
 /// worktree sees the shared one) gets a full <c>--reachable</c> write. A stale graph (a ref tip —
@@ -175,7 +175,7 @@ internal sealed class GraphBackgroundWriter(IGitCliService cli, IBackgroundWorkG
             if (!_pumping)
             {
                 _pumping = true;
-                _ = Task.Run(DrainInactiveQueueAsync);
+                _ = Task.Run(DrainInactiveQueueAsync, CancellationToken.None);
             }
         }
     }
@@ -315,9 +315,10 @@ internal sealed class GraphBackgroundWriter(IGitCliService cli, IBackgroundWorkG
     /// Fire-and-forget: brings <paramref name="context"/>'s commit-graph up to date once the gate
     /// opens — writes a missing graph, refreshes a stale or unusable one with <c>--split</c>, or
     /// does nothing when it already holds every ref tip or this ref state was already checked.
-    /// Safe to call as often as triggers fire.
+    /// Safe to call as often as triggers fire. Trap: awaiting the check from a layout stalls first
+    /// paint, because the check waits for the gate that opens after it.
     /// </summary>
-    public void EnsureCurrent(RepositoryContext context)
+    public void QueueCommitGraphCheck(RepositoryContext context)
     {
         if (!cli.IsGitAvailable)
             return;
@@ -326,13 +327,13 @@ internal sealed class GraphBackgroundWriter(IGitCliService cli, IBackgroundWorkG
         {
             try { await EnsureCurrentAsync(context).ConfigureAwait(false); }
             finally { Interlocked.Decrement(ref _pendingChecks); }
-        });
+        }, CancellationToken.None);
     }
 
-    /// <summary>Test seam: checks queued by <see cref="EnsureCurrent"/> that haven't finished.</summary>
+    /// <summary>Test seam: checks queued by <see cref="QueueCommitGraphCheck"/> that haven't finished.</summary>
     internal int PendingChecksForTesting => Volatile.Read(ref _pendingChecks);
 
-    /// <summary>The work behind <see cref="EnsureCurrent"/>; completes when the check (and any
+    /// <summary>The work behind <see cref="QueueCommitGraphCheck"/>; completes when the check (and any
     /// write it started) is done, or when the tab closed before its turn. Never throws.</summary>
     internal async Task EnsureCurrentAsync(RepositoryContext context)
     {
@@ -462,7 +463,7 @@ internal sealed class GraphBackgroundWriter(IGitCliService cli, IBackgroundWorkG
     /// Writes a commit-graph for a newly cloned repository ahead of the background gate. If
     /// cancelled before acquiring <see cref="_serial"/>, the write is skipped; once the git
     /// process starts it runs to the end. Records the clone's ref state, so the first
-    /// <see cref="EnsureCurrent"/> after it does not write again.
+    /// <see cref="QueueCommitGraphCheck"/> after it does not write again.
     /// </summary>
     public async Task WriteForCloneAsync(RepositoryContext context, CancellationToken ct)
     {
@@ -483,8 +484,8 @@ internal sealed class GraphBackgroundWriter(IGitCliService cli, IBackgroundWorkG
     }
 
     /// <summary>Fire-and-forget commit-graph check after a successful fetch, pull or push — the
-    /// same check as <see cref="EnsureCurrent"/>.</summary>
-    public void RefreshAfterFetch(RepositoryContext context) => EnsureCurrent(context);
+    /// same check as <see cref="QueueCommitGraphCheck"/>.</summary>
+    public void RefreshAfterFetch(RepositoryContext context) => QueueCommitGraphCheck(context);
 
     /// <summary>True when the repository's common directory holds a commit-graph — the single
     /// <c>objects/info/commit-graph</c> file or a <c>commit-graphs/commit-graph-chain</c> — so a

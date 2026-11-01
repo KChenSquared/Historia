@@ -209,7 +209,7 @@ public sealed partial class GraphLayoutService
                 {
                     await WaitForGateAsync(CancellationToken.None).ConfigureAwait(false);
                     _walkCache.Save(repoPath, query, walkKeyToSave, exhausted, commits, decos);
-                });
+                }, CancellationToken.None);
         }
     }
 
@@ -436,7 +436,7 @@ public sealed partial class GraphLayoutService
                     WalkKey: prep.WalkKey, CarriesRefState: false);
 
             var stream = await Task.Run(() => GitLogStream.TryStart(
-                _locator, context.RepositoryPath, prep.Tips!, context.ActiveProfile, query.PathFilter)).ConfigureAwait(false);
+                _locator, context.RepositoryPath, prep.Tips!, context.ActiveProfile, query.PathFilter), CancellationToken.None).ConfigureAwait(false);
 
             if (stream is null)
             {
@@ -604,7 +604,7 @@ public sealed partial class GraphLayoutService
 
         try
         {
-            if (await cache.WalkLock.WaitAsync(RetireWalkLockTimeoutMs).ConfigureAwait(false))
+            if (await cache.WalkLock.WaitAsync(RetireWalkLockTimeoutMs, CancellationToken.None).ConfigureAwait(false))
             {
                 try
                 {

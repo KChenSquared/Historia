@@ -167,6 +167,25 @@ public sealed class GraphBackgroundWriterTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task QueueCommitGraphCheck_returns_before_the_gate_opens()
+    {
+        var gate = new BlockingGate();
+        var cli = new RecordingGitCliService();
+        var writer = new GraphBackgroundWriter(cli, gate);
+        await using var ctx = _host.Open(_repo.Path);
+
+        writer.QueueCommitGraphCheck(ctx);
+        Assert.Equal(1, writer.PendingChecksForTesting);
+        await Task.Delay(100);
+        Assert.Empty(cli.Requests);
+
+        gate.Open();
+        await WaitForAsync(() => writer.PendingChecksForTesting == 0);
+        Assert.Equal(0, writer.PendingChecksForTesting);
+        Assert.Single(cli.Requests);
+    }
+
+    [Fact]
     public async Task Commit_graph_writes_run_with_an_uncancellable_token()
     {
         var cli = new TokenRecordingGitCliService();
