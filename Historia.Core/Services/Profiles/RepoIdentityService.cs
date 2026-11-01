@@ -44,7 +44,7 @@ public sealed class RepoIdentityService(IGitCliService cli) : IRepoIdentityServi
                     if (previous is not null)
                         await Task.WhenAny(previous).ConfigureAwait(false);
                     return await ResolveCoreAsync(context, token).ConfigureAwait(false);
-                });
+                }, CancellationToken.None);
                 _inFlight.Add(context, shared);
                 var started = shared;
                 _ = started.Task.ContinueWith(t =>

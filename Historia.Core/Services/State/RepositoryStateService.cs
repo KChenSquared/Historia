@@ -391,7 +391,7 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
 
             _lastIndexStatRefreshAt = now;
             var operationsAtStart = _context.CompletedOperations;
-            _indexStatRefresh = Task.Run(() => RunIndexStatRefreshAsync(operationsAtStart));
+            _indexStatRefresh = Task.Run(() => RunIndexStatRefreshAsync(operationsAtStart), CancellationToken.None);
         }
     }
 
@@ -721,8 +721,10 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
 
             // Off the caller's thread: a run started inline would execute the work's synchronous
             // prefix (process start, file probes) on the UI thread of a UI-originated refresh.
+            // Trap: Task.Run takes no ct. The pump is shared, so one caller's cancelled token
+            // would stop it starting and strand every other waiter.
             if (start)
-                _ = Task.Run(() => PumpAsync(work));
+                _ = Task.Run(() => PumpAsync(work), CancellationToken.None);
             return WaitAsync(run, ct);
         }
 

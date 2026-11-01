@@ -26,7 +26,7 @@ public sealed partial class WorkspaceService
             }
         }
         if (startPump)
-            _ = Task.Run(DrainBackgroundInitQueueAsync);
+            _ = Task.Run(DrainBackgroundInitQueueAsync, CancellationToken.None);
     }
 
     /// <inheritdoc/>
@@ -88,7 +88,7 @@ public sealed partial class WorkspaceService
         }
 
         if (startPump)
-            _ = Task.Run(DrainBackgroundInitQueueAsync);
+            _ = Task.Run(DrainBackgroundInitQueueAsync, CancellationToken.None);
 
         // Start the focused tab's refresh outside the lock — RefreshAllAsync/RefreshStatusAsync
         // run synchronously up to their first await, and _sync must be held only across queue
@@ -203,9 +203,9 @@ public sealed partial class WorkspaceService
         }
 
         if (active)
-            _ = Task.Run(RefreshFocusedOnActivationAsync);
+            _ = Task.Run(RefreshFocusedOnActivationAsync, CancellationToken.None);
         if (collect)
-            IdleCollectTask = Task.Run(CollectGarbageNow);
+            IdleCollectTask = Task.Run(CollectGarbageNow, CancellationToken.None);
     }
 
     /// <summary>The focused tab's status right away, ignoring pacing — and a full refresh when its
@@ -284,7 +284,7 @@ public sealed partial class WorkspaceService
         }
         catch (OperationCanceledException)
         {
-            satisfies?.Done.TrySetCanceled();
+            satisfies?.Done.TrySetCanceled(CancellationToken.None);
             throw;
         }
         catch (Exception ex)
@@ -415,7 +415,7 @@ public sealed partial class WorkspaceService
                 _bgQueue.Remove(next);
                 if (!_open.Contains(next.Context))
                 {
-                    foreach (var a in next.Awaiters) a.TrySetCanceled();
+                    foreach (var a in next.Awaiters) a.TrySetCanceled(CancellationToken.None);
                     continue; // closed while queued
                 }
             }
@@ -441,7 +441,7 @@ public sealed partial class WorkspaceService
             }
             catch (OperationCanceledException)
             {
-                foreach (var a in next.Awaiters) a.TrySetCanceled();
+                foreach (var a in next.Awaiters) a.TrySetCanceled(CancellationToken.None);
             }
             catch (Exception ex)
             {
@@ -545,7 +545,7 @@ public sealed partial class WorkspaceService
         try { toCancel?.Cancel(); } catch (ObjectDisposedException) { }
         leftFocus.Cancel();
         if (startPump)
-            _ = Task.Run(DrainBackgroundInitQueueAsync);
+            _ = Task.Run(DrainBackgroundInitQueueAsync, CancellationToken.None);
 
         // Stop the newly focused context's own inactive-tab headless job (queued or
         // running) before its foreground graph work can start — that job and this tab's own

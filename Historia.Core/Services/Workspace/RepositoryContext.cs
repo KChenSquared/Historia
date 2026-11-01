@@ -428,7 +428,7 @@ public sealed class RepositoryContext : IAsyncDisposable
     /// </summary>
     public bool TryBeginNetworkOperation(NetworkOperationInfo info, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out IDisposable? lease)
     {
-        if (!_networkGate.Wait(0))
+        if (!_networkGate.Wait(0, CancellationToken.None))
         {
             lease = null;
             return false;
@@ -553,10 +553,12 @@ public sealed class RepositoryContext : IAsyncDisposable
         // A write that already holds the lock finishes before the watcher and state go away; the
         // cancelled lifetime stops writes that are still waiting. A close requested from inside a
         // write would wait for itself, so that flow skips the wait.
+        // Trap: the wait takes no token. The lifetime was cancelled above, so passing its token
+        // would throw here and close would stop waiting for an in-flight write.
         if (!_isHoldingWriteLock.Value)
         {
             var waitStart = System.Diagnostics.Stopwatch.GetTimestamp();
-            await _writeLock.WaitAsync().ConfigureAwait(false);
+            await _writeLock.WaitAsync(CancellationToken.None).ConfigureAwait(false);
             _writeLock.Release();
             var waitedMs = System.Diagnostics.Stopwatch.GetElapsedTime(waitStart).TotalMilliseconds;
             if (waitedMs > CloseWaitLogThresholdMs && PerfLog.Enabled)

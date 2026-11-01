@@ -241,7 +241,7 @@ public sealed class RefSnapshotProvider
         var listing = RunAsync(ForEachRefParser.ListArguments);
         // The packed ids and peels are known before git answers; look them up meanwhile.
         var graphLookup = _commitGraph is { } index
-            ? Task.Run(() => index.Lookup([.. packed.Entries.SelectMany(e => e.Peeled is { } p ? [e.Target, p] : new[] { e.Target })]))
+            ? Task.Run(() => index.Lookup([.. packed.Entries.SelectMany(e => e.Peeled is { } p ? [e.Target, p] : new[] { e.Target })]), CancellationToken.None)
             : Task.FromResult<CommitGraphLookup?>(null);
         var listed = await listing.ConfigureAwait(false);
         var graph = await graphLookup.ConfigureAwait(false);

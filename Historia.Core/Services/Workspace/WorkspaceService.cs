@@ -161,7 +161,7 @@ public sealed partial class WorkspaceService : IWorkspaceService, IAsyncDisposab
                 foreach (var item in _bgQueue.Where(x => ReferenceEquals(x.Context, context)))
                 {
                     foreach (var a in item.Awaiters)
-                        a.TrySetCanceled();
+                        a.TrySetCanceled(CancellationToken.None);
                 }
                 _bgQueue.RemoveAll(x => ReferenceEquals(x.Context, context));
                 wasFocused = ReferenceEquals(_focused, context);
