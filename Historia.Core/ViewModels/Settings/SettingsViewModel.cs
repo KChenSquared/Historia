@@ -32,6 +32,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
     private readonly IAiIntegrationsPanel? _aiPanel;
     private readonly IGitExecutableLocator? _locator;
     private readonly INotificationService? _notifications;
+    private readonly SemaphoreSlim _gitResolveGate = new(1, 1);
 
     private CmdrPathStatus? _cmdrStatus;
     private bool _cmdrApplyInProgress;
@@ -314,6 +315,8 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
     private async Task ApplyBundledGitChangeAsync(bool allowBundled)
     {
+        // One at a time, in toggle order: the last toggle must be the last resolution to land.
+        await _gitResolveGate.WaitAsync();
         try
         {
             var previous = _locator!.Current;
@@ -325,8 +328,9 @@ public sealed partial class SettingsViewModel : ViewModelBase
             {
                 if (!current.Found)
                 {
+                    var reason = current.NotFoundReason ?? "Git was not found on this system.";
                     _notifications?.Publish(NotificationSeverity.Warning,
-                        "Git was not found on this system. Turn on \"Use the Git bundled with Historia\" or set a Git path in Settings.");
+                        $"{reason} Install a supported Git, set gitExecutablePath in settings.json, or turn on \"Use the Git bundled with Historia\".");
                 }
                 else
                 {
@@ -338,13 +342,18 @@ public sealed partial class SettingsViewModel : ViewModelBase
                         _ => "Git",
                     };
                     var versionDesc = current.Version is not null ? $" ({current.Version})" : "";
-                    _notifications?.Publish(NotificationSeverity.Info, $"Using {sourceDesc}{versionDesc}.");
+                    var notice = string.IsNullOrEmpty(current.Notice) ? "" : $" {current.Notice}";
+                    _notifications?.Publish(NotificationSeverity.Info, $"Using {sourceDesc}{versionDesc}.{notice}");
                 }
             }
         }
         catch (Exception ex)
         {
             AppLog.Write(AppLogLevel.Warn, "settings", "Could not re-resolve Git after changing bundled setting", ex);
+        }
+        finally
+        {
+            _gitResolveGate.Release();
         }
     }
 

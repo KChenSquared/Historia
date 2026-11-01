@@ -144,9 +144,15 @@ public enum GitErrorKind
     UnsafeRepository,
 
     /// <summary>
-    /// A configured signing tool (such as GPG) was not found on PATH when creating a signed commit.
+    /// GPG was not found on PATH when creating a signed commit.
     /// </summary>
     SigningToolMissing,
+
+    /// <summary>
+    /// <c>ssh-keygen</c> was not found on PATH when creating an SSH-signed commit. The bundled Git
+    /// ships an ssh client but not <c>ssh-keygen</c>.
+    /// </summary>
+    SshSigningToolMissing,
 
     Unknown,
 }

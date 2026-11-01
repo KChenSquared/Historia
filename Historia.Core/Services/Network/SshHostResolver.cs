@@ -27,38 +27,22 @@ public sealed class SshHostResolver : ISshHostResolver
     internal readonly record struct Lookup(string? HostName, bool Definite);
 
     private readonly string? _configPath;
-    private readonly Func<GitExecutableInfo?>? _gitInfoProvider;
+    private readonly IGitExecutableLocator? _locator;
     private readonly Func<string, CancellationToken, Task<Lookup>> _lookup;
     private readonly ConcurrentDictionary<string, string?> _cache = new(StringComparer.OrdinalIgnoreCase);
     private int _processLaunches;
 
     public SshHostResolver(IGitExecutableLocator? locator = null)
     {
-        if (locator is not null)
-            _gitInfoProvider = () => locator.Current;
-        _lookup = RunSshAsync;
-    }
-
-    public SshHostResolver(Func<GitExecutableInfo?> gitInfoProvider)
-    {
-        _gitInfoProvider = gitInfoProvider;
+        _locator = locator;
         _lookup = RunSshAsync;
     }
 
     /// <summary>Reads <paramref name="configPath"/> (<c>ssh -F</c>) instead of the user's and
     /// the system's config files.</summary>
-    internal SshHostResolver(string configPath, IGitExecutableLocator? locator = null)
+    internal SshHostResolver(string configPath)
     {
         _configPath = configPath;
-        if (locator is not null)
-            _gitInfoProvider = () => locator.Current;
-        _lookup = RunSshAsync;
-    }
-
-    internal SshHostResolver(string configPath, Func<GitExecutableInfo?> gitInfoProvider)
-    {
-        _configPath = configPath;
-        _gitInfoProvider = gitInfoProvider;
         _lookup = RunSshAsync;
     }
 
@@ -67,20 +51,15 @@ public sealed class SshHostResolver : ISshHostResolver
 
     internal int ProcessLaunches => Volatile.Read(ref _processLaunches);
 
+    /// <summary>The ssh git itself would run: the bundled one while the bundled Git is active,
+    /// otherwise the one on PATH.</summary>
     internal string? ResolveSshExecutable()
     {
-        var info = _gitInfoProvider?.Invoke();
-        if (info is { Found: true, Source: GitSource.Bundled, BundledRoot: not null })
+        if (_locator?.Current is { Found: true, Source: GitSource.Bundled, BundledRoot: not null } info)
         {
             var bundledSsh = Path.Combine(info.BundledRoot, "usr", "bin", OperatingSystem.IsWindows() ? "ssh.exe" : "ssh");
             if (File.Exists(bundledSsh))
                 return bundledSsh;
-            if (OperatingSystem.IsWindows())
-            {
-                var bundledCmd = Path.Combine(info.BundledRoot, "usr", "bin", "ssh.cmd");
-                if (File.Exists(bundledCmd))
-                    return bundledCmd;
-            }
         }
 
         return FindSshOnPath();

@@ -147,9 +147,9 @@ public class TerminalEnvironmentTests
         };
 
         var envInstalled = TerminalHostEnvironment.SnapshotEnvironment(installedInfo);
-        if (envInstalled.TryGetValue("PATH", out var path))
-        {
-            Assert.False(path.StartsWith(Path.Combine(bundledRoot, "cmd")));
-        }
+        var envNoGit = TerminalHostEnvironment.SnapshotEnvironment();
+        envNoGit.TryGetValue("PATH", out var inheritedPath);
+        envInstalled.TryGetValue("PATH", out var installedPath);
+        Assert.Equal(inheritedPath, installedPath);
     }
 }

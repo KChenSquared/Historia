@@ -26,6 +26,7 @@ public sealed partial class GitExecutableLocator : IGitExecutableLocator
     internal string? PathEnvironmentOverride { get; set; }
     internal bool SkipWellKnownLocations { get; set; }
     internal bool SkipRegistry { get; set; }
+    internal Func<string, CancellationToken, Task<Version?>>? VersionProbeOverride { get; set; }
 
     public GitExecutableInfo Current
     {
@@ -63,120 +64,12 @@ public sealed partial class GitExecutableLocator : IGitExecutableLocator
     private async Task<GitExecutableInfo> ResolveCoreAsync(string? userOverridePath, bool allowBundled, CancellationToken ct)
     {
         GitExecutableInfo info;
-
-        if (!string.IsNullOrWhiteSpace(userOverridePath))
-        {
-            if (!File.Exists(userOverridePath))
-            {
-                info = new GitExecutableInfo
-                {
-                    Found = false,
-                    Path = userOverridePath,
-                    NotFoundReason = $"Git executable was not found at '{userOverridePath}'.",
-                    Source = GitSource.UserSetting,
-                };
-            }
-            else
-            {
-                var candidatePath = PreferDirectGit(userOverridePath);
-                var path = await ChooseGitPathAsync(userOverridePath, candidatePath, ProbeTimeout, ct).ConfigureAwait(false);
-                var version = await CaptureVersionAsync(path, ProbeTimeout, ct).ConfigureAwait(false);
-                if (version is null || version < GitExecutableInfo.MinimumVersion)
-                {
-                    var reason = version is null
-                        ? $"Git at '{path}' did not report a valid version."
-                        : $"Git {version} was found at '{path}', but Git {GitExecutableInfo.MinimumVersion} or newer is required.";
-                    info = new GitExecutableInfo
-                    {
-                        Found = false,
-                        Path = path,
-                        Version = version,
-                        NotFoundReason = reason,
-                        Source = GitSource.UserSetting,
-                    };
-                }
-                else
-                {
-                    info = new GitExecutableInfo
-                    {
-                        Found = true,
-                        Path = path,
-                        Version = version,
-                        Source = GitSource.UserSetting,
-                    };
-                }
-            }
-        }
+        if (string.IsNullOrWhiteSpace(userOverridePath))
+            info = await ResolveDiscoveredAsync(allowBundled, ct).ConfigureAwait(false);
+        else if (File.Exists(userOverridePath))
+            info = await ResolveUserPathAsync(userOverridePath, ct).ConfigureAwait(false);
         else
-        {
-            var discovered = await Task.Run(DiscoverInstalled, ct).ConfigureAwait(false);
-            string? installedPath = null;
-            Version? installedVersion = null;
-            string? installedReason = null;
-
-            if (discovered is not null)
-            {
-                installedPath = await ChooseGitPathAsync(discovered.Value.LauncherPath, discovered.Value.Path, ProbeTimeout, ct).ConfigureAwait(false);
-                installedVersion = await CaptureVersionAsync(installedPath, ProbeTimeout, ct).ConfigureAwait(false);
-                if (installedVersion is null)
-                {
-                    installedReason = $"Git at '{installedPath}' did not report a valid version.";
-                }
-                else if (installedVersion < GitExecutableInfo.MinimumVersion)
-                {
-                    installedReason = $"Git {installedVersion} was found at '{installedPath}', but Git {GitExecutableInfo.MinimumVersion} or newer is required.";
-                }
-            }
-
-            if (installedPath is not null && installedVersion is not null && installedVersion >= GitExecutableInfo.MinimumVersion)
-            {
-                info = new GitExecutableInfo
-                {
-                    Found = true,
-                    Path = installedPath,
-                    Version = installedVersion,
-                    Source = GitSource.Installed,
-                };
-            }
-            else if (allowBundled)
-            {
-                var bundled = FindBundledGit();
-                if (bundled is not null)
-                {
-                    var bundledVersion = await CaptureVersionAsync(bundled.Value.Path, ProbeTimeout, ct).ConfigureAwait(false);
-                    if (bundledVersion is not null && bundledVersion >= GitExecutableInfo.MinimumVersion)
-                    {
-                        string? notice = null;
-                        if (installedVersion is not null && installedVersion < GitExecutableInfo.MinimumVersion)
-                        {
-                            notice = $"Installed Git {installedVersion} at '{installedPath}' is older than {GitExecutableInfo.MinimumVersion}; using the Git bundled with Historia ({bundledVersion}).";
-                        }
-
-                        info = new GitExecutableInfo
-                        {
-                            Found = true,
-                            Path = bundled.Value.Path,
-                            Version = bundledVersion,
-                            Source = GitSource.Bundled,
-                            BundledRoot = bundled.Value.Root,
-                            Notice = notice,
-                        };
-                    }
-                    else
-                    {
-                        info = CreateNotFoundInfo(installedPath, installedVersion, installedReason);
-                    }
-                }
-                else
-                {
-                    info = CreateNotFoundInfo(installedPath, installedVersion, installedReason);
-                }
-            }
-            else
-            {
-                info = CreateNotFoundInfo(installedPath, installedVersion, installedReason);
-            }
-        }
+            info = await ResolveMissingUserPathAsync(userOverridePath, allowBundled, ct).ConfigureAwait(false);
 
         lock (_sync)
             _current = info;
@@ -185,39 +78,110 @@ public sealed partial class GitExecutableLocator : IGitExecutableLocator
         return info;
     }
 
-    private static GitExecutableInfo CreateNotFoundInfo(string? installedPath, Version? installedVersion, string? installedReason)
+    /// <summary>An explicit user path is used exactly as given, with no fallback when it does not qualify.</summary>
+    private async Task<GitExecutableInfo> ResolveUserPathAsync(string path, CancellationToken ct)
     {
-        if (installedReason is not null)
+        var version = await ProbeVersionAsync(path, ct).ConfigureAwait(false);
+        if (IsSupported(version))
+            return new GitExecutableInfo { Found = true, Path = path, Version = version, Source = GitSource.UserSetting };
+
+        return new GitExecutableInfo
         {
-            return new GitExecutableInfo
+            Found = false,
+            Path = path,
+            Version = version,
+            NotFoundReason = RejectionReason(path, version),
+            Source = GitSource.UserSetting,
+        };
+    }
+
+    /// <summary>A user path that no longer exists falls through to discovery: the setting has no
+    /// Settings row to correct it from, so it must not disable Git. The result says so.</summary>
+    private async Task<GitExecutableInfo> ResolveMissingUserPathAsync(string path, bool allowBundled, CancellationToken ct)
+    {
+        var fallback = await ResolveDiscoveredAsync(allowBundled, ct).ConfigureAwait(false);
+        if (fallback.Found)
+        {
+            var missing = $"The Git path in settings, '{path}', doesn't exist.";
+            return fallback with { Notice = string.IsNullOrEmpty(fallback.Notice) ? missing : $"{missing} {fallback.Notice}" };
+        }
+
+        var reason = $"Git executable was not found at '{path}'.";
+        return new GitExecutableInfo
+        {
+            Found = false,
+            Path = path,
+            NotFoundReason = fallback.NotFoundReason is { } other ? $"{reason} {other}" : reason,
+            Source = GitSource.UserSetting,
+        };
+    }
+
+    /// <summary>The first installed Git that qualifies; otherwise the bundled one when allowed. The
+    /// first installed Git that did not qualify is what the notice or the not-found reason names.</summary>
+    private async Task<GitExecutableInfo> ResolveDiscoveredAsync(bool allowBundled, CancellationToken ct)
+    {
+        var candidates = await Task.Run(DiscoverInstalled, ct).ConfigureAwait(false);
+        GitExecutableInfo? rejected = null;
+        foreach (var candidate in candidates)
+        {
+            var path = await ChooseGitPathAsync(candidate.LauncherPath, candidate.Path, ProbeTimeout, ct).ConfigureAwait(false);
+            var version = await ProbeVersionAsync(path, ct).ConfigureAwait(false);
+            if (IsSupported(version))
+                return new GitExecutableInfo { Found = true, Path = path, Version = version, Source = GitSource.Installed };
+
+            rejected ??= new GitExecutableInfo
             {
                 Found = false,
-                Path = installedPath,
-                Version = installedVersion,
-                NotFoundReason = installedReason,
+                Path = path,
+                Version = version,
+                NotFoundReason = RejectionReason(path, version),
                 Source = GitSource.Installed,
             };
         }
 
-        return GitExecutableInfo.NotFound;
+        if (allowBundled && FindBundledGit() is { } bundledPath)
+        {
+            var bundledVersion = await ProbeVersionAsync(bundledPath, ct).ConfigureAwait(false);
+            if (IsSupported(bundledVersion))
+            {
+                return new GitExecutableInfo
+                {
+                    Found = true,
+                    Path = bundledPath,
+                    Version = bundledVersion,
+                    Source = GitSource.Bundled,
+                    BundledRoot = BundledRoot,
+                    Notice = rejected is null ? null : BundledNotice(rejected, bundledVersion!),
+                };
+            }
+        }
+
+        return rejected ?? GitExecutableInfo.NotFound;
     }
 
-    private readonly record struct BundledGit(string Path, string Root);
+    private static bool IsSupported(Version? version) =>
+        version is not null && version >= GitExecutableInfo.MinimumVersion;
 
-    private BundledGit? FindBundledGit()
+    private static string RejectionReason(string path, Version? version) => version is null
+        ? $"Git at '{path}' did not report a valid version."
+        : $"Git {version} was found at '{path}', but Git {GitExecutableInfo.MinimumVersion} or newer is required.";
+
+    private static string BundledNotice(GitExecutableInfo rejected, Version bundledVersion) => rejected.Version is null
+        ? $"Git at '{rejected.Path}' did not report a valid version; using the Git bundled with Historia ({bundledVersion})."
+        : $"Installed Git {rejected.Version} at '{rejected.Path}' is older than {GitExecutableInfo.MinimumVersion}; using the Git bundled with Historia ({bundledVersion}).";
+
+    private Task<Version?> ProbeVersionAsync(string path, CancellationToken ct) =>
+        VersionProbeOverride is { } probe ? probe(path, ct) : CaptureVersionAsync(path, ProbeTimeout, ct);
+
+    private string BundledRoot => Path.Combine(_appBaseDirectory, "git");
+
+    private string? FindBundledGit()
     {
-        var bundledRoot = Path.Combine(_appBaseDirectory, "git");
         foreach (var prefix in DirectGitPrefixes)
         {
-            var candidate = Path.Combine(bundledRoot, prefix, "bin", ExecutableName);
+            var candidate = Path.Combine(BundledRoot, prefix, "bin", ExecutableName);
             if (File.Exists(candidate))
-                return new BundledGit(candidate, bundledRoot);
-            if (OperatingSystem.IsWindows())
-            {
-                var cmdCandidate = Path.Combine(bundledRoot, prefix, "bin", "git.cmd");
-                if (File.Exists(cmdCandidate))
-                    return new BundledGit(cmdCandidate, bundledRoot);
-            }
+                return candidate;
         }
 
         return null;
@@ -226,35 +190,36 @@ public sealed partial class GitExecutableLocator : IGitExecutableLocator
     /// <summary>A discovered git: the path to run and the path it was derived from.</summary>
     private readonly record struct DiscoveredGit(string Path, string LauncherPath);
 
-    private DiscoveredGit? DiscoverInstalled()
+    /// <summary>Every installed git, in preference order: PATH, then well-known install locations,
+    /// then the Git for Windows registry key. The same binary reached two ways is listed once.</summary>
+    private List<DiscoveredGit> DiscoverInstalled()
     {
-        // 1. PATH.
-        var pathVar = PathEnvironmentOverride ?? Environment.GetEnvironmentVariable("PATH");
-        var onPath = FindOnPath(pathVar);
-        if (onPath is not null)
-            return Direct(onPath);
+        var candidates = new List<DiscoveredGit>();
+        var seen = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 
-        // 2. Well-known install locations.
+        foreach (var onPath in EnumerateOnPath(PathEnvironmentOverride ?? Environment.GetEnvironmentVariable("PATH")))
+            Add(onPath);
+
         if (!SkipWellKnownLocations)
         {
             foreach (var candidate in WellKnownLocations())
             {
                 if (File.Exists(candidate))
-                    return Direct(candidate);
+                    Add(candidate);
             }
         }
 
-        // 3. Git for Windows registry key.
-        if (OperatingSystem.IsWindows() && !SkipRegistry)
+        if (OperatingSystem.IsWindows() && !SkipRegistry && DiscoverFromWindowsRegistry() is { } fromRegistry)
+            Add(fromRegistry);
+
+        return candidates;
+
+        void Add(string launcher)
         {
-            var fromRegistry = DiscoverFromWindowsRegistry();
-            if (fromRegistry is not null)
-                return Direct(fromRegistry);
+            var direct = PreferDirectGit(launcher);
+            if (seen.Add(direct))
+                candidates.Add(new DiscoveredGit(direct, launcher));
         }
-
-        return null;
-
-        static DiscoveredGit Direct(string launcher) => new(PreferDirectGit(launcher), launcher);
     }
 
     /// <summary>
@@ -267,10 +232,7 @@ public sealed partial class GitExecutableLocator : IGitExecutableLocator
     {
         try
         {
-            var fileName = Path.GetFileName(path);
-            var isGitExe = string.Equals(fileName, "git.exe", StringComparison.OrdinalIgnoreCase);
-            var isGitCmd = OperatingSystem.IsWindows() && string.Equals(fileName, "git.cmd", StringComparison.OrdinalIgnoreCase);
-            if (!isGitExe && !isGitCmd)
+            if (!string.Equals(Path.GetFileName(path), "git.exe", StringComparison.OrdinalIgnoreCase))
                 return path;
 
             var directory = Path.GetDirectoryName(path);
@@ -288,12 +250,6 @@ public sealed partial class GitExecutableLocator : IGitExecutableLocator
                 var candidate = Path.Combine(installRoot, prefix, "bin", "git.exe");
                 if (File.Exists(candidate))
                     return candidate;
-                if (OperatingSystem.IsWindows())
-                {
-                    var cmdCandidate = Path.Combine(installRoot, prefix, "bin", "git.cmd");
-                    if (File.Exists(cmdCandidate))
-                        return cmdCandidate;
-                }
             }
         }
         catch (ArgumentException)
@@ -328,29 +284,32 @@ public sealed partial class GitExecutableLocator : IGitExecutableLocator
     internal static string ExecutableName => OperatingSystem.IsWindows() ? "git.exe" : "git";
 
     /// <summary>The first <see cref="ExecutableName"/> in the directories of a PATH-style value.</summary>
-    internal static string? FindOnPath(string? pathVar)
+    internal static string? FindOnPath(string? pathVar) => EnumerateOnPath(pathVar).FirstOrDefault();
+
+    /// <summary>
+    /// Every <see cref="ExecutableName"/> in the directories of a PATH-style value, in order.
+    /// Trap: a <c>git.cmd</c> must never be discovered. Windows runs it through cmd.exe, and an
+    /// argument without whitespace reaches it unquoted, so a branch named <c>x&amp;calc</c> in a
+    /// cloned repository would run a command.
+    /// </summary>
+    private static IEnumerable<string> EnumerateOnPath(string? pathVar)
     {
         foreach (var dir in (pathVar ?? string.Empty).Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
+            string candidate;
             try
             {
-                var candidate = Path.Combine(dir, ExecutableName);
-                if (File.Exists(candidate))
-                    return candidate;
-                if (OperatingSystem.IsWindows())
-                {
-                    var cmdCandidate = Path.Combine(dir, "git.cmd");
-                    if (File.Exists(cmdCandidate))
-                        return cmdCandidate;
-                }
+                candidate = Path.Combine(dir, ExecutableName);
             }
             catch (ArgumentException)
             {
                 // Malformed PATH segment; skip.
+                continue;
             }
-        }
 
-        return null;
+            if (File.Exists(candidate))
+                yield return candidate;
+        }
     }
 
     private static IEnumerable<string> WellKnownLocations()

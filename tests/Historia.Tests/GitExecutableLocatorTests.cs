@@ -295,29 +295,38 @@ public class GitExecutableLocatorTests
         Assert.NotNull(awaited.NotFoundReason);
     }
 
+    /// <summary>A locator that searches only <paramref name="pathVar"/> and reads versions from
+    /// <paramref name="versions"/> instead of running anything; a path not listed answers no version.</summary>
+    private static GitExecutableLocator FakeLocator(string appDir, string pathVar, Dictionary<string, string> versions, List<string>? probed = null) =>
+        new(appDir)
+        {
+            PathEnvironmentOverride = pathVar,
+            SkipWellKnownLocations = true,
+            SkipRegistry = true,
+            VersionProbeOverride = (path, _) =>
+            {
+                probed?.Add(path);
+                return Task.FromResult(versions.TryGetValue(path, out var version) ? Version.Parse(version) : null);
+            },
+        };
+
     [Fact]
     public async Task ResolveAsync_no_installed_git_and_bundled_present_resolves_bundled()
     {
         var root = TestScratch.NewDirectory("historia-locator-bundled-");
         try
         {
-            var fakeAppDir = Path.Combine(root, "app");
-            var bundledGit = WriteCmd(Path.Combine(fakeAppDir, "git", "ucrt64", "bin"), "git.cmd", "@echo git version 2.56.0.windows.4");
-
-            var locator = new GitExecutableLocator(fakeAppDir)
-            {
-                PathEnvironmentOverride = "",
-                SkipWellKnownLocations = true,
-                SkipRegistry = true,
-            };
+            var appDir = Path.Combine(root, "app");
+            var bundled = TouchGit(appDir, "git", "ucrt64", "bin");
+            var locator = FakeLocator(appDir, "", new() { [bundled] = "2.56.0" });
 
             var info = await locator.ResolveAsync(null);
 
             Assert.True(info.Found);
             Assert.Equal(GitSource.Bundled, info.Source);
-            Assert.Equal(bundledGit, info.Path);
+            Assert.Equal(bundled, info.Path);
             Assert.Equal(new Version(2, 56, 0), info.Version);
-            Assert.Equal(Path.Combine(fakeAppDir, "git"), info.BundledRoot);
+            Assert.Equal(Path.Combine(appDir, "git"), info.BundledRoot);
             Assert.Null(info.Notice);
         }
         finally
@@ -332,25 +341,16 @@ public class GitExecutableLocatorTests
         var root = TestScratch.NewDirectory("historia-locator-installed-");
         try
         {
-            var fakeAppDir = Path.Combine(root, "app");
-            WriteCmd(Path.Combine(fakeAppDir, "git", "ucrt64", "bin"), "git.cmd", "@echo git version 2.56.0.windows.4");
-
-            var installedDir = Path.Combine(root, "installed", "bin");
-            var installedGit = WriteCmd(installedDir, "git.cmd", "@echo git version 2.51.0.windows.1");
-
-            var locator = new GitExecutableLocator(fakeAppDir)
-            {
-                PathEnvironmentOverride = installedDir,
-                SkipWellKnownLocations = true,
-                SkipRegistry = true,
-            };
+            var appDir = Path.Combine(root, "app");
+            var bundled = TouchGit(appDir, "git", "ucrt64", "bin");
+            var installed = TouchGit(root, "installed", "tools");
+            var locator = FakeLocator(appDir, Path.GetDirectoryName(installed)!, new() { [bundled] = "2.56.0", [installed] = "2.51.0" });
 
             var info = await locator.ResolveAsync(null);
 
             Assert.True(info.Found);
             Assert.Equal(GitSource.Installed, info.Source);
-            Assert.Equal(installedGit, info.Path);
-            Assert.Equal(new Version(2, 51, 0), info.Version);
+            Assert.Equal(installed, info.Path);
             Assert.Null(info.BundledRoot);
             Assert.Null(info.Notice);
         }
@@ -366,29 +366,131 @@ public class GitExecutableLocatorTests
         var root = TestScratch.NewDirectory("historia-locator-old-");
         try
         {
-            var fakeAppDir = Path.Combine(root, "app");
-            var bundledGit = WriteCmd(Path.Combine(fakeAppDir, "git", "ucrt64", "bin"), "git.cmd", "@echo git version 2.56.0.windows.4");
-
-            var installedDir = Path.Combine(root, "installed", "bin");
-            WriteCmd(installedDir, "git.cmd", "@echo git version 2.40.1");
-
-            var locator = new GitExecutableLocator(fakeAppDir)
-            {
-                PathEnvironmentOverride = installedDir,
-                SkipWellKnownLocations = true,
-                SkipRegistry = true,
-            };
+            var appDir = Path.Combine(root, "app");
+            var bundled = TouchGit(appDir, "git", "ucrt64", "bin");
+            var installed = TouchGit(root, "installed", "tools");
+            var locator = FakeLocator(appDir, Path.GetDirectoryName(installed)!, new() { [bundled] = "2.56.0", [installed] = "2.40.1" });
 
             var info = await locator.ResolveAsync(null);
 
             Assert.True(info.Found);
             Assert.Equal(GitSource.Bundled, info.Source);
-            Assert.Equal(bundledGit, info.Path);
-            Assert.Equal(new Version(2, 56, 0), info.Version);
+            Assert.Equal(bundled, info.Path);
             Assert.NotNull(info.Notice);
             Assert.Contains("2.40.1", info.Notice);
             Assert.Contains("2.46", info.Notice);
             Assert.Contains("2.56.0", info.Notice);
+        }
+        finally
+        {
+            TestScratch.Delete(root);
+        }
+    }
+
+    [Fact]
+    public async Task ResolveAsync_an_old_git_on_path_does_not_hide_a_newer_installed_one()
+    {
+        var root = TestScratch.NewDirectory("historia-locator-shadow-");
+        try
+        {
+            var appDir = Path.Combine(root, "app");
+            var bundled = TouchGit(appDir, "git", "ucrt64", "bin");
+            var old = TouchGit(root, "old", "tools");
+            var newer = TouchGit(root, "newer", "tools");
+            var pathVar = string.Join(Path.PathSeparator, Path.GetDirectoryName(old), Path.GetDirectoryName(newer));
+            var locator = FakeLocator(appDir, pathVar, new() { [bundled] = "2.56.0", [old] = "2.40.1", [newer] = "2.50.0" });
+
+            var info = await locator.ResolveAsync(null);
+
+            Assert.Equal(GitSource.Installed, info.Source);
+            Assert.Equal(newer, info.Path);
+        }
+        finally
+        {
+            TestScratch.Delete(root);
+        }
+    }
+
+    [Fact]
+    public async Task ResolveAsync_probes_a_git_listed_twice_on_path_once()
+    {
+        var root = TestScratch.NewDirectory("historia-locator-dup-");
+        try
+        {
+            var installed = TouchGit(root, "installed", "tools");
+            var dir = Path.GetDirectoryName(installed)!;
+            var probed = new List<string>();
+            var locator = FakeLocator(Path.Combine(root, "app"), string.Join(Path.PathSeparator, dir, dir), [], probed);
+
+            await locator.ResolveAsync(null);
+
+            Assert.Equal([installed], probed);
+        }
+        finally
+        {
+            TestScratch.Delete(root);
+        }
+    }
+
+    [Fact]
+    public async Task ResolveAsync_installed_git_with_no_version_falls_back_to_bundled_and_says_why()
+    {
+        var root = TestScratch.NewDirectory("historia-locator-broken-");
+        try
+        {
+            var appDir = Path.Combine(root, "app");
+            var bundled = TouchGit(appDir, "git", "ucrt64", "bin");
+            var broken = TouchGit(root, "broken", "tools");
+            var locator = FakeLocator(appDir, Path.GetDirectoryName(broken)!, new() { [bundled] = "2.56.0" });
+
+            var info = await locator.ResolveAsync(null);
+
+            Assert.Equal(GitSource.Bundled, info.Source);
+            Assert.NotNull(info.Notice);
+            Assert.Contains(broken, info.Notice);
+            Assert.Contains("did not report a valid version", info.Notice);
+        }
+        finally
+        {
+            TestScratch.Delete(root);
+        }
+    }
+
+    [Fact]
+    public async Task ResolveAsync_never_discovers_a_git_cmd()
+    {
+        var root = TestScratch.NewDirectory("historia-locator-cmd-");
+        try
+        {
+            var cmdDir = Path.Combine(root, "shim");
+            var shim = WriteCmd(cmdDir, "git.cmd", "@echo git version 2.56.0");
+            var real = TouchGit(root, "real", "tools");
+            var pathVar = string.Join(Path.PathSeparator, cmdDir, Path.GetDirectoryName(real));
+            var locator = FakeLocator(Path.Combine(root, "app"), pathVar, new() { [shim] = "2.56.0", [real] = "2.50.0" });
+
+            var info = await locator.ResolveAsync(null);
+
+            Assert.Equal(real, info.Path);
+            Assert.Null(GitExecutableLocator.FindOnPath(cmdDir));
+            Assert.Equal(shim, GitExecutableLocator.PreferDirectGit(shim));
+        }
+        finally
+        {
+            TestScratch.Delete(root);
+        }
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ignores_a_bundled_git_cmd()
+    {
+        var root = TestScratch.NewDirectory("historia-locator-bundled-cmd-");
+        try
+        {
+            var appDir = Path.Combine(root, "app");
+            var shim = WriteCmd(Path.Combine(appDir, "git", "ucrt64", "bin"), "git.cmd", "@echo git version 2.56.0");
+            var locator = FakeLocator(appDir, "", new() { [shim] = "2.56.0" });
+
+            Assert.False((await locator.ResolveAsync(null)).Found);
         }
         finally
         {
@@ -402,15 +504,9 @@ public class GitExecutableLocatorTests
         var root = TestScratch.NewDirectory("historia-locator-disallow-");
         try
         {
-            var fakeAppDir = Path.Combine(root, "app");
-            WriteCmd(Path.Combine(fakeAppDir, "git", "ucrt64", "bin"), "git.cmd", "@echo git version 2.56.0.windows.4");
-
-            var locator = new GitExecutableLocator(fakeAppDir)
-            {
-                PathEnvironmentOverride = "",
-                SkipWellKnownLocations = true,
-                SkipRegistry = true,
-            };
+            var appDir = Path.Combine(root, "app");
+            var bundled = TouchGit(appDir, "git", "ucrt64", "bin");
+            var locator = FakeLocator(appDir, "", new() { [bundled] = "2.56.0" });
 
             var info = await locator.ResolveAsync(null, allowBundled: false);
 
@@ -424,35 +520,91 @@ public class GitExecutableLocatorTests
     }
 
     [Fact]
-    public async Task ResolveAsync_user_path_wins_and_invalid_user_path_does_not_fall_back()
+    public async Task ResolveAsync_user_path_wins_and_is_used_exactly_as_given()
     {
         var root = TestScratch.NewDirectory("historia-locator-user-");
         try
         {
-            var fakeAppDir = Path.Combine(root, "app");
-            WriteCmd(Path.Combine(fakeAppDir, "git", "ucrt64", "bin"), "git.cmd", "@echo git version 2.56.0.windows.4");
+            var appDir = Path.Combine(root, "app");
+            var bundled = TouchGit(appDir, "git", "ucrt64", "bin");
+            var launcher = TouchGit(root, "user", "cmd");
+            TouchGit(root, "user", "mingw64", "bin");
+            var locator = FakeLocator(appDir, "", new() { [bundled] = "2.56.0", [launcher] = "2.50.0" });
 
-            var userDir = Path.Combine(root, "user", "bin");
-            var userGit = WriteCmd(userDir, "git.cmd", "@echo git version 2.50.0");
+            var info = await locator.ResolveAsync(launcher);
 
-            var locator = new GitExecutableLocator(fakeAppDir)
-            {
-                PathEnvironmentOverride = "",
-                SkipWellKnownLocations = true,
-                SkipRegistry = true,
-            };
+            Assert.True(info.Found);
+            Assert.Equal(GitSource.UserSetting, info.Source);
+            Assert.Equal(launcher, info.Path);
+        }
+        finally
+        {
+            TestScratch.Delete(root);
+        }
+    }
 
-            var validInfo = await locator.ResolveAsync(userGit);
-            Assert.True(validInfo.Found);
-            Assert.Equal(GitSource.UserSetting, validInfo.Source);
-            Assert.Equal(userGit, validInfo.Path);
+    [Fact]
+    public async Task ResolveAsync_user_path_below_minimum_is_reported_without_fallback()
+    {
+        var root = TestScratch.NewDirectory("historia-locator-user-old-");
+        try
+        {
+            var appDir = Path.Combine(root, "app");
+            var bundled = TouchGit(appDir, "git", "ucrt64", "bin");
+            var userGit = TouchGit(root, "user", "tools");
+            var locator = FakeLocator(appDir, "", new() { [bundled] = "2.56.0", [userGit] = "2.40.1" });
 
-            var invalidPath = Path.Combine(root, "missing", "git.exe");
-            var invalidInfo = await locator.ResolveAsync(invalidPath);
-            Assert.False(invalidInfo.Found);
-            Assert.Equal(GitSource.UserSetting, invalidInfo.Source);
-            Assert.Equal(invalidPath, invalidInfo.Path);
-            Assert.NotNull(invalidInfo.NotFoundReason);
+            var info = await locator.ResolveAsync(userGit);
+
+            Assert.False(info.Found);
+            Assert.Equal(GitSource.UserSetting, info.Source);
+            Assert.Contains("2.40.1", info.NotFoundReason);
+        }
+        finally
+        {
+            TestScratch.Delete(root);
+        }
+    }
+
+    [Fact]
+    public async Task ResolveAsync_missing_user_path_falls_through_to_discovery_and_says_so()
+    {
+        var root = TestScratch.NewDirectory("historia-locator-user-missing-");
+        try
+        {
+            var appDir = Path.Combine(root, "app");
+            var bundled = TouchGit(appDir, "git", "ucrt64", "bin");
+            var missing = Path.Combine(root, "missing", "git.exe");
+            var locator = FakeLocator(appDir, "", new() { [bundled] = "2.56.0" });
+
+            var info = await locator.ResolveAsync(missing);
+
+            Assert.True(info.Found);
+            Assert.Equal(GitSource.Bundled, info.Source);
+            Assert.NotNull(info.Notice);
+            Assert.Contains(missing, info.Notice);
+        }
+        finally
+        {
+            TestScratch.Delete(root);
+        }
+    }
+
+    [Fact]
+    public async Task ResolveAsync_missing_user_path_with_nothing_else_reports_the_path()
+    {
+        var root = TestScratch.NewDirectory("historia-locator-user-none-");
+        try
+        {
+            var missing = Path.Combine(root, "missing", "git.exe");
+            var locator = FakeLocator(Path.Combine(root, "app"), "", []);
+
+            var info = await locator.ResolveAsync(missing);
+
+            Assert.False(info.Found);
+            Assert.Equal(GitSource.UserSetting, info.Source);
+            Assert.Equal(missing, info.Path);
+            Assert.Contains(missing, info.NotFoundReason);
         }
         finally
         {

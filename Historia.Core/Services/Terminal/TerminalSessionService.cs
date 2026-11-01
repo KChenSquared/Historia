@@ -36,13 +36,14 @@ public sealed class TerminalSessionService : ITerminalSessionService, IDisposabl
         IUiDispatcher dispatcher,
         TerminalHostEnvironment? host = null,
         Func<TerminalOrigin, string?>? sshKeyResolver = null,
-        INotificationService? notifications = null)
+        INotificationService? notifications = null,
+        IGitExecutableLocator? locator = null)
     {
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         _notifications = notifications;
-        _host = host ?? TerminalHostEnvironment.System;
+        _host = host ?? (locator is null ? TerminalHostEnvironment.System : TerminalHostEnvironment.CreateSystem(() => locator.Current));
         _sshKeyResolver = sshKeyResolver ?? (_ => null);
     }
 

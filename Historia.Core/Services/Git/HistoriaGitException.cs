@@ -1,4 +1,4 @@
-
+﻿
 namespace Historia.Services.Git;
 
 /// <summary>
@@ -70,6 +70,7 @@ public sealed class HistoriaGitException : Exception
         GitErrorKind.InvalidRefName => "the name isn't a valid git ref",
         GitErrorKind.DetachedHeadOperation => "it needs a checked-out branch",
         GitErrorKind.SigningToolMissing => "commit signing needs GPG, which isn't installed. Install Gpg4win or Git for Windows, or turn off signing for this profile",
+        GitErrorKind.SshSigningToolMissing => "commit signing over SSH needs ssh-keygen, which isn't installed. Install OpenSSH or Git for Windows, or turn off signing for this profile",
         GitErrorKind.HookFailed => "a git hook stopped it",
         GitErrorKind.LfsMissing => "the repository needs Git LFS, which wasn't found",
         GitErrorKind.UnrelatedHistories => "the histories are unrelated",

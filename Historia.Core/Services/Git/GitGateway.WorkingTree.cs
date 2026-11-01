@@ -324,7 +324,15 @@ public sealed partial class GitGateway
                         kind = GitErrorKind.HookFailed;
                 }
                 if (kind == GitErrorKind.HookFailed)
-                    throw new HistoriaGitException(GitErrorKind.HookFailed, "Commit hook failed.", $"{result.StandardOutput}\n{result.StandardError}".Trim());
+                {
+                    // A hook whose interpreter is missing never ran; the bundled Git has sh but no bash.
+                    var couldNotStart = result.StandardError.Contains("cannot spawn", StringComparison.OrdinalIgnoreCase)
+                        || result.StandardError.Contains("env: 'bash'", StringComparison.OrdinalIgnoreCase);
+                    var message = couldNotStart
+                        ? "A commit hook could not start because the program it runs with wasn't found. The Git bundled with Historia has sh but not bash."
+                        : "Commit hook failed.";
+                    throw new HistoriaGitException(GitErrorKind.HookFailed, message, $"{result.StandardOutput}\n{result.StandardError}".Trim());
+                }
 
                 throw HistoriaGitException.FromCli(result, "Commit");
             }

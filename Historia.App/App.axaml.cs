@@ -253,6 +253,8 @@ public sealed class App : Application
         services.AddSingleton<IThemeService, ThemeService>();
         services.AddSingleton<SyntaxThemeHost>();
         services.AddSingleton<IGitExecutableLocator, GitExecutableLocator>();
+        services.AddSingleton<Historia.Services.Network.ISshHostResolver>(sp =>
+            new Historia.Services.Network.SshHostResolver(sp.GetRequiredService<IGitExecutableLocator>()));
         if (FrameBench.Active)
         {
             // The benchmark repositories are read-only: refuse every git write or network call.
@@ -425,8 +427,8 @@ public sealed class App : Application
                     ? r
                     : "Git was not found on this system.";
                 var advice = settings.Current.UseBundledGit
-                    ? "Network and history operations are disabled until a supported git is installed or its path is set in Settings."
-                    : "Network and history operations are disabled until a supported git is installed, its path is set in Settings, or \"Use the Git bundled with Historia\" is turned on.";
+                    ? "Network and history operations are disabled until a supported git is installed or gitExecutablePath is set in settings.json."
+                    : "Network and history operations are disabled until a supported git is installed, gitExecutablePath is set in settings.json, or \"Use the Git bundled with Historia\" is turned on.";
                 notifications.Publish(NotificationSeverity.Warning, $"{reason} {advice}");
             }
             else if (git.Source == GitSource.Bundled)
@@ -436,6 +438,10 @@ public sealed class App : Application
                 if (!string.IsNullOrEmpty(git.Notice))
                     message = $"{message} {git.Notice}";
                 notifications.Publish(NotificationSeverity.Info, message);
+            }
+            else if (!string.IsNullOrEmpty(git.Notice))
+            {
+                notifications.Publish(NotificationSeverity.Info, git.Notice);
             }
         }
         catch (Exception ex)

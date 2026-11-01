@@ -97,37 +97,75 @@ public sealed class SshHostResolverTests : IDisposable
     public void The_hostname_line_is_parsed_from_ssh_G_output()
         => Assert.Equal("github.com", SshHostResolver.ParseHostName("user git\r\nhostname github.com\r\nport 22\r\n"));
 
-    [Fact]
-    public async Task Bundled_git_launches_bundled_ssh_executable()
+    private sealed class FixedLocator(GitExecutableInfo info) : IGitExecutableLocator
     {
-        var root = TestScratch.NewDirectory("historia-ssh-bundled-");
-        try
-        {
-            var bundledRoot = Path.Combine(root, "git");
-            var usrBin = Path.Combine(bundledRoot, "usr", "bin");
-            Directory.CreateDirectory(usrBin);
-            var sshFile = Path.Combine(usrBin, OperatingSystem.IsWindows() ? "ssh.cmd" : "ssh");
-            File.WriteAllText(sshFile, "@echo hostname bundled.example.invalid\r\n");
+        public GitExecutableInfo Current => info;
+        public Task<GitExecutableInfo> ResolveAsync(string? userOverridePath, CancellationToken ct = default) => Task.FromResult(info);
+        public Task<GitExecutableInfo> WhenResolvedAsync(CancellationToken ct = default) => Task.FromResult(info);
+    }
 
-            var bundledInfo = new GitExecutableInfo
-            {
-                Found = true,
-                Source = GitSource.Bundled,
-                BundledRoot = bundledRoot,
-                Path = Path.Combine(bundledRoot, "ucrt64", "bin", "git.exe"),
-                Version = new Version(2, 56, 0),
-            };
+    private GitExecutableInfo BundledInfo(string bundledRoot) => new()
+    {
+        Found = true,
+        Source = GitSource.Bundled,
+        BundledRoot = bundledRoot,
+        Path = Path.Combine(bundledRoot, "ucrt64", "bin", "git.exe"),
+        Version = new Version(2, 56, 0),
+    };
 
-            var resolver = new SshHostResolver(() => bundledInfo);
-            Assert.Equal(sshFile, resolver.ResolveSshExecutable());
+    [Fact]
+    public void Bundled_git_runs_the_bundled_ssh()
+    {
+        var bundledRoot = Path.Combine(_dir, "git");
+        var usrBin = Path.Combine(bundledRoot, "usr", "bin");
+        Directory.CreateDirectory(usrBin);
+        var ssh = Path.Combine(usrBin, OperatingSystem.IsWindows() ? "ssh.exe" : "ssh");
+        File.WriteAllText(ssh, "");
 
-            var resolvedHost = await resolver.ResolveHostNameAsync("some-host", CancellationToken.None);
-            Assert.Equal("bundled.example.invalid", resolvedHost);
-            Assert.Equal(1, resolver.ProcessLaunches);
-        }
-        finally
-        {
-            TestScratch.Delete(root);
-        }
+        var resolver = new SshHostResolver(new FixedLocator(BundledInfo(bundledRoot)));
+
+        Assert.Equal(ssh, resolver.ResolveSshExecutable());
+    }
+
+    [Fact]
+    public void Bundled_git_ignores_a_bundled_ssh_cmd()
+    {
+        var bundledRoot = Path.Combine(_dir, "git");
+        var usrBin = Path.Combine(bundledRoot, "usr", "bin");
+        Directory.CreateDirectory(usrBin);
+        File.WriteAllText(Path.Combine(usrBin, "ssh.cmd"), "");
+
+        var resolver = new SshHostResolver(new FixedLocator(BundledInfo(bundledRoot)));
+
+        Assert.Equal(SshHostResolver.FindSshOnPath(), resolver.ResolveSshExecutable());
+    }
+
+    [Fact]
+    public void An_installed_git_uses_the_ssh_on_path()
+    {
+        var installed = new GitExecutableInfo { Found = true, Source = GitSource.Installed, Path = "git", Version = new Version(2, 50, 0) };
+
+        var resolver = new SshHostResolver(new FixedLocator(installed));
+
+        Assert.Equal(SshHostResolver.FindSshOnPath(), resolver.ResolveSshExecutable());
+    }
+
+    [Fact]
+    public void The_app_gives_every_repository_a_resolver_that_knows_the_git_in_use()
+    {
+        var root = RepoRoot();
+        var app = File.ReadAllText(Path.Combine(root, "Historia.App", "App.axaml.cs"));
+        var context = File.ReadAllText(Path.Combine(root, "Historia.Core", "Services", "Workspace", "RepositoryContext.cs"));
+
+        Assert.Contains("new Historia.Services.Network.SshHostResolver(sp.GetRequiredService<IGitExecutableLocator>())", app);
+        Assert.Contains("services.GetService<ISshHostResolver>()", context);
+    }
+
+    private static string RepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "Historia.slnx")))
+            dir = dir.Parent;
+        return dir?.FullName ?? throw new InvalidOperationException("Repository root not found.");
     }
 }

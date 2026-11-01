@@ -1229,4 +1229,91 @@ public class SettingsViewModelTests
         Assert.Contains("bundled with Historia", rig.Vm.GitInUseText);
         Assert.Contains(rig.Notifications.Published, n => n.Severity == NotificationSeverity.Info);
     }
+
+    private sealed class GatedGitLocator : IGitExecutableLocator
+    {
+        private readonly object _sync = new();
+
+        public List<bool> Requests { get; } = [];
+        public List<TaskCompletionSource<GitExecutableInfo>> Gates { get; } = [];
+        public GitExecutableInfo Current { get; set; } = GitExecutableInfo.NotFound;
+
+        public Task<GitExecutableInfo> ResolveAsync(string? userOverridePath, CancellationToken ct = default)
+            => ResolveAsync(userOverridePath, true, ct);
+
+        public Task<GitExecutableInfo> ResolveAsync(string? userOverridePath, bool allowBundled, CancellationToken ct = default)
+        {
+            var gate = new TaskCompletionSource<GitExecutableInfo>(TaskCreationOptions.RunContinuationsAsynchronously);
+            lock (_sync)
+            {
+                Requests.Add(allowBundled);
+                Gates.Add(gate);
+            }
+            return gate.Task;
+        }
+
+        public int RequestCount
+        {
+            get { lock (_sync) return Requests.Count; }
+        }
+
+        public Task<GitExecutableInfo> WhenResolvedAsync(CancellationToken ct = default)
+            => Task.FromResult(Current);
+    }
+
+    private static async Task WaitForRequestsAsync(GatedGitLocator locator, int count)
+    {
+        var deadline = Stopwatch.StartNew();
+        while (locator.RequestCount < count && deadline.Elapsed < TimeSpan.FromSeconds(10))
+            await Task.Delay(10);
+        Assert.Equal(count, locator.RequestCount);
+    }
+
+    [Fact]
+    public async Task Rapid_bundled_git_toggles_resolve_one_at_a_time_in_toggle_order()
+    {
+        var locator = new GatedGitLocator();
+        using var rig = new Rig(locator: locator);
+
+        rig.Vm.UseBundledGit = false;
+        rig.Vm.UseBundledGit = true;
+        await WaitForRequestsAsync(locator, 1);
+        await Task.Delay(50);
+        Assert.Equal(1, locator.RequestCount);
+
+        locator.Gates[0].SetResult(GitExecutableInfo.NotFound);
+        await WaitForRequestsAsync(locator, 2);
+
+        Assert.Equal([false, true], locator.Requests);
+        locator.Gates[1].SetResult(GitExecutableInfo.NotFound);
+    }
+
+    [Fact]
+    public async Task Turning_bundled_git_off_with_an_old_git_installed_names_that_git_in_the_warning()
+    {
+        const string Reason = "Git 2.40.1 was found at 'C:\\Git\\git.exe', but Git 2.46 or newer is required.";
+        var bundled = new GitExecutableInfo
+        {
+            Found = true,
+            Path = @"C:\App\git\ucrt64\bin\git.exe",
+            Version = new Version(2, 56, 0),
+            Source = GitSource.Bundled,
+            BundledRoot = @"C:\App\git",
+        };
+        var locator = new GatedGitLocator { Current = bundled };
+        using var rig = new Rig(locator: locator);
+
+        rig.Vm.UseBundledGit = false;
+        await WaitForRequestsAsync(locator, 1);
+        locator.Gates[0].SetResult(new GitExecutableInfo { Found = false, Path = @"C:\Git\git.exe", NotFoundReason = Reason });
+
+        var deadline = Stopwatch.StartNew();
+        while (rig.Notifications.Published.Count == 0 && deadline.Elapsed < TimeSpan.FromSeconds(10))
+            await Task.Delay(10);
+
+        var warning = Assert.Single(rig.Notifications.Published);
+        Assert.Equal(NotificationSeverity.Warning, warning.Severity);
+        Assert.Contains("2.40.1", warning.Message);
+        Assert.DoesNotContain("in Settings", warning.Message);
+    }
 }
