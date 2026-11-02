@@ -148,17 +148,17 @@ Download pre-built packages from [GitHub Releases](https://github.com/KChenSquar
 
 ### macOS & Linux (experimental)
 
-macOS and Linux packages are experimental and not included in release downloads. If you want packages for other platforms, you can build them using the GitHub Actions **Package** workflow:
+macOS and Linux packages are included in release downloads with `-experimental` in their file names, for example `Historia-<version>-MacOSX-arm64-experimental.dmg`. To build them for any branch or tag, use the GitHub Actions **Package** workflow:
 
 1. Go to the [**Actions**](https://github.com/KChenSquared/Historia/actions/workflows/package.yml) tab in the repository (or your fork).
 2. Select the **Package** workflow in the left sidebar.
-3. Click **Run workflow**, choose your branch or tag, and select the desired operating systems (`osx-arm64`, `osx-x64`, `linux-x64`) and package kinds (archives or installers).
+3. Click **Run workflow**, choose your branch or tag, and select the desired operating systems (`MacOSX-arm64` for Apple Silicon, `MacOSX-x64` for Intel, `linux-x64`) and package kinds (archives or installers).
 4. When the run finishes, download the package artifacts from the workflow summary.
 
 You can also package locally with `packaging/package.ps1` or build from source (see [Quick Start](#-quick-start)).
 
 #### Installing macOS packages
-- **Disk Image (`Historia-<version>-<rid>-experimental.dmg`):** Open the `.dmg` and drag `Historia.app` to `Applications`. Builds are ad-hoc signed, so clear the quarantine attribute before first launch:
+- **Disk Image (`Historia-<version>-MacOSX-<arch>-experimental.dmg`):** Open the `.dmg` and drag `Historia.app` to `Applications`. Builds are ad-hoc signed, so clear the quarantine attribute before first launch:
   ```bash
   xattr -dr com.apple.quarantine /Applications/Historia.app
   ```
@@ -166,15 +166,18 @@ You can also package locally with `packaging/package.ps1` or build from source (
   ```bash
   ln -s /Applications/Historia.app/Contents/MacOS/historia-cmdr /usr/local/bin/historia-cmdr
   ```
-- **Archive (`Historia-<version>-<rid>-experimental.tar.gz`):** Extract and run. Requires [.NET 10 Runtime](https://dotnet.microsoft.com/download) and Git 2.46+.
+- **Archive (`Historia-<version>-MacOSX-<arch>-experimental.tar.gz`):** Extract and run. Requires [.NET 10 Runtime](https://dotnet.microsoft.com/download) and Git 2.46+.
 
 #### Installing Linux packages
 - **Debian / Ubuntu Package (`historia_<debver>_amd64-experimental.deb`):** Install via `apt`:
   ```bash
   sudo apt install ./historia_<debver>_amd64-experimental.deb
   ```
-  Configures desktop application menus, hicolor icons, and puts `historia` and `historia-cmdr` on `PATH` under `/usr/bin`. Depends on `dotnet-runtime-10.0` and `git` (Git 2.46+ is verified at launch).
-- **Archive (`Historia-<version>-linux-x64-experimental.tar.gz`):** Extract and run. Requires `dotnet-runtime-10.0` and Git 2.46+.
+  Configures desktop application menus, hicolor icons, and puts `historia` and `historia-cmdr` on `PATH` under `/usr/bin`. Depends on `dotnet-runtime-10.0`, `git` (Git 2.46+ is verified at launch) and the X11 and font libraries Avalonia needs (`libx11-6`, `libice6`, `libsm6`, `libfontconfig1`).
+- **Archive (`Historia-<version>-linux-x64-experimental.tar.gz`):** Extract and run. Requires `dotnet-runtime-10.0`, Git 2.46+ and the X11 and font libraries Avalonia needs. Desktop installs usually have them; minimal systems such as a fresh WSL distro or a container need them installed first:
+  ```bash
+  sudo apt install libx11-6 libice6 libsm6 libfontconfig1
+  ```
 
 ---
 

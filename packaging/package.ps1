@@ -92,6 +92,8 @@ if ($isWinRid) {
 }
 # Only Windows packages are supported; every other platform is marked experimental in its file name.
 $platformTag = if ($isWinRid) { '' } else { '-experimental' }
+# File names spell macOS as MacOSX so downloads are easy to find; the runtime identifier stays osx-*.
+$platformName = $Rid -replace '^osx-', 'MacOSX-'
 $cmdrExeName = if ($isWinRid) { 'historia-cmdr.exe' } else { 'historia-cmdr' }
 $cmdrPath = Join-Path $Staging $cmdrExeName
 $cmdrConfigPath = Join-Path $Staging 'historia-cmdr.runtimeconfig.json'
@@ -135,7 +137,7 @@ if ($Archives) {
         Write-Host "Creating archive $archivePath..."
         Compress-Archive -Path "$Staging\*" -DestinationPath $archivePath -CompressionLevel Optimal
     } else {
-        $archivePath = Join-Path $ResolvedOutDir "Historia-$version-$Rid$platformTag.tar.gz"
+        $archivePath = Join-Path $ResolvedOutDir "Historia-$version-$platformName$platformTag.tar.gz"
         if (Test-Path $archivePath) { Remove-Item -Force $archivePath }
         Write-Host "Creating archive $archivePath..."
         Invoke-Native -FilePath "tar" -Arguments @("-czf", $archivePath, "-C", $Staging, ".")
@@ -231,7 +233,7 @@ if ($Installers) {
         Move-Item -Path $appDir -Destination $dmgFolder
         Invoke-Native -FilePath "ln" -Arguments @("-s", "/Applications", (Join-Path $dmgFolder "Applications"))
 
-        $dmgPath = Join-Path $ResolvedOutDir "Historia-$version-$Rid$platformTag.dmg"
+        $dmgPath = Join-Path $ResolvedOutDir "Historia-$version-$platformName$platformTag.dmg"
         if (Test-Path $dmgPath) { Remove-Item -Force $dmgPath }
         Write-Host "Creating DMG $dmgPath..."
         Invoke-Native -FilePath "hdiutil" -Arguments @("create", "-volname", "Historia", "-srcfolder", $dmgFolder, "-ov", "-format", "UDZO", $dmgPath)
