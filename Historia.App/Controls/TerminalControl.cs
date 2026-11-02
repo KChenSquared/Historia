@@ -91,7 +91,7 @@ public sealed class TerminalControl : Control
 
     // A run drawn from the terminal font's glyphs (Run) or, when a glyph is missing from it, shaped
     // with font fallback (Layout); exactly one is set.
-    private sealed class CachedRun(GlyphRun? run, TextLayout? layout, char[] text, int face, uint fgArgb)
+    private sealed class CachedRun(GlyphRun? run, TextLayout? layout, char[] text, int face, uint fgArgb) : IDisposable
     {
         public GlyphRun? Run { get; } = run;
         public TextLayout? Layout { get; } = layout;
