@@ -70,12 +70,12 @@ public sealed class CloneService(
 
     public async Task StartAsync(CloneRequest request)
     {
-        CancellationTokenSource cts;
+        using var cts = new CancellationTokenSource();
         lock (_sync)
         {
             if (_current is not null)
                 throw new InvalidOperationException("A clone is already running.");
-            _cts = cts = new CancellationTokenSource();
+            _cts = cts;
             _current = new CloneStatus(request.Url, request.TargetDirectory, null, false);
         }
         RaiseChanged();
@@ -119,7 +119,6 @@ public sealed class CloneService(
             lock (_sync)
             {
                 _current = null;
-                _cts?.Dispose();
                 _cts = null;
             }
             RaiseChanged();

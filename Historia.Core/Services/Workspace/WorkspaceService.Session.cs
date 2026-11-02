@@ -205,7 +205,7 @@ public sealed partial class WorkspaceService
             var payload = new JsonObject
             {
                 ["schemaVersion"] = 3,
-                ["paths"] = new JsonArray([.. paths.Select(p => (JsonNode)p!)]),
+                ["paths"] = new JsonArray([.. paths.Select(p => (JsonNode)p)]),
                 ["linkOwners"] = new JsonArray([.. linkOwnerPaths.Select(p => p is null ? null : (JsonNode)p)]),
                 ["focusedPath"] = focusedPath,
             };

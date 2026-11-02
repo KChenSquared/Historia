@@ -137,7 +137,9 @@ public sealed class ConflictToggleMargin : AbstractMargin
             _markPen = PaletteBrushes.Pen("ColorBg", 1.5);
         }
 
+#pragma warning disable S1244 // exact compare against the stored copy
         if (_checkGeometry == null || size != _boxSize)
+#pragma warning restore S1244
         {
             PoolMissesForTesting++;
             _boxSize = size;

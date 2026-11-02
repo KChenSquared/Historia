@@ -346,7 +346,7 @@ public sealed partial class AiProfileEditorViewModel : ViewModelBase
     private Task CommitAsync(Func<AiServiceProfile, AiServiceProfile> mutate)
     {
         ModelNote = null;
-        var task = _profiles.UpdateAsync(Id, mutate);
+        var task = _profiles.UpdateAsync(Id, mutate, CancellationToken.None);
         if (_profiles.Profiles.FirstOrDefault(p => p.Id == Id) is { } saved)
             Snapshot = saved;
         _committed();
@@ -379,8 +379,11 @@ public sealed partial class AiProfileEditorViewModel : ViewModelBase
 
     private async Task LoadModelsAsync(AiServiceProfile profile)
     {
+#pragma warning disable S6966 // synchronous cancel keeps the order; an await would let a re-entrant load run first
         _modelsCts?.Cancel();
-        var cts = _modelsCts = new CancellationTokenSource();
+#pragma warning restore S6966
+        var cts = new CancellationTokenSource();
+        _modelsCts = cts;
 
         IsLoadingModels = true;
         try
@@ -411,8 +414,14 @@ public sealed partial class AiProfileEditorViewModel : ViewModelBase
         }
         finally
         {
-            if (!IsDisposed)
-                IsLoadingModels = false;
+            // Only the newest load clears the flag, and each load disposes the source it created.
+            if (ReferenceEquals(_modelsCts, cts))
+            {
+                _modelsCts = null;
+                if (!IsDisposed)
+                    IsLoadingModels = false;
+            }
+            cts.Dispose();
         }
     }
 

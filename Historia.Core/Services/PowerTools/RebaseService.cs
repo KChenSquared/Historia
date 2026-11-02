@@ -8,7 +8,7 @@ public sealed class RebaseService(IGitCliService cli) : IRebaseService
     /// built. Signature is (mode, tempDir) → shell command. Defaults to re-invoking the Historia
     /// executable with the given switch.
     /// </summary>
-    public static Func<string, string, string>? EditorCommandOverride;
+    internal static Func<string, string, string>? EditorCommandOverride;
 
     private static string BuildEditorCommand(string mode, string dir)
     {
@@ -78,7 +78,9 @@ public sealed class RebaseService(IGitCliService cli) : IRebaseService
             // per-session secret: the token is both written into tempDir and passed on the
             // child env, so an unrelated process can't drive the helper with crafted args.
             var token = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+#pragma warning disable S6966 // a tiny temp file, written beside the synchronous plan write above
             File.WriteAllText(Path.Combine(tempDir, "token"), token);
+#pragma warning restore S6966
 
             env["GIT_SEQUENCE_EDITOR"] = BuildEditorCommand("--rebase-seq", tempDir);
             env["GIT_EDITOR"] = BuildEditorCommand("--rebase-msg", tempDir);

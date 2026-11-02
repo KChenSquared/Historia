@@ -66,7 +66,7 @@ public sealed partial class CmdrQueueViewModel : ViewModelBase
         var newestFirst = !NewestFirst;
         NewestFirst = newestFirst;
         Sync();
-        return _settings.UpdateAsync(s => s with { CmdrQueueNewestFirst = newestFirst });
+        return _settings.UpdateAsync(s => s with { CmdrQueueNewestFirst = newestFirst }, CancellationToken.None);
     }
 
     /// <summary>Removes the item from the queue. No confirmation: the item is only a pointer.</summary>
@@ -91,7 +91,9 @@ public sealed partial class CmdrQueueViewModel : ViewModelBase
 
         var cts = new CancellationTokenSource();
         var previous = Interlocked.Exchange(ref _openCts, cts);
+#pragma warning disable S6966 // synchronous cancel is intended; it keeps the order here
         previous?.Cancel();
+#pragma warning restore S6966
 
         _queue.MarkSeen(item.Id);
         try

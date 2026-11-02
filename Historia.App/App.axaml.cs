@@ -52,7 +52,7 @@ public sealed class App : Application
 
         // Without developer mode, developer-only options are switched off before any theme is resolved.
         if (!Historia.Platform.DevMode.Enabled && _settings.Current.UseCustomTheme)
-            _settings.UpdateAsync(s => s.WithoutDevOnlyOptions()).GetAwaiter().GetResult();
+            _settings.UpdateAsync(s => s.WithoutDevOnlyOptions(), CancellationToken.None).GetAwaiter().GetResult();
 
         var services = new ServiceCollection();
         ConfigureServices(services, _settings);
@@ -105,7 +105,7 @@ public sealed class App : Application
                     if (_provider is not null)
                     {
                         var disposeTask = _provider.DisposeAsync().AsTask();
-                        if (!disposeTask.Wait(TimeSpan.FromSeconds(5)))
+                        if (!disposeTask.Wait(TimeSpan.FromSeconds(5), CancellationToken.None))
                         {
                             Historia.Diagnostics.PerfLog.Mark(
                                 $"desktop.Exit provider.DisposeAsync() timed out after 5s");
@@ -169,8 +169,8 @@ public sealed class App : Application
             _singleInstanceCts = new CancellationTokenSource();
             // Loading the agent queue removes its expired items, once per launch, before any
             // control request can add to it.
-            _provider!.GetRequiredService<ICmdrQueueService>();
-            var control = _provider!.GetRequiredService<ExternalControlHost>();
+            _provider.GetRequiredService<ICmdrQueueService>();
+            var control = _provider.GetRequiredService<ExternalControlHost>();
             _ = SingleInstance.RunServerAsync(OnForwardedArguments, control.HandleAsync, _singleInstanceCts.Token);
         }
         OnForwardedArguments(NonSwitchArgs(Environment.GetCommandLineArgs().Skip(1)));
@@ -200,7 +200,7 @@ public sealed class App : Application
                         try
                         {
                             if (Directory.Exists(path))
-                                await workspace.OpenAsync(path);
+                                await workspace.OpenAsync(path, CancellationToken.None);
                         }
                         catch
                         {
@@ -348,7 +348,7 @@ public sealed class App : Application
             var dark = ct.BaseTheme == Historia.Models.EffectiveTheme.Dark;
             var uri = string.IsNullOrWhiteSpace(ct.SplashImagePath)
                 ? Historia.Models.CustomTheme.BuiltInSplashLocation(ct.Base)
-                : ct.SplashImagePath!;
+                : ct.SplashImagePath;
             return (secs > 0, dark, uri, TimeSpan.FromSeconds(secs));
         }
 
@@ -367,7 +367,7 @@ public sealed class App : Application
     {
         try
         {
-            await Task.Delay(_splashDuration).ConfigureAwait(false);
+            await Task.Delay(_splashDuration, CancellationToken.None).ConfigureAwait(false);
         }
         finally
         {
@@ -404,7 +404,7 @@ public sealed class App : Application
         await Task.WhenAll(resolveGit, restoreTabs).ConfigureAwait(false);
 
         // refresh the reserved global profile's identity from ~/.gitconfig once git is resolved.
-        try { await Services.GetRequiredService<Historia.Services.Profiles.IProfileService>().SyncGlobalIdentityAsync().ConfigureAwait(false); }
+        try { await Services.GetRequiredService<Historia.Services.Profiles.IProfileService>().SyncGlobalIdentityAsync(CancellationToken.None).ConfigureAwait(false); }
         catch { /* a missing or unreadable ~/.gitconfig just leaves the global profile blank */ }
 
         // start auto-fetch after restore has populated the tab strip, so the "open repos
@@ -473,7 +473,7 @@ public sealed class App : Application
             // The flush only does file I/O on thread-pool continuations, so waiting for it here
             // cannot deadlock; the bound keeps a stuck disk or network share from freezing
             // shutdown, and the flush carries on in the background.
-            if (_settings?.FlushAsync().Wait(TimeSpan.FromSeconds(2)) == false)
+            if (_settings?.FlushAsync(CancellationToken.None).Wait(TimeSpan.FromSeconds(2), CancellationToken.None) == false)
                 AppLog.Write(AppLogLevel.Warn, "app", "settings flush timed out during shutdown; continuing");
         }
         catch { /* best effort */ }

@@ -89,7 +89,7 @@ public static partial class UnifiedDiffParser
                     current.Add(new DiffLine
                     {
                         Type = DiffLineType.Context,
-                        Content = line.Length > 0 ? line[1..] : string.Empty,
+                        Content = line[1..],
                         OldLineNumber = oldNo++,
                         NewLineNumber = newNo++,
                     });

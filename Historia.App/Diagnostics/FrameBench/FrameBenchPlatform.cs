@@ -19,7 +19,7 @@ internal static class FrameBenchPlatform
             var mode = new DevMode { dmSize = (short)Marshal.SizeOf<DevMode>() };
             // A null device name is the primary display.
             if (EnumDisplaySettingsW(null, EnumCurrentSettings, ref mode) && mode.dmDisplayFrequency > 1)
-                return ((int)mode.dmDisplayFrequency, false);
+                return (mode.dmDisplayFrequency, false);
         }
         catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
         {

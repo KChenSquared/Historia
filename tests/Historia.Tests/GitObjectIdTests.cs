@@ -145,7 +145,7 @@ public class GitObjectIdTests
         Assert.Equal(hex, id.ToShortString(50));
 
         Span<char> span = stackalloc char[40];
-        Assert.True(id.TryFormat(span, out int charsWritten));
+        Assert.True(id.TryFormat(span, out int charsWritten, default, null));
         Assert.Equal(40, charsWritten);
         Assert.Equal(hex, span.ToString());
     }

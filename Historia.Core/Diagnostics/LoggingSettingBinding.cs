@@ -51,7 +51,7 @@ public sealed class LoggingSettingBinding : IDisposable
             {
                 if (Interlocked.CompareExchange(ref _state, StateRunning, StateIdle) == StateIdle)
                 {
-                    ThreadPool.UnsafeQueueUserWorkItem(static state => ((LoggingSettingBinding)state!).RunApply(), this, preferLocal: false);
+                    ThreadPool.UnsafeQueueUserWorkItem(static state => state.RunApply(), this, preferLocal: false);
                     return;
                 }
             }

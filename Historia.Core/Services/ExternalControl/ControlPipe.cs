@@ -75,17 +75,17 @@ public static class ControlPipe
         }
         catch (UnauthorizedAccessException)
         {
-            client.Dispose();
+            await client.DisposeAsync().ConfigureAwait(false);
             return new ControlConnectResult(ControlConnectOutcome.Incompatible, null);
         }
         catch (Exception ex) when (ex is TimeoutException or IOException)
         {
-            client.Dispose();
+            await client.DisposeAsync().ConfigureAwait(false);
             return new ControlConnectResult(ControlConnectOutcome.Unreachable, null);
         }
         catch
         {
-            client.Dispose();
+            await client.DisposeAsync().ConfigureAwait(false);
             throw;
         }
     }

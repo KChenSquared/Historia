@@ -303,7 +303,7 @@ public sealed partial class RepositoryViewModel : ViewModelBase
             if (IsOpBusy)
                 return;
             busy = IsOpBusy = true;
-            await _conflicts.ContinueOperationAsync(repo);
+            await _conflicts.ContinueOperationAsync(repo, CancellationToken.None);
         }
         catch (HistoriaGitException ex) when (ex.Kind == GitErrorKind.MergeConflict)
         {
@@ -340,7 +340,7 @@ public sealed partial class RepositoryViewModel : ViewModelBase
             if (IsOpBusy)
                 return;
             busy = IsOpBusy = true;
-            await _conflicts.AbortOperationAsync(repo);
+            await _conflicts.AbortOperationAsync(repo, CancellationToken.None);
         }
         catch (Exception ex)
         {

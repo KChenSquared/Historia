@@ -316,7 +316,7 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
 
             if (!spill)
             {
-                _backgroundWriter?.EnsureCurrent(context);
+                _backgroundWriter?.QueueCommitGraphCheck(context);
                 return result;
             }
             swapped = SpillAndSwap(context, cache, query.IncludeRemoteBranches, result);
@@ -335,7 +335,7 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
         MaybeStartBackgroundSpill(context, cache, query);
         // Queued only: the check waits for the background-work gate, so it never competes with
         // the first paint this layout is for.
-        _backgroundWriter?.EnsureCurrent(context);
+        _backgroundWriter?.QueueCommitGraphCheck(context);
         return swapped with { Fingerprint = cache.Fingerprint };
     }
 
@@ -604,7 +604,7 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
         if (cache is null)
             return null;
 
-        if (!cache.WalkLock.Wait(0))
+        if (!cache.WalkLock.Wait(0, CancellationToken.None))
             return null;
         try
         {
@@ -647,7 +647,9 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
             _caches.Remove(context);
         }
 
+#pragma warning disable S6966 // synchronous cancel is intended; it keeps the order here
         try { cache.Cts.Cancel(); } catch (ObjectDisposedException) { }
+#pragma warning restore S6966
 
         // Let the background spill observe the cancellation and finish its own turn before
         // this touches LiveWalk — disposing it while a chunk may still be mid-MoveNext is exactly
@@ -655,7 +657,7 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
         // to the same drop Forget already uses, rather than hanging tab-switch forever.
         if (cache.BackgroundSpillTask is { } spillTask)
         {
-            try { await spillTask.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); }
+            try { await spillTask.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false); }
             catch { /* timed out or faulted — best effort, DropLiveWalk below is the fallback */ }
         }
 
@@ -676,7 +678,7 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
             {
                 // GitLogStream is a separate process — only serialization against a concurrent pull
                 // is needed.
-                await cache.WalkLock.WaitAsync().ConfigureAwait(false);
+                await cache.WalkLock.WaitAsync(CancellationToken.None).ConfigureAwait(false);
                 try
                 {
                     if (ReferenceEquals(cache.LiveWalk, walk))

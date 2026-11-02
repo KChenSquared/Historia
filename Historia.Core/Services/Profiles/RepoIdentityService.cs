@@ -44,7 +44,7 @@ public sealed class RepoIdentityService(IGitCliService cli) : IRepoIdentityServi
                     if (previous is not null)
                         await Task.WhenAny(previous).ConfigureAwait(false);
                     return await ResolveCoreAsync(context, token).ConfigureAwait(false);
-                });
+                }, CancellationToken.None);
                 _inFlight.Add(context, shared);
                 var started = shared;
                 _ = started.Task.ContinueWith(t =>
@@ -79,7 +79,9 @@ public sealed class RepoIdentityService(IGitCliService cli) : IRepoIdentityServi
             // Outside the lock: cancelling runs the git calls' cancellation callbacks.
             if (abandon)
             {
+#pragma warning disable S6966 // synchronous cancel is intended; it keeps the order here
                 try { shared.Cts.Cancel(); }
+#pragma warning restore S6966
                 catch (ObjectDisposedException) { }
             }
         }

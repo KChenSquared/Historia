@@ -105,7 +105,7 @@ public sealed class LogTrimmer : ILogTrimmer
                 AppLog.Flush(FlushTimeout);
                 try
                 {
-                    await _settings.UpdateAsync(s => s with { LoggingEnabled = false }).ConfigureAwait(false);
+                    await _settings.UpdateAsync(s => s with { LoggingEnabled = false }, CancellationToken.None).ConfigureAwait(false);
                 }
                 catch
                 {
@@ -113,7 +113,7 @@ public sealed class LogTrimmer : ILogTrimmer
                 }
 
                 _failureCount = 0;
-                _failureStore!.Save(0);
+                _failureStore.Save(0);
             }
         }
     }

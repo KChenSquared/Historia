@@ -376,7 +376,9 @@ public sealed partial class ConflictService(IGitCliService cli, ISettingsService
                 {
                     var mergeHeadFile = Path.Combine(gitDir, "MERGE_HEAD");
                     if (File.Exists(mergeHeadFile))
+#pragma warning disable S6966 // a tiny file, read after the method has left the UI thread
                         opHeadSha = File.ReadAllText(mergeHeadFile).Trim();
+#pragma warning restore S6966
 
                     var mergeMsgFile = Path.Combine(gitDir, "MERGE_MSG");
                     var firstMsgLine = File.Exists(mergeMsgFile)
@@ -395,22 +397,30 @@ public sealed partial class ConflictService(IGitCliService cli, ISettingsService
                     var rebaseDir = Directory.Exists(rebaseMergeDir) ? rebaseMergeDir : rebaseApplyDir;
 
                     var ontoPath = Path.Combine(rebaseDir, "onto");
+#pragma warning disable S6966 // a tiny file, read after the method has left the UI thread
                     ontoSha = File.Exists(ontoPath) ? File.ReadAllText(ontoPath).Trim() : string.Empty;
+#pragma warning restore S6966
 
                     oursTitle = "the branch you are rebasing onto";
 
                     var headNamePath = Path.Combine(rebaseDir, "head-name");
+#pragma warning disable S6966 // a tiny file, read after the method has left the UI thread
                     var headName = File.Exists(headNamePath) ? File.ReadAllText(headNamePath).Trim() : string.Empty;
+#pragma warning restore S6966
                     if (headName.StartsWith("refs/heads/", StringComparison.Ordinal))
                         headName = headName[11..];
 
                     var stoppedShaPath = Path.Combine(rebaseDir, "stopped-sha");
+#pragma warning disable S6966 // a tiny file, read after the method has left the UI thread
                     var stoppedSha = File.Exists(stoppedShaPath) ? File.ReadAllText(stoppedShaPath).Trim() : string.Empty;
+#pragma warning restore S6966
                     if (string.IsNullOrEmpty(stoppedSha))
                     {
                         var rebaseHeadFile = Path.Combine(gitDir, "REBASE_HEAD");
                         if (File.Exists(rebaseHeadFile))
+#pragma warning disable S6966 // a tiny file, read after the method has left the UI thread
                             stoppedSha = File.ReadAllText(rebaseHeadFile).Trim();
+#pragma warning restore S6966
                     }
                     opHeadSha = stoppedSha;
 
@@ -418,12 +428,16 @@ public sealed partial class ConflictService(IGitCliService cli, ISettingsService
 
                     var msgNumFile = Path.Combine(rebaseMergeDir, "msgnum");
                     if (File.Exists(msgNumFile))
+#pragma warning disable S6966 // a tiny file, read after the method has left the UI thread
                         msgNum = File.ReadAllText(msgNumFile).Trim();
+#pragma warning restore S6966
                     else
                     {
                         var nextFile = Path.Combine(rebaseApplyDir, "next");
                         if (File.Exists(nextFile))
+#pragma warning disable S6966 // a tiny file, read after the method has left the UI thread
                             msgNum = File.ReadAllText(nextFile).Trim();
+#pragma warning restore S6966
                     }
                     break;
                 }
@@ -432,7 +446,9 @@ public sealed partial class ConflictService(IGitCliService cli, ISettingsService
                 {
                     var cherryHeadFile = Path.Combine(gitDir, "CHERRY_PICK_HEAD");
                     if (File.Exists(cherryHeadFile))
+#pragma warning disable S6966 // a tiny file, read after the method has left the UI thread
                         opHeadSha = File.ReadAllText(cherryHeadFile).Trim();
+#pragma warning restore S6966
 
                     var shortSha = opHeadSha.Length >= 7 ? opHeadSha[..7] : opHeadSha;
                     theirsTitle = $"Cherry-pick {shortSha}".Trim();
@@ -443,7 +459,9 @@ public sealed partial class ConflictService(IGitCliService cli, ISettingsService
                 {
                     var revertHeadFile = Path.Combine(gitDir, "REVERT_HEAD");
                     if (File.Exists(revertHeadFile))
+#pragma warning disable S6966 // a tiny file, read after the method has left the UI thread
                         opHeadSha = File.ReadAllText(revertHeadFile).Trim();
+#pragma warning restore S6966
 
                     var shortSha = opHeadSha.Length >= 7 ? opHeadSha[..7] : opHeadSha;
                     theirsTitle = $"Revert {shortSha}".Trim();

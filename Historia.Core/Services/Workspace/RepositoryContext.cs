@@ -36,7 +36,9 @@ public sealed class RepositoryContext : IAsyncDisposable
 {
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly AsyncLocal<bool> _isHoldingWriteLock = new();
+#pragma warning disable S2930 // no timer or wait handle to release; in-flight work keeps reading its token
     private readonly CancellationTokenSource _lifetimeCts = new();
+#pragma warning restore S2930
     private readonly SemaphoreSlim _networkGate = new(1, 1);
     private NetworkOperationInfo? _networkOp;
     private int _selfOperationDepth;
@@ -179,10 +181,7 @@ public sealed class RepositoryContext : IAsyncDisposable
 
         Workspace = services.GetService<IWorkspaceService>();
 
-        Watcher = new FileWatcherService(
-            this,
-            State,
-            services.GetRequiredService<ISettingsService>());
+        Watcher = new FileWatcherService(this, State);
     }
 
     /// <summary>
@@ -429,7 +428,7 @@ public sealed class RepositoryContext : IAsyncDisposable
     /// </summary>
     public bool TryBeginNetworkOperation(NetworkOperationInfo info, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out IDisposable? lease)
     {
-        if (!_networkGate.Wait(0))
+        if (!_networkGate.Wait(0, CancellationToken.None))
         {
             lease = null;
             return false;
@@ -549,15 +548,19 @@ public sealed class RepositoryContext : IAsyncDisposable
     {
         using var perfScope = Historia.Diagnostics.PerfLog.Scope($"RepositoryContext.DisposeAsync({DisplayName})");
         AppLog.Write(AppLogLevel.Info, "repo", $"Close({DisplayName})");
+#pragma warning disable S6966 // synchronous cancel is intended; it keeps the order here
         try { _lifetimeCts.Cancel(); } catch { /* ignore */ }
+#pragma warning restore S6966
 
         // A write that already holds the lock finishes before the watcher and state go away; the
         // cancelled lifetime stops writes that are still waiting. A close requested from inside a
         // write would wait for itself, so that flow skips the wait.
+        // Trap: the wait takes no token. The lifetime was cancelled above, so passing its token
+        // would throw here and close would stop waiting for an in-flight write.
         if (!_isHoldingWriteLock.Value)
         {
             var waitStart = System.Diagnostics.Stopwatch.GetTimestamp();
-            await _writeLock.WaitAsync().ConfigureAwait(false);
+            await _writeLock.WaitAsync(CancellationToken.None).ConfigureAwait(false);
             _writeLock.Release();
             var waitedMs = System.Diagnostics.Stopwatch.GetElapsedTime(waitStart).TotalMilliseconds;
             if (waitedMs > CloseWaitLogThresholdMs && PerfLog.Enabled)

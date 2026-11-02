@@ -173,7 +173,7 @@ bash Historia.ScenarioLab/lib/run-headless.sh [--twice] [--keep] [--lint-only] [
 Options:
 - `path...`: One or more script files or directories (default: `scripts/`).
 - `--lint-only`: Checks script formatting, headers, uniqueness, line endings, and safety rules without executing.
-- `--twice`: Runs each scenario twice in isolated sandboxes and compares cryptographic fingerprints (refs, HEAD, index stages, porcelain status, sequencer files, and file SHA1s) to ensure strict determinism across runs.
+- `--twice`: Runs each scenario twice in isolated sandboxes and compares cryptographic fingerprints (refs, HEAD, index stages, porcelain status, sequencer files, and file SHA-256s) to ensure strict determinism across runs.
 - `--keep`: Preserves the temporary sandbox directories instead of removing them on exit.
 
 Exit codes:

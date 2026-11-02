@@ -210,7 +210,7 @@ internal static class SingleInstance
                     }
                     finally
                     {
-                        connected.Dispose();
+                        await connected.DisposeAsync().ConfigureAwait(false);
                         slots.Release();
                     }
                 }, CancellationToken.None);
@@ -231,7 +231,8 @@ internal static class SingleInstance
             }
             finally
             {
-                server?.Dispose();
+                if (server is not null)
+                    await server.DisposeAsync().ConfigureAwait(false);
                 if (slotHeld)
                     slots.Release();
             }

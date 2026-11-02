@@ -418,7 +418,9 @@ public sealed partial class WorkspaceService
             throw HistoriaGitException.FromCli(result, "Clone");
         }
 
-        var context = await RepositoryContext.OpenAsync(targetDirectory, _contextServices).ConfigureAwait(false);
+        // Trap: the token is not passed to OpenAsync. The clone has finished, so a cancel during
+        // discovery would throw and lose the tab; cancelling here must keep the clone and open it.
+        var context = await RepositoryContext.OpenAsync(targetDirectory, _contextServices, CancellationToken.None).ConfigureAwait(false);
         context.Workspace = this;
         if (_services.GetService(typeof(Historia.Services.Graph.IGraphLayoutService))
             is Historia.Services.Graph.IGraphLayoutService graphSvc)

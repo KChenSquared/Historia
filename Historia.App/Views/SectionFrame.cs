@@ -164,7 +164,9 @@ internal static class SectionFrame
                     var lent = lenderStart - lenderApplied;
                     var (top, lenderHeight) = SplitWithLender(startHeight + delta, startAvailable + lent, lenderApplied, lenderMin);
                     // The lender only ever gives room up during a drag.
+#pragma warning disable S1244 // exact compare against the stored copy
                     if (lenderHeight != lenderApplied)
+#pragma warning restore S1244
                     {
                         l.Apply(lenderHeight);
                         lenderApplied = lenderHeight;

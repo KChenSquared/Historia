@@ -177,17 +177,14 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
 
     public void SetSelectedConflictPath(string? path)
     {
-        bool changed;
         lock (_sync)
         {
             if (string.Equals(_selectedConflictPath, path, StringComparison.Ordinal))
                 return;
             _selectedConflictPath = path;
-            changed = true;
         }
 
-        if (changed)
-            Raise(() => SelectedConflictPathChanged?.Invoke(this, new SelectedConflictPathChangedEventArgs(path)));
+        Raise(() => SelectedConflictPathChanged?.Invoke(this, new SelectedConflictPathChangedEventArgs(path)));
     }
 
     private void HandleConflictSessionFlipped(bool nowActive, bool closedCleared)
@@ -391,7 +388,7 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
 
             _lastIndexStatRefreshAt = now;
             var operationsAtStart = _context.CompletedOperations;
-            _indexStatRefresh = Task.Run(() => RunIndexStatRefreshAsync(operationsAtStart));
+            _indexStatRefresh = Task.Run(() => RunIndexStatRefreshAsync(operationsAtStart), CancellationToken.None);
         }
     }
 
@@ -721,8 +718,10 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
 
             // Off the caller's thread: a run started inline would execute the work's synchronous
             // prefix (process start, file probes) on the UI thread of a UI-originated refresh.
+            // Trap: Task.Run takes no ct. The pump is shared, so one caller's cancelled token
+            // would stop it starting and strand every other waiter.
             if (start)
-                _ = Task.Run(() => PumpAsync(work));
+                _ = Task.Run(() => PumpAsync(work), CancellationToken.None);
             return WaitAsync(run, ct);
         }
 
@@ -743,7 +742,9 @@ public sealed class RepositoryStateService : IRepositoryStateService, IAsyncDisp
                 // Outside the lock: cancelling runs the work's cancellation callbacks.
                 if (abandon)
                 {
+#pragma warning disable S6966 // synchronous cancel is intended; it keeps the order here
                     try { run.Abandoned.Cancel(); }
+#pragma warning restore S6966
                     catch (ObjectDisposedException) { }
                 }
             }

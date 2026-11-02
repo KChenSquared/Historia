@@ -75,7 +75,7 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
         var fakeWs = new FakeWorkspace();
         // No operating-system watchers: the context's own git status rewrites .git/index, and that
         // real event would race the injected one.
-        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs, watchFilesystem: false);
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, fakeWs, watchFilesystem: false);
 
         var onRawEvent = typeof(Historia.Services.Watching.FileWatcherService)
             .GetMethod("OnRawEvent", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
@@ -99,7 +99,7 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
     {
         await using var ctx = _host.Open(_repo.Path);
         var fakeWs = new FakeWorkspace();
-        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs, watchFilesystem: false);
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, fakeWs, watchFilesystem: false);
 
         RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "index"), isGitDir: true);
         await WaitForRefreshesAsync(fakeWs, 1);
@@ -121,7 +121,7 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
     {
         await using var ctx = _host.Open(_repo.Path);
         var fakeWs = new FakeWorkspace();
-        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs, watchFilesystem: false);
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, fakeWs, watchFilesystem: false);
 
         RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, relPath.Replace('/', Path.DirectorySeparatorChar)), isGitDir: true);
         await WaitForRefreshesAsync(fakeWs, 1);
@@ -134,7 +134,7 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
     {
         await using var ctx = _host.Open(_repo.Path);
         var fakeWs = new FakeWorkspace();
-        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs, watchFilesystem: false);
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, fakeWs, watchFilesystem: false);
 
         RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "index"), isGitDir: true);
         RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "refs", "heads", "topic"), isGitDir: true);
@@ -149,7 +149,7 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
     public async Task The_index_lock_file_and_other_git_directory_noise_queue_nothing()
     {
         await using var ctx = _host.Open(_repo.Path);
-        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace(), watchFilesystem: false);
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, new FakeWorkspace(), watchFilesystem: false);
 
         RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "index.lock"), isGitDir: true);
         RaiseRawEvent(watcher, Path.Combine(ctx.GitDirectory, "sharedindex.abc"), isGitDir: true);
@@ -166,7 +166,7 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
         Directory.CreateDirectory(Path.Combine(_repo.Path, "src", "App", "bin", "Debug"));
         File.WriteAllText(Path.Combine(_repo.Path, "src", "App", "App.csproj"), "<Project />");
         await using var ctx = _host.Open(_repo.Path);
-        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace(), watchFilesystem: false);
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, new FakeWorkspace(), watchFilesystem: false);
 
         RaiseRawEvent(watcher, Path.Combine(_repo.Path, "src", "App", "bin", "Debug", "App.dll"), isGitDir: false);
         RaiseRawEvent(watcher, Path.Combine(_repo.Path, "src", "App", "bin", "Debug", "App.dll"), isGitDir: false);
@@ -180,7 +180,7 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
     {
         await using var ctx = _host.Open(_repo.Path);
         var fakeWs = new FakeWorkspace();
-        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs, watchFilesystem: false);
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, fakeWs, watchFilesystem: false);
 
         RaiseRawEvent(watcher, Path.Combine(_repo.Path, new string('a', 300), new string('b', 300) + ".txt"), isGitDir: false);
         await WaitForRefreshesAsync(fakeWs, 1);
@@ -197,7 +197,7 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
     public async Task Ignored_and_uninteresting_git_paths_queue_no_refresh()
     {
         await using var ctx = _host.Open(_repo.Path);
-        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace(), watchFilesystem: false);
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, new FakeWorkspace(), watchFilesystem: false);
         var onRawEvent = typeof(Historia.Services.Watching.FileWatcherService)
             .GetMethod("OnRawEvent", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
 
@@ -222,7 +222,7 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
     {
         await using var ctx = _host.Open(_repo.Path);
         var fakeWs = new FakeWorkspace();
-        var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs);
+        var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, fakeWs);
 
         // Arm debounce with a working-tree change
         var onRawEvent = typeof(Historia.Services.Watching.FileWatcherService)
@@ -243,7 +243,7 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
     {
         await using var ctx = _host.Open(_repo.Path);
         var fakeWs = new FakeWorkspace();
-        var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs);
+        var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, fakeWs);
 
         await watcher.DisposeAsync();
 
@@ -272,7 +272,7 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
         // Flow-local: the process-wide log would also capture every test running in parallel.
         using var session = AppLog.StartSessionForTesting(dir.Path);
         await using var ctx = _host.Open(_repo.Path);
-        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace());
+        await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, new FakeWorkspace());
 
         watcher.OverflowLogWindow = TimeSpan.FromHours(1);
         RaiseWatcherError(watcher);
@@ -300,7 +300,7 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
         using var dir = new StateDir();
         using var session = AppLog.StartSessionForTesting(dir.Path);
         await using var ctx = _host.Open(_repo.Path);
-        var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace(), watchFilesystem: false);
+        var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, new FakeWorkspace(), watchFilesystem: false);
 
         watcher.OverflowLogWindow = TimeSpan.FromHours(1);
         RaiseWatcherError(watcher);
@@ -323,7 +323,7 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
         using var dir = new StateDir();
         using var session = AppLog.StartSessionForTesting(dir.Path);
         await using var ctx = _host.Open(_repo.Path);
-        var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, new FakeWorkspace(), watchFilesystem: false);
+        var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, new FakeWorkspace(), watchFilesystem: false);
 
         // The flush timer is armed for the end of an hour-long window; shortening the window and
         // firing the flush stands in for a timer that wakes a tick before its window ends.
@@ -387,7 +387,7 @@ public sealed class FileWatcherServiceTests : IAsyncDisposable
             var fakeWs = new FakeWorkspace();
             // Built inside the override: the debounce timer's callback captures this flow.
             // No operating-system watchers: real .git events would add refreshes of their own.
-            await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, fakeWs, watchFilesystem: false);
+            await using var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, fakeWs, watchFilesystem: false);
 
             PerfLog.Flush(TimeSpan.FromSeconds(10));
             var startLineCount = File.Exists(PerfLog.LogPath) ? File.ReadAllLines(PerfLog.LogPath).Length : 0;

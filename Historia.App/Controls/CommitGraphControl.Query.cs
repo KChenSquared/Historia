@@ -231,7 +231,7 @@ public sealed partial class CommitGraphControl
         if (row < 0 || _layout is not { } stepLayout || row >= stepLayout.Layout.RowCount)
             return;
         ScrollRowIntoView(row);
-        _state?.SetSelectedCommit(_layout!.Layout.Commits[row].Id);
+        _state?.SetSelectedCommit(_layout.Layout.Commits[row].Id);
         UpdateMatchLabel();
         InvalidateVisual();
     }
@@ -337,7 +337,6 @@ public sealed partial class CommitGraphControl
                     var target = leftIsFlex && b + 1 < _resolvedColumns.Length ? b + 1 : b;
                     _resizeInverted = target != b;
                     _resizing = true;
-                    _resizeBoundary = b;
                     _resizeKind = _resolvedColumns[target].Kind;
                     _resizeStartX = pos.X;
                     _resizeStartWidth = _resolvedColumns[target].Width;
@@ -430,7 +429,6 @@ public sealed partial class CommitGraphControl
         if (_resizing)
         {
             _resizing = false;
-            _resizeBoundary = -1;
             _resizeInverted = false;
             _manuallySized.Add(_resizeKind);
             _capturedPointer?.Capture(null);
@@ -889,7 +887,9 @@ public sealed partial class CommitGraphControl
     /// Shapes text, so it runs when a tip is shown and never from the render path.</summary>
     private (int MaxLines, bool Truncated) MeasureMessageTip(string text, double budget)
     {
+#pragma warning disable S1244 // exact compare against the stored copy
         if (_msgTipMeasure is { } m && string.Equals(m.Text, text, StringComparison.Ordinal) && m.Budget == budget)
+#pragma warning restore S1244
             return (m.MaxLines, m.Truncated);
 
         var typeface = new Typeface(FontFamily.Default);
@@ -944,14 +944,17 @@ public sealed partial class CommitGraphControl
             CancelHoverFetch();
             if (_context is { } ctx)
             {
-                _hoverFetchCts = CancellationTokenSource.CreateLinkedTokenSource(ctx.Lifetime);
-                _ = FetchMessageAsync(id, subject, _hoverFetchCts.Token);
+                var cts = CancellationTokenSource.CreateLinkedTokenSource(ctx.Lifetime);
+                _hoverFetchCts = cts;
+                _ = FetchMessageAsync(id, subject, cts.Token);
             }
         }
 
         _hoverMsgId = id;
         var budget = MessageTipContentBudget();
+#pragma warning disable S1244 // exact compare against the stored copy
         if (string.Equals(_msgTipText, text, StringComparison.Ordinal) && _msgTipBudget == budget)
+#pragma warning restore S1244
         {
             ToolTip.SetIsOpen(this, true);
             return;

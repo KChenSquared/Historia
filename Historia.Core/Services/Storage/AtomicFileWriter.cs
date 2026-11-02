@@ -257,14 +257,16 @@ public sealed class AtomicFileWriter : IAsyncDisposable
         try
         {
             using (Historia.Diagnostics.PerfLog.Scope($"AtomicFileWriter FlushAsync ({System.IO.Path.GetFileName(FilePath)})"))
-                await FlushAsync().ConfigureAwait(false);
+                await FlushAsync(CancellationToken.None).ConfigureAwait(false);
         }
         catch
         {
             // Best-effort flush on dispose.
         }
 
+#pragma warning disable S6966 // synchronous cancel is intended; it keeps the order here
         _debounceCts?.Cancel();
+#pragma warning restore S6966
         _debounceCts?.Dispose();
         _writeGate.Dispose();
         Historia.Diagnostics.PerfLog.Mark($"AtomicFileWriter.DisposeAsync done ({System.IO.Path.GetFileName(FilePath)})");

@@ -807,7 +807,7 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
             [
                 new NotificationAction("Open terminal", () =>
                 {
-                    _ = _terminals.OpenOrFocusAsync(RepoTerminalOrigin.For(repo));
+                    _ = _terminals.OpenOrFocusAsync(RepoTerminalOrigin.For(repo), CancellationToken.None);
                     return Task.CompletedTask;
                 }),
             ]);

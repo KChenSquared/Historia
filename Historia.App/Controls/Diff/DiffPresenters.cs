@@ -450,7 +450,7 @@ public sealed class CombinedDiffPresenter : DiffPresenterBase
 /// </summary>
 public sealed class SingleSideDiffPresenter : DiffPresenterBase
 {
-    private bool _isOld;
+    private readonly bool _isOld;
 
     public override IReadOnlyList<DiffBlock> Blocks => Model?.SideBySideBlocks ?? [];
 

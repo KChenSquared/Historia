@@ -162,7 +162,7 @@ public readonly struct GitObjectId : IEquatable<GitObjectId>, IComparable<GitObj
         });
     }
 
-    public bool TryFormat(Span<char> destination, out int charsWritten, ReadOnlySpan<char> format = default, IFormatProvider? provider = null)
+    public bool TryFormat(Span<char> destination, out int charsWritten, ReadOnlySpan<char> format, IFormatProvider? provider)
     {
         if (_length == 0)
         {

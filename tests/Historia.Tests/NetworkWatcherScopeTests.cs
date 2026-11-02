@@ -56,7 +56,7 @@ public sealed class NetworkWatcherScopeTests : IAsyncDisposable
         var ctx = _host.Open(_repo.Path, cli);
         var workspace = new FakeWorkspace();
         // No operating-system watchers: only the events a test injects reach the debounce.
-        var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, _host.Settings, workspace, watchFilesystem: false);
+        var watcher = new Historia.Services.Watching.FileWatcherService(ctx, ctx.State, workspace, watchFilesystem: false);
         return (ctx, cli, workspace, watcher);
     }
 

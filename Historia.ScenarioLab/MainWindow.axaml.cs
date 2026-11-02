@@ -97,7 +97,9 @@ public partial class MainWindow : Window
     {
         if (_isRunning)
         {
+#pragma warning disable S6966 // synchronous cancel is intended; it keeps the order here
             _runCts?.Cancel();
+#pragma warning restore S6966
             _runner.Stop();
             return;
         }

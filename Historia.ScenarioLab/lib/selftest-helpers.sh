@@ -37,12 +37,12 @@ echo "Running helper self-tests..."
 REPO_PIN="$SANDBOX/pin_repo"
 git init "$REPO_PIN" >/dev/null
 lab_pin_config "$REPO_PIN"
-[ "$(git -C "$REPO_PIN" config --local core.autocrlf)" = "false" ] || { echo "pin_config default autocrlf failed"; exit 1; }
-[ "$(git -C "$REPO_PIN" config --local merge.conflictStyle)" = "merge" ] || { echo "pin_config default conflictStyle failed"; exit 1; }
+[[ "$(git -C "$REPO_PIN" config --local core.autocrlf)" = "false" ]] || { echo "pin_config default autocrlf failed"; exit 1; }
+[[ "$(git -C "$REPO_PIN" config --local merge.conflictStyle)" = "merge" ]] || { echo "pin_config default conflictStyle failed"; exit 1; }
 
 lab_pin_config "$REPO_PIN" core.autocrlf true custom.foo bar
-[ "$(git -C "$REPO_PIN" config --local core.autocrlf)" = "true" ] || { echo "pin_config override autocrlf failed"; exit 1; }
-[ "$(git -C "$REPO_PIN" config --local custom.foo)" = "bar" ] || { echo "pin_config custom key failed"; exit 1; }
+[[ "$(git -C "$REPO_PIN" config --local core.autocrlf)" = "true" ]] || { echo "pin_config override autocrlf failed"; exit 1; }
+[[ "$(git -C "$REPO_PIN" config --local custom.foo)" = "bar" ]] || { echo "pin_config custom key failed"; exit 1; }
 echo "PASS: lab_pin_config"
 
 # ── 2. lab_expect_conflict & lab_assert_status ──
@@ -104,29 +104,29 @@ echo "PASS: lab_expect_conflict"
 # ── 3. lab_count_markers ──
 MARKER_FILE="$SANDBOX/markers.txt"
 printf '<<<<<<< HEAD\n||||||| base\n=======\n>>>>>>> theirs\n<<<<<<<< 8chars\n' > "$MARKER_FILE"
-[ "$(lab_count_markers "$MARKER_FILE" "<")" -eq 1 ] || { echo "count 7 < failed"; exit 1; }
-[ "$(lab_count_markers "$MARKER_FILE" "|")" -eq 1 ] || { echo "count 7 | failed"; exit 1; }
-[ "$(lab_count_markers "$MARKER_FILE" "=")" -eq 1 ] || { echo "count 7 = failed"; exit 1; }
-[ "$(lab_count_markers "$MARKER_FILE" ">")" -eq 1 ] || { echo "count 7 > failed"; exit 1; }
-[ "$(lab_count_markers "$MARKER_FILE" "<" 8)" -eq 1 ] || { echo "count 8 < failed"; exit 1; }
+[[ "$(lab_count_markers "$MARKER_FILE" "<")" -eq 1 ]] || { echo "count 7 < failed"; exit 1; }
+[[ "$(lab_count_markers "$MARKER_FILE" "|")" -eq 1 ]] || { echo "count 7 | failed"; exit 1; }
+[[ "$(lab_count_markers "$MARKER_FILE" "=")" -eq 1 ]] || { echo "count 7 = failed"; exit 1; }
+[[ "$(lab_count_markers "$MARKER_FILE" ">")" -eq 1 ]] || { echo "count 7 > failed"; exit 1; }
+[[ "$(lab_count_markers "$MARKER_FILE" "<" 8)" -eq 1 ]] || { echo "count 8 < failed"; exit 1; }
 
 # CRLF lines
 CRLF_FILE="$SANDBOX/crlf.txt"
 printf '<<<<<<< HEAD\r\n=======\r\n>>>>>>> theirs\r\n' > "$CRLF_FILE"
-[ "$(lab_count_markers "$CRLF_FILE" "<")" -eq 1 ] || { echo "crlf count < failed"; exit 1; }
-[ "$(lab_count_markers "$CRLF_FILE" "=")" -eq 1 ] || { echo "crlf count = failed"; exit 1; }
-[ "$(lab_count_markers "$CRLF_FILE" ">")" -eq 1 ] || { echo "crlf count > failed"; exit 1; }
+[[ "$(lab_count_markers "$CRLF_FILE" "<")" -eq 1 ]] || { echo "crlf count < failed"; exit 1; }
+[[ "$(lab_count_markers "$CRLF_FILE" "=")" -eq 1 ]] || { echo "crlf count = failed"; exit 1; }
+[[ "$(lab_count_markers "$CRLF_FILE" ">")" -eq 1 ]] || { echo "crlf count > failed"; exit 1; }
 
 # Custom size 10
 SIZE10_FILE="$SANDBOX/size10.txt"
 printf '<<<<<<<<<< branch\n==========\n>>>>>>>>>> main\n' > "$SIZE10_FILE"
-[ "$(lab_count_markers "$SIZE10_FILE" "<" 10)" -eq 1 ] || { echo "size 10 count < failed"; exit 1; }
-[ "$(lab_count_markers "$SIZE10_FILE" "<" 7)" -eq 0 ] || { echo "size 7 in size 10 should be 0"; exit 1; }
+[[ "$(lab_count_markers "$SIZE10_FILE" "<" 10)" -eq 1 ]] || { echo "size 10 count < failed"; exit 1; }
+[[ "$(lab_count_markers "$SIZE10_FILE" "<" 7)" == 0 ]] || { echo "size 7 in size 10 should be 0"; exit 1; }
 
 # UTF-16LE file via iconv
 UTF16_FILE="$SANDBOX/utf16.txt"
 printf '<<<<<<< HEAD\r\n=======\r\n>>>>>>> theirs\r\n' | iconv -f UTF-8 -t UTF-16LE > "$UTF16_FILE"
-[ "$(lab_count_markers "$UTF16_FILE" "<" 7 UTF-16LE)" -eq 1 ] || { echo "utf16 count < failed"; exit 1; }
+[[ "$(lab_count_markers "$UTF16_FILE" "<" 7 UTF-16LE)" -eq 1 ]] || { echo "utf16 count < failed"; exit 1; }
 echo "PASS: lab_count_markers"
 
 # ── 4. lab_assert_op ──
@@ -178,16 +178,16 @@ GEN1="$SANDBOX/gen1.txt"
 GEN2="$SANDBOX/gen2.txt"
 lab_gen_lines "$GEN1" 100 "gen"
 lab_gen_lines "$GEN2" 100 "gen"
-SHA1="$(sha1sum "$GEN1" | awk '{print $1}')"
-SHA2="$(sha1sum "$GEN2" | awk '{print $1}')"
-[ "$SHA1" = "$SHA2" ] || { echo "gen_lines not deterministic"; exit 1; }
+HASH1="$(sha256sum "$GEN1" | awk '{print $1}')"
+HASH2="$(sha256sum "$GEN2" | awk '{print $1}')"
+[[ "$HASH1" = "$HASH2" ]] || { echo "gen_lines not deterministic"; exit 1; }
 echo "PASS: lab_gen_lines"
 
 # ── 6. lab_save_template ──
 STATUS_BEFORE="$(git -C "$SCENARIO_ROOT" status --porcelain templates/)"
 TMPL_OUT="$(lab_save_template _base 2>&1)"
 STATUS_AFTER="$(git -C "$SCENARIO_ROOT" status --porcelain templates/)"
-[ "$STATUS_BEFORE" = "$STATUS_AFTER" ] || { echo "templates modified during headless run"; exit 1; }
+[[ "$STATUS_BEFORE" = "$STATUS_AFTER" ]] || { echo "templates modified during headless run"; exit 1; }
 [[ "$TMPL_OUT" == *"[INFO] headless run: template not saved"* ]] || { echo "headless save_template missing log"; exit 1; }
 echo "PASS: lab_save_template"
 
