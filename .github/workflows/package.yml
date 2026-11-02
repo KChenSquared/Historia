@@ -7,16 +7,16 @@ on:
         description: 'Build win-x64 packages'
         type: boolean
         default: true
-      osx_arm64:
-        description: 'Build osx-arm64 packages'
+      macosx_arm64:
+        description: 'Build MacOSX-arm64 packages (Apple Silicon, experimental)'
         type: boolean
         default: true
-      osx_x64:
-        description: 'Build osx-x64 packages'
+      macosx_x64:
+        description: 'Build MacOSX-x64 packages (Intel, experimental)'
         type: boolean
         default: true
       linux_x64:
-        description: 'Build linux-x64 packages'
+        description: 'Build linux-x64 packages (experimental)'
         type: boolean
         default: true
       archives:
@@ -62,16 +62,16 @@ jobs:
 
           $entries = @()
           if ($isTag -or '${{ inputs.win_x64 }}' -eq 'true') {
-              $entries += @{ rid = 'win-x64'; runner = 'windows-latest' }
+              $entries += @{ rid = 'win-x64'; platform = 'win-x64'; runner = 'windows-latest' }
           }
-          if (-not $isTag -and '${{ inputs.osx_arm64 }}' -eq 'true') {
-              $entries += @{ rid = 'osx-arm64'; runner = 'macos-latest'; experimental = true }
+          if ($isTag -or '${{ inputs.macosx_arm64 }}' -eq 'true') {
+              $entries += @{ rid = 'osx-arm64'; platform = 'MacOSX-arm64-experimental'; runner = 'macos-latest'; experimental = $true }
           }
-          if (-not $isTag -and '${{ inputs.osx_x64 }}' -eq 'true') {
-              $entries += @{ rid = 'osx-x64'; runner = 'macos-latest'; experimental = true }
+          if ($isTag -or '${{ inputs.macosx_x64 }}' -eq 'true') {
+              $entries += @{ rid = 'osx-x64'; platform = 'MacOSX-x64-experimental'; runner = 'macos-latest'; experimental = $true }
           }
-          if (-not $isTag -and '${{ inputs.linux_x64 }}' -eq 'true') {
-              $entries += @{ rid = 'linux-x64'; runner = 'ubuntu-latest'; experimental = true }
+          if ($isTag -or '${{ inputs.linux_x64 }}' -eq 'true') {
+              $entries += @{ rid = 'linux-x64'; platform = 'linux-x64-experimental'; runner = 'ubuntu-latest'; experimental = $true }
           }
 
           if ($entries.Count -eq 0) {
@@ -87,6 +87,8 @@ jobs:
   package:
     needs: plan
     runs-on: ${{ matrix.runner }}
+    # A failed experimental platform must not block the Windows release.
+    continue-on-error: ${{ matrix.experimental == true }}
     strategy:
       fail-fast: false
       matrix:
@@ -147,7 +149,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
-          name: Historia-${{ matrix.rid }}${{ matrix.experimental && '-experimental' || '' }}
+          name: Historia-${{ matrix.platform }}
           path: dist/*
           if-no-files-found: error
 
@@ -178,5 +180,5 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "$GITHUB_REF_NAME" --draft --verify-tag --generate-notes \
-            --notes "Only the Windows packages are supported." \
+            --notes "Only the Windows packages are supported. The MacOSX and Linux packages are experimental." \
             dist/*

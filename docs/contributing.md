@@ -215,8 +215,8 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 
 ### 5. Releases
 Versions are automatically derived from git tags via MinVer (`MinVerTagPrefix=v`).
-- Pushing a tag matching `v*` (such as `v0.1.0`) triggers `.github/workflows/package.yml`, which compiles release builds, packages archives and native installers for Windows (`win-x64`), computes SHA-256 hashes in `SHA256SUMS.txt`, and generates a draft GitHub Release for maintainer review.
-- The packaging workflow may also be invoked manually (`workflow_dispatch`) with checkboxes to selectively build specific operating systems (`win-x64`, `osx-arm64`, `osx-x64`, `linux-x64`) or package types (archives or installers).
+- Pushing a tag matching `v*` (such as `v0.1.0`) triggers `.github/workflows/package.yml`, which compiles release builds, packages archives and native installers for Windows (`win-x64`) and, marked `-experimental` in their file names, for MacOSX (`MacOSX-arm64`, `MacOSX-x64`) and Linux (`linux-x64`), computes SHA-256 hashes in `SHA256SUMS.txt`, and generates a draft GitHub Release for maintainer review.
+- The packaging workflow may also be invoked manually (`workflow_dispatch`) with checkboxes to selectively build specific operating systems (`win-x64`, `MacOSX-arm64`, `MacOSX-x64`, `linux-x64`) or package types (archives or installers).
 - When a new .NET 10 servicing release is published, bump the pinned Windows Desktop Runtime version, URL, and SHA-512 hash in `.github/workflows/package.yml`.
 
 ---

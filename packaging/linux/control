@@ -3,7 +3,7 @@ Version: __VERSION__
 Section: utils
 Priority: optional
 Architecture: amd64
-Depends: git, dotnet-runtime-10.0
+Depends: git, dotnet-runtime-10.0, libx11-6, libice6, libsm6, libfontconfig1
 Maintainer: Kevin Chen <105027316+KChenSquared@users.noreply.github.com>
 Description: Fast, open-source Git client with an easy-to-read commit graph.
  A desktop Git client built with C# and Avalonia UI featuring a high-performance commit graph.
