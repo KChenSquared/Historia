@@ -65,13 +65,13 @@ jobs:
               $entries += @{ rid = 'win-x64'; platform = 'win-x64'; runner = 'windows-latest' }
           }
           if ($isTag -or '${{ inputs.macosx_arm64 }}' -eq 'true') {
-              $entries += @{ rid = 'osx-arm64'; platform = 'MacOSX-arm64-experimental'; runner = 'macos-latest' }
+              $entries += @{ rid = 'osx-arm64'; platform = 'MacOSX-arm64-experimental'; runner = 'macos-latest'; experimental = $true }
           }
           if ($isTag -or '${{ inputs.macosx_x64 }}' -eq 'true') {
-              $entries += @{ rid = 'osx-x64'; platform = 'MacOSX-x64-experimental'; runner = 'macos-latest' }
+              $entries += @{ rid = 'osx-x64'; platform = 'MacOSX-x64-experimental'; runner = 'macos-latest'; experimental = $true }
           }
           if ($isTag -or '${{ inputs.linux_x64 }}' -eq 'true') {
-              $entries += @{ rid = 'linux-x64'; platform = 'linux-x64-experimental'; runner = 'ubuntu-latest' }
+              $entries += @{ rid = 'linux-x64'; platform = 'linux-x64-experimental'; runner = 'ubuntu-latest'; experimental = $true }
           }
 
           if ($entries.Count -eq 0) {
@@ -87,6 +87,8 @@ jobs:
   package:
     needs: plan
     runs-on: ${{ matrix.runner }}
+    # A failed experimental platform must not block the Windows release.
+    continue-on-error: ${{ matrix.experimental == true }}
     strategy:
       fail-fast: false
       matrix:
