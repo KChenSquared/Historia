@@ -488,6 +488,12 @@ public sealed class App : Application
 
         Dispatcher.UIThread.UnhandledException += (_, args) =>
         {
+            if (MissingDesktopService.IsOnlyMissingService(args.Exception))
+            {
+                LogMissingDesktopService(args.Exception);
+                args.Handled = true;
+                return;
+            }
             AppLog.Write(AppLogLevel.Error, "unhandled", "Dispatcher.UIThread.UnhandledException", args.Exception);
             TryNotifyFatal(args.Exception);
             layoutRecovery.OnDispatcherException();
@@ -513,11 +519,22 @@ public sealed class App : Application
 
         TaskScheduler.UnobservedTaskException += (_, args) =>
         {
+            args.SetObserved();
+            if (MissingDesktopService.IsOnlyMissingService(args.Exception))
+            {
+                LogMissingDesktopService(args.Exception);
+                return;
+            }
             AppLog.Write(AppLogLevel.Error, "unhandled", "TaskScheduler.UnobservedTaskException", args.Exception);
             TryNotifyFatal(args.Exception);
-            args.SetObserved();
         };
     }
+
+    // A desktop integration whose D-Bus service is not running is a missing optional feature,
+    // not an app failure: it is logged as a warning and never notified.
+    private static void LogMissingDesktopService(Exception ex) =>
+        AppLog.Write(AppLogLevel.Warn, "platform",
+            $"Optional desktop service is not running: {ex.GetBaseException().Message}");
 
     private void TryNotifyFatal(Exception ex)
     {

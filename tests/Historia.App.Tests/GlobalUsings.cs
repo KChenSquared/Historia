@@ -13,6 +13,7 @@ global using Historia.Services.Diff;
 global using Historia.Services.ExternalControl;
 
 global using FontStyle = Avalonia.Media.FontStyle;
+global using DBusException = Tmds.DBus.Protocol.DBusException;
 global using Avalonia.Controls;
 global using Avalonia.Controls.Primitives;
 global using Avalonia.Controls.Primitives.PopupPositioning;
