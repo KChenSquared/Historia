@@ -121,7 +121,7 @@ printf '<<<<<<< HEAD\r\n=======\r\n>>>>>>> theirs\r\n' > "$CRLF_FILE"
 SIZE10_FILE="$SANDBOX/size10.txt"
 printf '<<<<<<<<<< branch\n==========\n>>>>>>>>>> main\n' > "$SIZE10_FILE"
 [[ "$(lab_count_markers "$SIZE10_FILE" "<" 10)" -eq 1 ]] || { echo "size 10 count < failed"; exit 1; }
-[[ "$(lab_count_markers "$SIZE10_FILE" "<" 7)" -eq 0 ]] || { echo "size 7 in size 10 should be 0"; exit 1; }
+[[ "$(lab_count_markers "$SIZE10_FILE" "<" 7)" == 0 ]] || { echo "size 7 in size 10 should be 0"; exit 1; }
 
 # UTF-16LE file via iconv
 UTF16_FILE="$SANDBOX/utf16.txt"
