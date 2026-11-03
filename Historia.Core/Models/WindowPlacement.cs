@@ -3,7 +3,9 @@
 /// <summary>
 /// Main-window geometry, persisted to <c>window.json</c> in <c>AppPaths.MachineDirectory</c>.
 /// Deliberately <b>not</b> a field on <see cref="AppSettings"/> — monitor coordinates
-/// must not follow the user to another machine.
+/// must not follow the user to another machine. <see cref="Left"/> and <see cref="Top"/> are the
+/// restored (normal) position in physical pixels and <see cref="Width"/> and <see cref="Height"/> the
+/// restored size; a maximized or minimized window keeps its last normal rectangle here.
 /// </summary>
 public sealed record WindowPlacement
 {
