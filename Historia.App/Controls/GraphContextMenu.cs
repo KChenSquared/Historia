@@ -50,7 +50,9 @@ internal interface IGraphMenuActions
 /// The one context menu for a commit in the graph, opened alike from its row, any of its labels,
 /// its <c>+N</c> overflow chip and the refs-list popup. Each branch and tag on the commit gets a
 /// submenu at the top holding the items that act on that ref; the items that act on the commit
-/// follow, each exactly once.
+/// follow, each exactly once. A remote branch with the same name as a local branch on the commit
+/// sits inside that local branch's submenu as its own <c>remote/name</c> submenu (merge into the
+/// current branch, delete) instead of at the top.
 /// </summary>
 internal static class GraphContextMenu
 {
@@ -114,7 +116,23 @@ internal static class GraphContextMenu
         var sha = t.Commit.ToString();
         var shortSha = t.Commit.ToShortString(7);
 
-        var refs = t.Refs.Select(r => (Control)RefSubmenu(r, t, a)).ToList();
+        // Merging into, or rebasing onto, the commit HEAD's own branch already sits on is a no-op.
+        var onCurrent = t.CurrentBranch is { } cur
+            && t.Refs.Any(r => r.Type == DecorationType.LocalBranch && string.Equals(r.Name, cur, StringComparison.Ordinal));
+        var canMergeIntoCurrent = !onCurrent && t.CurrentBranch is not null;
+
+        var localNames = t.Refs.Where(r => r.Type == DecorationType.LocalBranch).Select(r => r.Name).ToHashSet(StringComparer.Ordinal);
+        bool IsNested(GraphMenuRef r) => r.Type == DecorationType.RemoteBranch && r.Remote is not null && localNames.Contains(r.Name);
+        var refs = new List<Control>();
+        foreach (var r in t.Refs)
+        {
+            if (IsNested(r))
+                continue;
+            var nested = r.Type == DecorationType.LocalBranch
+                ? t.Refs.Where(n => IsNested(n) && string.Equals(n.Name, r.Name, StringComparison.Ordinal)).ToList()
+                : [];
+            refs.Add(RefSubmenu(r, nested, canMergeIntoCurrent, t, a));
+        }
 
         var commit = new List<Control>
         {
@@ -124,9 +142,6 @@ internal static class GraphContextMenu
         };
 
         var history = new List<Control>();
-        // Merging into, or rebasing onto, the commit HEAD's own branch already sits on is a no-op.
-        var onCurrent = t.CurrentBranch is { } cur
-            && t.Refs.Any(r => r.Type == DecorationType.LocalBranch && string.Equals(r.Name, cur, StringComparison.Ordinal));
         if (!onCurrent)
         {
             if (t.Refs.Where(r => r.IsBranch).Select(r => (GraphMenuRef?)r).FirstOrDefault() is { } target)
@@ -177,7 +192,10 @@ internal static class GraphContextMenu
         return Join(refs, commit, history, copy);
     }
 
-    private static MenuItem RefSubmenu(GraphMenuRef r, GraphMenuTarget t, IGraphMenuActions a)
+    /// <summary>The submenu for one ref. <paramref name="nested"/> holds the remote branches of
+    /// the same name on the commit, listed inside a local branch's submenu.</summary>
+    private static MenuItem RefSubmenu(GraphMenuRef r, IReadOnlyList<GraphMenuRef> nested, bool canMergeIntoCurrent,
+        GraphMenuTarget t, IGraphMenuActions a)
     {
         var display = r.DisplayName;
         var shown = BranchMenu.TruncateBranchLabelForMenu(display);
@@ -189,6 +207,8 @@ internal static class GraphContextMenu
                 items.Add(MenuLeaf($"Checkout {shown}", () => a.CheckoutBranch(r.Name)));
                 items.Add(MenuLeaf("Rename…", () => a.Rename(r.Name)));
                 items.Add(MenuLeaf("Delete local…", () => a.DeleteLocal(r.Name)));
+                foreach (var n in nested)
+                    items.Add(NestedRemoteSubmenu(n, canMergeIntoCurrent, t, a));
                 items.Add(new Separator());
                 items.Add(MenuLeaf("Copy name", () => a.Copy(display)));
                 break;
@@ -196,6 +216,8 @@ internal static class GraphContextMenu
                 if (r.Remote is { } remote)
                 {
                     items.Add(MenuLeaf($"Checkout {shown} as a new branch", () => a.CheckoutTracking(r.Name, display)));
+                    if (canMergeIntoCurrent)
+                        items.Add(MenuLeaf($"Merge into {t.CurrentBranch}", () => a.Merge(display, display)));
                     items.Add(MenuLeaf("Delete…", () => a.DeleteRemote(remote, r.Name)));
                     items.Add(new Separator());
                 }
@@ -207,6 +229,8 @@ internal static class GraphContextMenu
                 if (items.Count > 0)
                     items.Add(new Separator());
                 items.Add(MenuLeaf($"Delete tag {shown}", () => a.DeleteTag(r.Name)));
+                items.Add(new Separator());
+                items.Add(MenuLeaf("Copy tag name", () => a.Copy(r.Name)));
                 break;
         }
 
@@ -225,6 +249,28 @@ internal static class GraphContextMenu
                     _ = LoadDivergenceAsync(submenu, r, a);
             };
         }
+        return submenu;
+    }
+
+    /// <summary>A remote branch listed inside the local branch of the same name: merge it into the
+    /// current branch (absent when that would be a no-op or HEAD is detached) and delete it on its
+    /// remote, which confirms first.</summary>
+    private static MenuItem NestedRemoteSubmenu(GraphMenuRef r, bool canMergeIntoCurrent, GraphMenuTarget t, IGraphMenuActions a)
+    {
+        var display = r.DisplayName;
+        var remote = r.Remote!;
+        var items = new List<Control>();
+        if (canMergeIntoCurrent)
+            items.Add(MenuLeaf($"Merge into {t.CurrentBranch}", () => a.Merge(display, display)));
+        items.Add(MenuLeaf("Delete…", () => a.DeleteRemote(remote, r.Name)));
+
+        var submenu = new MenuItem
+        {
+            Header = BranchMenu.TruncateBranchLabelForMenu(display),
+            ItemsSource = items,
+        };
+        if (display.Length > BranchMenu.MenuNameMaxChars)
+            ToolTip.SetTip(submenu, display);
         return submenu;
     }
 

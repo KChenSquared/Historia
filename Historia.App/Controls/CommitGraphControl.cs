@@ -305,6 +305,11 @@ public sealed partial class CommitGraphControl : Control
     internal int RowCountForTesting => _layout?.Layout.RowCount ?? 0;
     internal IReadOnlyList<GraphColumn> ColumnsForTesting => _columns;
     internal ContextMenu? OpenMenuForTesting => _openMenu;
+    internal bool RefListOpenForTesting => _refList.IsOpen;
+    internal Control? RefListContentForTesting => _refList.Child;
+    internal bool RefListCloseTimerRunningForTesting => _refListCloseTimer?.IsEnabled == true;
+    internal void OpenRefListForTesting(GraphDecoration head, Rect badgeRect) => OpenRefListFor(head, badgeRect);
+    internal void TickRefListCloseTimerForTesting() => OnRefListCloseTick();
     internal bool HoverDwellTimerRunningForTesting => _hoverDwellTimer.IsEnabled;
     internal HoverTarget? PendingHoverTargetForTesting => _hoverDwell.Pending;
     internal HoverTarget? ShownHoverTargetForTesting => _hoverDwell.Shown;
@@ -392,6 +397,13 @@ public sealed partial class CommitGraphControl : Control
         {
             menu.Closed -= onClosed;
             if (ReferenceEquals(_openMenu, menu)) _openMenu = null;
+            // The ref list stayed up under the menu; give the pointer a fresh close interval to
+            // be back over it or its badge before the hover close takes it down.
+            if (_refList.IsOpen && _refListCloseTimer is { } timer)
+            {
+                timer.Stop();
+                timer.Start();
+            }
         };
         menu.Closed += onClosed;
         menu.Open(this);
@@ -494,11 +506,7 @@ public sealed partial class CommitGraphControl : Control
         ClipToBounds = true;
 
         _refListCloseTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(120) };
-        _refListCloseTimer.Tick += (_, _) =>
-        {
-            if (_refList.IsOpen && !RefListHovered && !RefListBadgeHovered())
-                CloseRefList();
-        };
+        _refListCloseTimer.Tick += (_, _) => OnRefListCloseTick();
 
         _hoverDwellTimer = new DispatcherTimer { Interval = GraphHoverDwell.Delay };
         _hoverDwellTimer.Tick += (_, _) => HandleHoverDwellElapsed();
