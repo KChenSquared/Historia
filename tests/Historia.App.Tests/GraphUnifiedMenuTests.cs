@@ -217,10 +217,16 @@ public sealed class GraphUnifiedMenuTests
     {
         using var s = CreateGraph();
 
-        var headers = Headers(s.Graph.BuildGraphContextMenuItems(0, null));
+        var items = s.Graph.BuildGraphContextMenuItems(0, null);
+        var headers = Headers(items);
 
-        Assert.Equal(["main", "feat", "origin/main", "v1 (tag)"], headers.Take(4));
-        Assert.DoesNotContain(headers, h => h.StartsWith("Merge ", StringComparison.Ordinal));
+        Assert.Equal(["main", "feat", "v1 (tag)"], headers.Take(3));
+        Assert.DoesNotContain("origin/main", headers);
+        var main = items.OfType<MenuItem>().First();
+        var nested = Assert.IsAssignableFrom<IEnumerable<Control>>(main.ItemsSource).OfType<MenuItem>()
+            .Single(m => m.Header?.ToString() == "origin/main");
+        Assert.Equal(["Delete…"], Headers(Assert.IsAssignableFrom<IEnumerable<Control>>(nested.ItemsSource)));
+        Assert.DoesNotContain(LeafHeaders(items), h => h.StartsWith("Merge ", StringComparison.Ordinal));
     }
 
     [AvaloniaFact]
@@ -270,7 +276,7 @@ public sealed class GraphUnifiedMenuTests
         var pill = s.Graph.PillRectsForTesting.Single(p => p.Deco.Label == "main");
         RightClick(s, Center(pill.Rect));
 
-        Assert.Equal(["main", "origin/main", "feat", "v1 (tag)"], OpenMenuHeaders(s).Take(4));
+        Assert.Equal(["main", "feat", "v1 (tag)"], OpenMenuHeaders(s).Take(3));
         Assert.Equal(RowId(s, 0), s.Context.State.SelectedCommitId);
     }
 
@@ -284,7 +290,7 @@ public sealed class GraphUnifiedMenuTests
         var pill = s.Graph.PillRectsForTesting.Single(p => p.Deco.Label == "main");
         RightClick(s, new Point(s.Graph.Bounds.Width - 40, Center(pill.Rect).Y));
 
-        Assert.Equal(["main", "feat", "origin/main", "v1 (tag)"], OpenMenuHeaders(s).Take(4));
+        Assert.Equal(["main", "feat", "v1 (tag)"], OpenMenuHeaders(s).Take(3));
         Assert.Equal(RowId(s, 0), s.Context.State.SelectedCommitId);
     }
 
