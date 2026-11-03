@@ -6,19 +6,14 @@ namespace HistoriaApp.Tests;
 [Trait("tier", "ui")]
 public sealed class WindowPlacementWiringTests : IDisposable
 {
-    private readonly string _dir = Path.Combine(Path.GetTempPath(), "historia-winplace-" + Guid.NewGuid().ToString("N"));
+    private readonly string _dir = TestScratch.NewDirectory("historia-winplace-");
 
-    public WindowPlacementWiringTests()
-    {
-        Directory.CreateDirectory(_dir);
-        AppPaths.OverrideForTesting(_dir);
-    }
+    public WindowPlacementWiringTests() => AppPaths.OverrideForTesting(_dir);
 
     public void Dispose()
     {
         AppPaths.OverrideForTesting(null);
-        try { Directory.Delete(_dir, recursive: true); }
-        catch { /* best effort */ }
+        TestScratch.Delete(_dir);
     }
 
     private static WindowPlacement ReadSaved()
