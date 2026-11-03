@@ -171,6 +171,23 @@ public class StagingPanelAiButtonsTests : IDisposable
         Dispatcher.UIThread.RunJobs();
     }
 
+    private TaskCompletionSource<CommitMessageResult> HoldReplies()
+    {
+        var gate = new TaskCompletionSource<CommitMessageResult>();
+        _generator.Behavior = ct =>
+        {
+            ct.Register(() => gate.TrySetCanceled(ct));
+            return gate.Task;
+        };
+        return gate;
+    }
+
+    private async Task StartWaitingAsync(StagingPanelView panel)
+    {
+        Click(panel.Wand);
+        await AiTestSupport.PumpUntil(() => panel.ViewModel.IsGenerating);
+    }
+
     private static Task Settled(StagingPanelView panel) =>
         AiTestSupport.PumpUntil(() => !panel.ViewModel.IsGenerating
             && (panel.ViewModel.GenerateCommand.ExecutionTask?.IsCompleted ?? true));
@@ -312,28 +329,109 @@ public class StagingPanelAiButtonsTests : IDisposable
         Assert.Empty(_dialogs.ConfirmDestructiveCalls);
         Assert.DoesNotContain(_notifications.Published, n => n.Severity == NotificationSeverity.Info);
         Assert.Equal(false, _generator.LastAmend);
-        Assert.False(panel.MessageInput.IsReadOnly);
     }
 
     [AvaloniaFact]
-    public async Task A_non_empty_box_asks_before_replacing_and_cancel_changes_nothing()
+    public async Task Generate_with_text_in_box_asks_nothing_at_send()
     {
         await ActivateAsync();
         await StageChangeAsync();
         var panel = NewPanel();
         panel.MessageInput.Text = "my draft";
-        _dialogs.ConfirmDestructiveResult = false;
+        HoldReplies();
 
+        await StartWaitingAsync(panel);
+
+        Assert.Empty(_dialogs.ConfirmDestructiveCalls);
+        Assert.Empty(_dialogs.ChooseCalls);
+        Assert.Equal(1, _generator.Calls);
+        Assert.Equal("my draft", panel.MessageInput.Text);
+
+        _dialogs.ChooseResult = 1;
         Click(panel.Wand);
-        await AiTestSupport.PumpUntil(() => _dialogs.ConfirmDestructiveCalls.Count == 1);
+        await Settled(panel);
+    }
+
+    [AvaloniaFact]
+    public async Task Reply_fills_empty_box_without_asking()
+    {
+        await ActivateAsync();
+        await StageChangeAsync();
+        var panel = NewPanel();
+        var gate = HoldReplies();
+        await StartWaitingAsync(panel);
+
+        gate.SetResult(new CommitMessageResult("feat: late reply", null, null));
+        await Settled(panel);
+
+        Assert.Equal("feat: late reply", panel.MessageInput.Text);
+        Assert.Empty(_dialogs.ConfirmDestructiveCalls);
+        Assert.DoesNotContain(_notifications.Published, n => n.Severity == NotificationSeverity.Info);
+    }
+
+    [AvaloniaFact]
+    public async Task Reply_asks_before_replacing_text_typed_while_waiting()
+    {
+        await ActivateAsync();
+        await StageChangeAsync();
+        var panel = NewPanel();
+        var gate = HoldReplies();
+        await StartWaitingAsync(panel);
+        panel.MessageInput.Text = "typed while waiting";
+
+        gate.SetResult(new CommitMessageResult("feat: late reply", null, null));
         await Settled(panel);
 
         var call = Assert.Single(_dialogs.ConfirmDestructiveCalls);
         Assert.Equal("Replace commit message", call.Title);
-        Assert.Equal("Replace your commit message draft (8 characters) with an AI-generated message? Your draft is discarded.", call.Effect);
+        Assert.Equal("Replace your commit message draft (19 characters) with an AI-generated message? Your draft is discarded.", call.Effect);
         Assert.Equal("Replace", call.ConfirmLabel);
-        Assert.Equal("my draft", panel.MessageInput.Text);
-        Assert.Equal(0, _generator.Calls);
+        Assert.Equal("feat: late reply", panel.MessageInput.Text);
+    }
+
+    [AvaloniaFact]
+    public async Task Declined_reply_keeps_text_and_shows_info()
+    {
+        await ActivateAsync();
+        await StageChangeAsync();
+        var panel = NewPanel();
+        var gate = HoldReplies();
+        await StartWaitingAsync(panel);
+        panel.MessageInput.Text = "typed while waiting";
+        _dialogs.ConfirmDestructiveResult = false;
+
+        gate.SetResult(new CommitMessageResult("feat: late reply", null, null));
+        await Settled(panel);
+
+        Assert.Single(_dialogs.ConfirmDestructiveCalls);
+        Assert.Equal("typed while waiting", panel.MessageInput.Text);
+        var info = Assert.Single(_notifications.Published, n => n.Severity == NotificationSeverity.Info);
+        Assert.Equal("AI message discarded; your text was kept.", info.Message);
+    }
+
+    [AvaloniaFact]
+    public async Task Reply_after_HEAD_moved_outside_is_dropped()
+    {
+        await ActivateAsync();
+        await StageChangeAsync();
+        var panel = NewPanel();
+        var gate = HoldReplies();
+        await StartWaitingAsync(panel);
+
+        using (var repo = new LibGit2Sharp.Repository(_repoDir))
+        {
+            var sig = new LibGit2Sharp.Signature("Test", "test@example.com", DateTimeOffset.Now);
+            repo.Commit("committed elsewhere", sig, sig, new LibGit2Sharp.CommitOptions());
+        }
+        await _context.State.RefreshStatusAsync();
+
+        gate.SetResult(new CommitMessageResult("feat: stale reply", null, null));
+        await Settled(panel);
+
+        Assert.Equal("", panel.MessageInput.Text);
+        Assert.Empty(_dialogs.ConfirmDestructiveCalls);
+        Assert.Contains(_notifications.Published, n =>
+            n.Severity == NotificationSeverity.Info && n.Message.StartsWith("AI message discarded", StringComparison.Ordinal));
     }
 
     [AvaloniaFact]
@@ -409,34 +507,221 @@ public class StagingPanelAiButtonsTests : IDisposable
     }
 
     [AvaloniaFact]
-    public async Task A_second_click_cancels_the_request_and_leaves_the_draft_alone()
+    public async Task Spinner_visible_only_while_generating()
+    {
+        await ActivateAsync();
+        await StageChangeAsync();
+        var panel = NewPanel();
+        HoldReplies();
+        Assert.False(panel.GeneratingSpinner.IsVisible);
+
+        await StartWaitingAsync(panel);
+
+        Assert.True(panel.GeneratingSpinner.IsVisible);
+        Assert.Contains("spinning", panel.GeneratingSpinner.Classes);
+        Assert.Equal("sync", panel.GeneratingSpinnerIcon.Icon);
+        Assert.Matches(@"^Waiting for 1\. Gemini \(sent \d+ s ago\)$", Assert.IsType<string>(ToolTip.GetTip(panel.GeneratingSpinner)));
+        Assert.True(Grid.GetColumn(panel.GeneratingSpinner) > Grid.GetColumn(panel.ModelPicker));
+
+        _dialogs.ChooseResult = 1;
+        Click(panel.Wand);
+        await Settled(panel);
+
+        Assert.False(panel.GeneratingSpinner.IsVisible);
+        Assert.DoesNotContain("spinning", panel.GeneratingSpinner.Classes);
+    }
+
+    [AvaloniaFact]
+    public async Task Box_stays_editable_while_generating()
+    {
+        await ActivateAsync();
+        await StageChangeAsync();
+        var panel = NewPanel();
+        HoldReplies();
+        await StartWaitingAsync(panel);
+
+        Assert.False(panel.MessageInput.IsReadOnly);
+        panel.MessageInput.Text = "typed meanwhile";
+        Dispatcher.UIThread.RunJobs();
+
+        Assert.Equal("typed meanwhile", panel.ViewModel.MessageText);
+
+        _dialogs.ChooseResult = 1;
+        Click(panel.Wand);
+        await Settled(panel);
+    }
+
+    [AvaloniaFact]
+    public async Task Wand_tip_while_generating_says_click_for_options()
+    {
+        await ActivateAsync();
+        await StageChangeAsync();
+        var panel = NewPanel();
+        HoldReplies();
+
+        await StartWaitingAsync(panel);
+
+        Assert.Equal("Generating… click for options", ToolTip.GetTip(panel.Wand));
+        Assert.True(panel.Wand.IsEnabled);
+
+        _dialogs.ChooseResult = 1;
+        Click(panel.Wand);
+        await Settled(panel);
+
+        Assert.Equal("Generate Commit Message", ToolTip.GetTip(panel.Wand));
+    }
+
+    [AvaloniaFact]
+    public async Task Second_click_while_waiting_asks_instead_of_cancelling()
+    {
+        await ActivateAsync();
+        await StageChangeAsync();
+        var panel = NewPanel();
+        HoldReplies();
+        await StartWaitingAsync(panel);
+        _dialogs.ChooseResult = -1;
+
+        Click(panel.Wand);
+        await AiTestSupport.PumpUntil(() => _dialogs.ChooseCalls.Count == 1);
+
+        var call = Assert.Single(_dialogs.ChooseCalls);
+        Assert.Equal("Still waiting", call.Title);
+        Assert.Contains("hasn't answered yet. Requests give up after 4 minutes.", call.Message);
+        Assert.Equal(["Send a new request", "Stop waiting"], call.Options);
+        Assert.Equal(0, call.DefaultIndex);
+        Assert.False(_generator.LastToken.IsCancellationRequested);
+
+        _dialogs.ChooseResult = 1;
+        Click(panel.Wand);
+        await Settled(panel);
+    }
+
+    [AvaloniaFact]
+    public async Task Send_new_request_cancels_and_restarts()
+    {
+        await ActivateAsync();
+        await StageChangeAsync();
+        var panel = NewPanel();
+        var tokens = new List<CancellationToken>();
+        var second = new TaskCompletionSource<CommitMessageResult>();
+        _generator.Behavior = ct =>
+        {
+            tokens.Add(ct);
+            if (tokens.Count > 1)
+                return second.Task;
+            var first = new TaskCompletionSource<CommitMessageResult>();
+            ct.Register(() => first.TrySetCanceled(ct));
+            return first.Task;
+        };
+        await StartWaitingAsync(panel);
+        _dialogs.ChooseResult = 0;
+
+        Click(panel.Wand);
+        await AiTestSupport.PumpUntil(() => tokens.Count == 2);
+
+        Assert.True(tokens[0].IsCancellationRequested);
+        Assert.False(tokens[1].IsCancellationRequested);
+        Assert.True(panel.ViewModel.IsGenerating);
+        Assert.True(panel.GeneratingSpinner.IsVisible);
+
+        second.SetResult(new CommitMessageResult("feat: second", null, null));
+        await Settled(panel);
+
+        Assert.Equal("feat: second", panel.MessageInput.Text);
+        Assert.DoesNotContain(_notifications.Published, n => n.Severity is NotificationSeverity.Error or NotificationSeverity.Warning);
+    }
+
+    [AvaloniaFact]
+    public async Task Stop_waiting_cancels_and_clears_spinner()
     {
         await ActivateAsync();
         await StageChangeAsync();
         var panel = NewPanel();
         panel.MessageInput.Text = "keep me";
-        var gate = new TaskCompletionSource<CommitMessageResult>();
-        _generator.Behavior = ct =>
-        {
-            ct.Register(() => gate.TrySetCanceled(ct));
-            return gate.Task;
-        };
-
-        Click(panel.Wand);
-        await AiTestSupport.PumpUntil(() => panel.ViewModel.IsGenerating);
-
-        Assert.True(panel.MessageInput.IsReadOnly);
-        Assert.Equal("Generating… click to cancel", ToolTip.GetTip(panel.Wand));
-        Assert.True(panel.Wand.IsEnabled);
+        HoldReplies();
+        await StartWaitingAsync(panel);
+        _dialogs.ChooseResult = 1;
 
         Click(panel.Wand);
         await Settled(panel);
 
         Assert.True(_generator.LastToken.IsCancellationRequested);
         Assert.Equal("keep me", panel.MessageInput.Text);
-        Assert.False(panel.MessageInput.IsReadOnly);
+        Assert.False(panel.GeneratingSpinner.IsVisible);
         Assert.Equal("Generate Commit Message", ToolTip.GetTip(panel.Wand));
         Assert.DoesNotContain(_notifications.Published, n => n.Severity is NotificationSeverity.Error or NotificationSeverity.Warning);
+    }
+
+    [AvaloniaFact]
+    public async Task Proposal_during_generation_fills_empty_box()
+    {
+        await ActivateAsync();
+        await StageChangeAsync();
+        var panel = NewPanel();
+        HoldReplies();
+        await StartWaitingAsync(panel);
+
+        _context.State.ProposeCommitMessage("feat: from an agent");
+        Dispatcher.UIThread.RunJobs();
+
+        Assert.Equal("feat: from an agent", panel.MessageInput.Text);
+        Assert.False(panel.OfferBar.IsVisible);
+        Assert.Null(_context.State.PendingCommitMessage);
+        Assert.Empty(_dialogs.ConfirmDestructiveCalls);
+        Assert.True(panel.ViewModel.IsGenerating);
+
+        _dialogs.ChooseResult = 1;
+        Click(panel.Wand);
+        await Settled(panel);
+    }
+
+    [AvaloniaFact]
+    public async Task Use_offer_works_while_generating()
+    {
+        await ActivateAsync();
+        await StageChangeAsync();
+        var panel = NewPanel();
+        panel.MessageInput.Text = "my own draft";
+        HoldReplies();
+        await StartWaitingAsync(panel);
+        _context.State.ProposeCommitMessage("feat: from an agent");
+        Dispatcher.UIThread.RunJobs();
+        Assert.True(panel.OfferBar.IsVisible);
+
+        await panel.ViewModel.UseOfferCommand.ExecuteAsync(null);
+
+        Assert.Equal("feat: from an agent", panel.MessageInput.Text);
+        Assert.False(panel.OfferBar.IsVisible);
+        Assert.Single(_dialogs.ConfirmDestructiveCalls);
+        Assert.True(panel.ViewModel.IsGenerating);
+
+        _dialogs.ChooseResult = 1;
+        Click(panel.Wand);
+        await Settled(panel);
+    }
+
+    [AvaloniaFact]
+    public async Task Dismissing_the_prompt_keeps_waiting()
+    {
+        await ActivateAsync();
+        await StageChangeAsync();
+        var panel = NewPanel();
+        var gate = HoldReplies();
+        await StartWaitingAsync(panel);
+        _dialogs.ChooseResult = -1;
+
+        Click(panel.Wand);
+        await AiTestSupport.PumpUntil(() => _dialogs.ChooseCalls.Count == 1);
+        Dispatcher.UIThread.RunJobs();
+
+        Assert.False(_generator.LastToken.IsCancellationRequested);
+        Assert.True(panel.ViewModel.IsGenerating);
+        Assert.True(panel.GeneratingSpinner.IsVisible);
+
+        gate.SetResult(new CommitMessageResult("feat: late", null, null));
+        await Settled(panel);
+
+        Assert.Equal("feat: late", panel.MessageInput.Text);
     }
 
     [AvaloniaFact]
@@ -455,7 +740,6 @@ public class StagingPanelAiButtonsTests : IDisposable
         var error = Assert.Single(_notifications.Published, n => n.Severity == NotificationSeverity.Error);
         Assert.Equal("The AI service rejected the API key.", error.Message);
         Assert.Equal("HTTP 401", error.Details);
-        Assert.False(panel.MessageInput.IsReadOnly);
     }
 
     [AvaloniaFact]
@@ -498,28 +782,54 @@ public class StagingPanelAiButtonsTests : IDisposable
     }
 
     [AvaloniaFact]
-    public async Task Committing_during_generation_does_nothing()
+    public async Task Commit_while_generating_commits_and_cancels_the_request()
     {
         await ActivateAsync();
         await StageChangeAsync();
         var panel = NewPanel();
-        panel.MessageInput.Text = "feat: old draft";
-        var gate = new TaskCompletionSource<CommitMessageResult>();
-        _generator.Behavior = ct =>
+        panel.MessageInput.Text = "feat: typed meanwhile";
+        panel.ViewModel.AuthorOverride = "Test <test@example.com>";
+        HoldReplies();
+        await StartWaitingAsync(panel);
+
+        await panel.ViewModel.CommitCommand.ExecuteAsync(null);
+        await Settled(panel);
+
+        using (var repo = new LibGit2Sharp.Repository(_repoDir))
         {
-            ct.Register(() => gate.TrySetCanceled(ct));
-            return gate.Task;
-        };
-        Click(panel.Wand);
-        await AiTestSupport.PumpUntil(() => panel.ViewModel.IsGenerating);
+            Assert.Equal(2, repo.Commits.Count());
+            Assert.Equal("feat: typed meanwhile", repo.Head.Tip.MessageShort);
+        }
+        Assert.True(_generator.LastToken.IsCancellationRequested);
+        Assert.False(panel.ViewModel.IsGenerating);
+        Assert.False(panel.GeneratingSpinner.IsVisible);
+        Assert.Equal("", panel.MessageInput.Text);
+    }
+
+    [AvaloniaFact]
+    public async Task Failed_commit_while_generating_keeps_the_request()
+    {
+        await ActivateAsync();
+        await StageChangeAsync();
+        var hooks = System.IO.Path.Combine(_repoDir, ".git", "hooks");
+        Directory.CreateDirectory(hooks);
+        File.WriteAllText(System.IO.Path.Combine(hooks, "pre-commit"), "#!/bin/sh\nexit 1\n");
+        var panel = NewPanel();
+        panel.MessageInput.Text = "feat: will be rejected";
+        panel.ViewModel.AuthorOverride = "Test <test@example.com>";
+        var gate = HoldReplies();
+        await StartWaitingAsync(panel);
 
         await panel.ViewModel.CommitCommand.ExecuteAsync(null);
 
         using (var repo = new LibGit2Sharp.Repository(_repoDir))
             Assert.Single(repo.Commits);
-        Assert.Equal("feat: old draft", panel.MessageInput.Text);
+        Assert.Contains(_notifications.Published, n => n.Severity == NotificationSeverity.Error);
+        Assert.False(_generator.LastToken.IsCancellationRequested);
+        Assert.True(panel.ViewModel.IsGenerating);
+        Assert.Equal("feat: will be rejected", panel.MessageInput.Text);
 
-        Click(panel.Wand);
+        gate.SetResult(new CommitMessageResult("feat: late", null, null));
         await Settled(panel);
     }
 
