@@ -72,6 +72,17 @@ public sealed class SideBySideDiffPresenter : Control
         }
     }
 
+    /// <summary>False while a patch is being applied; forwarded to both panes.</summary>
+    public bool HunkActionsEnabled
+    {
+        get => _leftPresenter.HunkActionsEnabled;
+        set
+        {
+            _leftPresenter.HunkActionsEnabled = value;
+            _rightPresenter.HunkActionsEnabled = value;
+        }
+    }
+
     public event EventHandler<int>? HunkActionRequested;
     public event EventHandler<IReadOnlyList<DiffLineRef>>? SelectionActionRequested;
 

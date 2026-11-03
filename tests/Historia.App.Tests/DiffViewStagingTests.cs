@@ -527,6 +527,89 @@ public class DiffViewStagingTests : IDisposable
         Assert.Equal(2, _patchService.ApplyPatchCount);
     }
 
+    private static IReadOnlyList<Button> HunkButtons(Control root)
+    {
+        Dispatcher.UIThread.RunJobs();
+        return [.. root.GetVisualDescendants().OfType<Button>().Where(b => b.Content as string == "Stage hunk")];
+    }
+
+    private async Task<(DiffView View, Window Window)> ShowViewAsync()
+    {
+        var req = new DiffRequest { Source = DiffSource.UnstagedChanges, Path = "test.txt" };
+        var view = new DiffView(_context, req, _sp.GetService<ISettingsService>(), _sp);
+        var window = new Window { Width = 900, Height = 600, Content = view };
+        window.Show();
+        await WaitForPresenterAsync(view);
+        Dispatcher.UIThread.RunJobs();
+        return (view, window);
+    }
+
+    [AvaloniaFact]
+    public async Task Hunk_buttons_disabled_while_a_hunk_applies()
+    {
+        var (view, window) = await ShowViewAsync();
+        try
+        {
+            var before = HunkButtons(view);
+            Assert.NotEmpty(before);
+            Assert.All(before, b => Assert.True(b.IsEffectivelyEnabled));
+
+            var gate = new TaskCompletionSource<bool>();
+            _patchService.CheckGate = gate;
+            var apply = view.ViewModel.ApplyHunkAsync(0);
+
+            Assert.True(view.ViewModel.IsApplyingPatch);
+            var combined = Assert.IsType<CombinedDiffPresenter>(view.PresenterForTesting);
+            Assert.False(combined.HunkActionsEnabled);
+            var during = HunkButtons(view);
+            Assert.NotEmpty(during);
+            Assert.All(during, b => Assert.False(b.IsEffectivelyEnabled));
+
+            _patchService.CheckGate = null;
+            gate.SetResult(true);
+            await apply;
+            await WaitForPresenterAsync(view);
+
+            Assert.False(view.ViewModel.IsApplyingPatch);
+            var after = HunkButtons(view);
+            Assert.NotEmpty(after);
+            Assert.All(after, b => Assert.True(b.IsEffectivelyEnabled));
+        }
+        finally
+        {
+            window.Close();
+            Dispatcher.UIThread.RunJobs();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task Hunk_buttons_reenable_after_a_failed_apply()
+    {
+        var (view, window) = await ShowViewAsync();
+        try
+        {
+            var gate = new TaskCompletionSource<bool>();
+            _patchService.CheckGate = gate;
+            _patchService.ThrowOnApply = new InvalidOperationException("simulated failure");
+            var apply = view.ViewModel.ApplyHunkAsync(0);
+            Assert.All(HunkButtons(view), b => Assert.False(b.IsEffectivelyEnabled));
+
+            _patchService.CheckGate = null;
+            gate.SetResult(true);
+            await apply;
+
+            Assert.False(view.ViewModel.IsApplyingPatch);
+            var after = HunkButtons(view);
+            Assert.NotEmpty(after);
+            Assert.All(after, b => Assert.True(b.IsEffectivelyEnabled));
+        }
+        finally
+        {
+            window.Close();
+            Dispatcher.UIThread.RunJobs();
+        }
+    }
+
     [AvaloniaFact]
     public async Task Selection_request_while_hunk_in_flight_is_ignored()
     {
