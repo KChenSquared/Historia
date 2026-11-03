@@ -204,6 +204,9 @@ internal static class SimpleDialog
         if (cancel is not null)
             cancel.Click += (_, _) => { tcs.TrySetResult(new Result(false, null)); window.Close(); };
         window.Closed += (_, _) => tcs.TrySetResult(new Result(false, null));
+        // A prompt is typed into straight away; a prefilled value is selected so typing replaces it.
+        if (prompt)
+            window.Opened += (_, _) => { box.Focus(); box.SelectAll(); };
 
         await ShowOwnedOrFree(window, owner);
 
