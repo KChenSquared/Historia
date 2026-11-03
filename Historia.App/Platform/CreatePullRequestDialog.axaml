@@ -1,0 +1,72 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:Historia.ViewModels;assembly=Historia.Core"
+        x:Class="Historia.Platform.CreatePullRequestDialog"
+        x:DataType="vm:CreatePullRequestDialogViewModel"
+        Title="Create pull request"
+        Width="580"
+        SizeToContent="Height"
+        CanResize="False"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False">
+    <Window.Styles>
+        <Style Selector="TextBlock.field-label">
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Margin" Value="0,10,0,3" />
+        </Style>
+        <Style Selector="TextBlock.note">
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="Margin" Value="0,6,0,0" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="Foreground" Value="{DynamicResource ColorTextMuted}" />
+        </Style>
+    </Window.Styles>
+
+    <StackPanel Margin="20">
+        <TextBlock Classes="field-label" Text="Source" />
+        <Grid ColumnDefinitions="*,Auto">
+            <ComboBox x:Name="SourceBox"
+                      IsEditable="True"
+                      HorizontalAlignment="Stretch"
+                      ItemsSource="{Binding FilteredSourceItems}"
+                      SelectedItem="{Binding SelectedSource}"
+                      Text="{Binding SourceText}" />
+            <Button Grid.Column="1"
+                    Content="Push"
+                    Margin="8,0,0,0"
+                    MinWidth="80"
+                    Command="{Binding PushCommand}" />
+        </Grid>
+        <TextBlock Classes="field-label" Text="Target" />
+        <ComboBox x:Name="TargetBox"
+                  IsEditable="True"
+                  HorizontalAlignment="Stretch"
+                  ItemsSource="{Binding FilteredTargetItems}"
+                  SelectedItem="{Binding SelectedTarget}"
+                  Text="{Binding TargetText}" />
+        <TextBlock Classes="field-label" Text="Link" />
+        <Grid ColumnDefinitions="*,Auto">
+            <TextBox x:Name="UrlBox"
+                     IsReadOnly="True"
+                     Text="{Binding Url}" />
+            <Button Grid.Column="1"
+                    Classes="primary"
+                    Content="Open"
+                    Margin="8,0,0,0"
+                    MinWidth="80"
+                    Command="{Binding OpenCommand}" />
+        </Grid>
+        <TextBlock Classes="note"
+                   Text="{Binding UrlProblem}"
+                   IsVisible="{Binding UrlProblem, Converter={x:Static ObjectConverters.IsNotNull}}" />
+        <StackPanel Orientation="Horizontal"
+                    HorizontalAlignment="Right"
+                    Margin="0,20,0,0">
+            <Button Content="Close"
+                    IsCancel="True"
+                    MinWidth="80"
+                    Command="{Binding CloseCommand}" />
+        </StackPanel>
+    </StackPanel>
+</Window>
