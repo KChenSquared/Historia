@@ -424,6 +424,18 @@
                                         <MenuItem Header="Copy path"
                                                   Command="{Binding CopyPathCommand}" />
                                         <Separator />
+                                        <MenuItem Header="Stage file"
+                                                  Command="{Binding StageCommand}" />
+                                        <MenuItem Header="Stage selected file(s)"
+                                                  IsVisible="{Binding ShowSelectedItems}"
+                                                  Command="{Binding MoveSelectedCommand}" />
+                                        <Separator />
+                                        <MenuItem Header="Ignore file"
+                                                  Command="{Binding IgnoreCommand}" />
+                                        <MenuItem Header="Ignore selected file(s)"
+                                                  IsVisible="{Binding ShowSelectedItems}"
+                                                  Command="{Binding IgnoreSelectedCommand}" />
+                                        <Separator />
                                         <MenuItem Header="Discard changes"
                                                   Command="{Binding DiscardCommand}" />
                                     </ContextMenu>
@@ -532,6 +544,18 @@
                                                   Command="{Binding RevealCommand}" />
                                         <MenuItem Header="Copy path"
                                                   Command="{Binding CopyPathCommand}" />
+                                        <Separator />
+                                        <MenuItem Header="Unstage file"
+                                                  Command="{Binding UnstageCommand}" />
+                                        <MenuItem Header="Unstage selected file(s)"
+                                                  IsVisible="{Binding ShowSelectedItems}"
+                                                  Command="{Binding MoveSelectedCommand}" />
+                                        <Separator />
+                                        <MenuItem Header="Ignore file"
+                                                  Command="{Binding IgnoreCommand}" />
+                                        <MenuItem Header="Ignore selected file(s)"
+                                                  IsVisible="{Binding ShowSelectedItems}"
+                                                  Command="{Binding IgnoreSelectedCommand}" />
                                     </ContextMenu>
                                 </Border.ContextMenu>
                                 <Grid ColumnDefinitions="Auto,Auto,*" Height="24">
