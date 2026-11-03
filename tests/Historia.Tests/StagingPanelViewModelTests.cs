@@ -1247,6 +1247,90 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
             n.Severity == NotificationSeverity.Warning && n.Message == "Stage changes and enter a message before committing."));
     }
 
+    private async Task<(TestRepositoryBuilder Repo, RepositoryContext Ctx, StagingPanelViewModel Vm)> ConflictedAsync()
+    {
+        var repo = NewRepo();
+        repo.Checkout("feature", create: true);
+        repo.WriteFile("a.txt", "feature\n").Stage();
+        repo.Commit("feature edit");
+        repo.Checkout("main");
+        repo.WriteFile("a.txt", "main\n").Stage();
+        repo.Commit("main edit");
+        try { repo.Git("merge", "feature"); } catch { /* expected to conflict */ }
+        var ctx = Open(repo);
+        await RefreshUntilAsync(ctx, () => ctx.State.Status.Conflicted.Count == 1, "the conflicted file");
+        return (repo, ctx, NewViewModel(ctx));
+    }
+
+    [Fact]
+    public async Task Commit_is_disabled_while_files_are_conflicted()
+    {
+        if (GitMissing) return;
+        var (_, ctx, vm) = await ConflictedAsync();
+
+        Assert.False(vm.CommitCommand.CanExecute(null));
+        Assert.False(vm.CommitAndPushCommand.CanExecute(null));
+        Assert.Equal("Resolve the conflicts before committing.", vm.CommitBlockedTip);
+
+        var raised = 0;
+        vm.CommitCommand.CanExecuteChanged += (_, _) => raised++;
+        vm.CommitAndPushCommand.CanExecuteChanged += (_, _) => raised++;
+        await Task.Run(async () => await ctx.Gateway.StageAsync(["a.txt"]));
+        await RefreshUntilAsync(ctx, () => ctx.State.Status.Conflicted.Count == 0, "the resolved status");
+        await WaitUntilAsync(() => vm.CommitCommand.CanExecute(null), "the commit command to enable");
+
+        Assert.True(vm.CommitAndPushCommand.CanExecute(null));
+        Assert.Null(vm.CommitBlockedTip);
+        Assert.True(raised >= 2);
+    }
+
+    [Fact]
+    public async Task Commit_is_disabled_while_a_commit_runs()
+    {
+        if (GitMissing) return;
+        var (_, ctx, vm) = await ModifiedAsync();
+        await vm.StageAllChangesCommand.ExecuteAsync(null);
+        await WaitUntilAsync(() => Rows(vm.Staged).Count == 2);
+        vm.MessageText = "feat: held";
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holder = ctx.WithWriteLockAsync(async ct =>
+        {
+            entered.SetResult();
+            await release.Task.WaitAsync(ct);
+        }, label: "Index refresh");
+        await entered.Task;
+
+        var commit = vm.CommitCommand.ExecuteAsync(null);
+
+        Assert.False(vm.CommitCommand.CanExecute(null));
+        Assert.False(vm.CommitAndPushCommand.CanExecute(null));
+        Assert.Null(vm.CommitBlockedTip);
+
+        release.SetResult();
+        await holder;
+        await commit;
+
+        Assert.True(vm.CommitCommand.CanExecute(null));
+        Assert.True(vm.CommitAndPushCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public async Task Ctrl_enter_with_conflicts_says_why()
+    {
+        if (GitMissing) return;
+        var (repo, _, vm) = await ConflictedAsync();
+        var before = Head(repo);
+        vm.MessageText = "feat: blocked";
+
+        Assert.True(await Keyboard.DispatchAsync("Ctrl+Enter"));
+
+        Assert.Equal(before, Head(repo));
+        Assert.Contains(Notifications.Published, n =>
+            n.Severity == NotificationSeverity.Info && n.Message == "Resolve the conflicts before committing.");
+        Assert.Equal("feat: blocked", vm.MessageText);
+    }
+
     [Fact]
     public async Task The_author_override_names_the_commit_author()
     {
