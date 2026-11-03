@@ -17,6 +17,15 @@ public sealed partial class CommitGraphControl
     private bool RefListHovered =>
         _refList.IsPointerOver || _refList.Child?.IsPointerOver == true;
 
+    /// <summary>Hover close for the ref list: it goes once the pointer is over neither the list
+    /// nor its badge. A context menu opened from the list is neither, so the list stays while a
+    /// graph menu is open and the next tick after the menu closes decides.</summary>
+    private void OnRefListCloseTick()
+    {
+        if (_refList.IsOpen && _openMenu is null && !RefListHovered && !RefListBadgeHovered())
+            CloseRefList();
+    }
+
     private void CloseRefList()
     {
         _refListCloseTimer?.Stop();
