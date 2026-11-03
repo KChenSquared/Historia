@@ -222,6 +222,7 @@ public sealed class App : Application
         {
             if (w.WindowState == WindowState.Minimized)
                 w.WindowState = WindowState.Normal;
+            (w as MainWindow)?.EnsureOnScreen();
             w.Activate();
         }
     }
