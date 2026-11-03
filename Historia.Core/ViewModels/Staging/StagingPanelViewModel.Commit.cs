@@ -43,6 +43,23 @@ public sealed partial class StagingPanelViewModel
     [ObservableProperty]
     public partial bool IsAgentNoteVisible { get; private set; }
 
+    private const string CommitBlockedByConflictsText = "Resolve the conflicts before committing.";
+
+    /// <summary>Why the commit buttons are disabled: the conflicts that still need resolving, or
+    /// null when nothing blocks a commit (a commit already running is obvious and has no tip).</summary>
+    [ObservableProperty]
+    public partial string? CommitBlockedTip { get; private set; }
+
+    private bool CanCommit => !_committing && _status.Conflicted.Count == 0;
+
+    /// <summary>Re-evaluates both commit commands and their tooltip against the current status and the running commit.</summary>
+    private void RefreshCommitState()
+    {
+        CommitBlockedTip = _status.Conflicted.Count > 0 ? CommitBlockedByConflictsText : null;
+        CommitCommand.NotifyCanExecuteChanged();
+        CommitAndPushCommand.NotifyCanExecuteChanged();
+    }
+
     partial void OnMessageTextChanged(string value)
     {
         UpdateCounter();
@@ -71,11 +88,11 @@ public sealed partial class StagingPanelViewModel
     // ── Commit ──
 
     /// <summary>Commits the staged changes with the message in the box.</summary>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanCommit))]
     private Task CommitAsync() => CommitCoreAsync(push: false);
 
     /// <summary>Commits, then asks for a push of the current branch.</summary>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanCommit))]
     private Task CommitAndPushAsync() => CommitCoreAsync(push: true);
 
     private async Task CommitCoreAsync(bool push)
@@ -88,7 +105,14 @@ public sealed partial class StagingPanelViewModel
             AdoptCurrentStatus();
         }
 
-        if (_committing || _status.Conflicted.Count > 0) return;
+        // A repeated Ctrl+Enter while a commit runs is not worth a message.
+        if (_committing) return;
+        if (_status.Conflicted.Count > 0)
+        {
+            _notifications.Publish(NotificationSeverity.Info, CommitBlockedByConflictsText);
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(MessageText) || (_status.Staged.Count == 0 && !IsAmend))
         {
             _notifications.Publish(NotificationSeverity.Warning, "Stage changes and enter a message before committing.");
@@ -121,6 +145,7 @@ public sealed partial class StagingPanelViewModel
         }
 
         _committing = true;
+        RefreshCommitState();
         // A proposal that arrives while the commit runs is meant for the next commit; only the
         // one already pending now is spent by this commit.
         var pendingAtStart = _ctx.State.PendingCommitMessage;
@@ -188,6 +213,8 @@ public sealed partial class StagingPanelViewModel
         finally
         {
             _committing = false;
+            if (!IsDisposed)
+                RefreshCommitState();
             if (!IsDisposed && _ctx.State.PendingCommitMessage is { } pending)
                 ApplyProposal(pending);
         }

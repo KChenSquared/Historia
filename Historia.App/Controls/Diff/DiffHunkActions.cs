@@ -93,6 +93,7 @@ public sealed class DiffHunkActionGenerator : VisualLineElementGenerator
             Margin = new Thickness(0, 0, 6, 0),
             Cursor = HandCursor,
             VerticalAlignment = VerticalAlignment.Center,
+            IsEnabled = _presenter.HunkActionsEnabled,
         };
         var hunkIndex = row.HunkIndex;
         button.Click += (_, _) => _presenter.RequestHunkAction(hunkIndex);

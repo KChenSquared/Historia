@@ -288,11 +288,15 @@
                                     Classes="primary"
                                     Cursor="Hand"
                                     Content="Commit"
+                                    ToolTip.Tip="{Binding CommitBlockedTip}"
+                                    ToolTip.ShowOnDisabled="True"
                                     Command="{Binding CommitCommand}" />
                             <Button x:Name="CommitPushButton"
                                     Classes="secondary"
                                     Cursor="Hand"
                                     Content="Commit &amp; Push"
+                                    ToolTip.Tip="{Binding CommitBlockedTip}"
+                                    ToolTip.ShowOnDisabled="True"
                                     Command="{Binding CommitAndPushCommand}" />
                             <Button x:Name="StashStagedButton"
                                     Classes="secondary"

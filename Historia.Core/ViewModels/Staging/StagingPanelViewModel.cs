@@ -536,6 +536,7 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
 
     private void RefreshSelectionState()
     {
+        RefreshCommitState();
         StageCheckedCommand.NotifyCanExecuteChanged();
         UnstageCheckedCommand.NotifyCanExecuteChanged();
         StashStagedCommand.NotifyCanExecuteChanged();

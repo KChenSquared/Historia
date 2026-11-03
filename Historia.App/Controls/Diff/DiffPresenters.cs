@@ -12,6 +12,7 @@ public abstract class DiffPresenterBase : ScrollSyncCodeEditor
     private bool _allowStaging = true;
     private string _stageVerb = "Stage";
     private bool _enableRowButtons = true;
+    private bool _hunkActionsEnabled = true;
     private DiffHunkActionGenerator? _hunkActionGenerator;
     private int? _pointerLine;
     private (int Start, int End)? _visibleLineRange;
@@ -46,6 +47,24 @@ public abstract class DiffPresenterBase : ScrollSyncCodeEditor
                 _enableRowButtons = value;
                 UpdateStagingControls();
             }
+        }
+    }
+
+    /// <summary>False while a patch is being applied: the inline hunk buttons and the hunk and
+    /// selected-lines menu items are shown disabled.</summary>
+    public bool HunkActionsEnabled
+    {
+        get => _hunkActionsEnabled;
+        set
+        {
+            if (_hunkActionsEnabled == value)
+            {
+                return;
+            }
+
+            _hunkActionsEnabled = value;
+            UpdateSelectionItem();
+            TextArea.TextView.Redraw();
         }
     }
 
@@ -345,7 +364,7 @@ public abstract class DiffPresenterBase : ScrollSyncCodeEditor
         if (_stageLinesMenuItem != null)
         {
             var selectedRefs = GetSelectedLineRefs();
-            _stageLinesMenuItem.IsEnabled = selectedRefs.Count > 0;
+            _stageLinesMenuItem.IsEnabled = selectedRefs.Count > 0 && HunkActionsEnabled;
         }
     }
 
@@ -373,7 +392,7 @@ public abstract class DiffPresenterBase : ScrollSyncCodeEditor
             var stageLinesItem = new MenuItem
             {
                 Header = $"{StageVerb} selected lines",
-                IsEnabled = selectedRefs.Count > 0,
+                IsEnabled = selectedRefs.Count > 0 && HunkActionsEnabled,
             };
             stageLinesItem.Click += (_, _) => RequestSelectionAction();
             _stageLinesMenuItem = stageLinesItem;
@@ -396,7 +415,7 @@ public abstract class DiffPresenterBase : ScrollSyncCodeEditor
             var stageHunkItem = new MenuItem
             {
                 Header = $"{StageVerb} hunk",
-                IsEnabled = hunkIndex >= 0,
+                IsEnabled = hunkIndex >= 0 && HunkActionsEnabled,
             };
             var capturedHunk = hunkIndex;
             stageHunkItem.Click += (_, _) =>

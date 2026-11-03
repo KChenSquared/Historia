@@ -369,14 +369,42 @@ public sealed class HomeViewModelTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task A_row_does_not_open_while_a_clone_runs()
+    public async Task Recent_row_opens_while_a_clone_runs()
     {
         var rig = NewRig(seed: [Recent("/src/a", "a")]);
         rig.Clone.Current = new CloneStatus("u", "t", null, false);
+        var routes = rig.Navigations();
 
         await rig.Home.Recents[0].OpenCommand.ExecuteAsync(null);
 
-        Assert.Empty(rig.Workspace.Opened);
+        Assert.Equal(["/src/a"], rig.Workspace.Opened);
+        Assert.Equal(["repo"], routes);
+    }
+
+    [Fact]
+    public async Task IsOpening_is_true_only_while_an_open_runs()
+    {
+        var rig = NewRig(seed: [Recent("/src/a", "a")]);
+        var gate = new TaskCompletionSource();
+        var workspace = new GatedWorkspace(gate.Task);
+        var home = new HomeViewModel("", workspace, rig.Clone, rig.Recents, rig.Dialogs, rig.Notifications, rig.Nav, rig.Launcher,
+            rig.Profiles, rig.Submodules, rig.Ui, (_, _, _, _) => Task.FromResult<CloneDialogChoice?>(null));
+        var changes = new List<bool>();
+        home.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(HomeViewModel.IsOpening))
+                changes.Add(home.IsOpening);
+        };
+        Assert.False(home.IsOpening);
+
+        var open = home.Recents[0].OpenCommand.ExecuteAsync(null);
+
+        Assert.True(home.IsOpening);
+        gate.SetResult();
+        await open;
+
+        Assert.False(home.IsOpening);
+        Assert.Equal([true, false], changes);
     }
 
     [Fact]

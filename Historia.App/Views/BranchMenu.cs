@@ -35,8 +35,10 @@ internal static class BranchMenu
     internal static string TruncateBranchLabelForMenu(string name) => RefMenuItemViewModel.TrimName(name);
 
     /// <summary>Resolves (ahead, behind) for <paramref name="t"/> against its counterpart
-    /// and returns the matching push/pull/fast-forward/merge-and-push menu item(s), or empty when
-    /// there is no counterpart, the lookup fails, or the refs are identical. Every item acts on the
+    /// and returns the matching push/pull/fast-forward/merge-and-push menu item(s). It returns empty
+    /// when there is no counterpart or the refs are identical, and one disabled "Push / pull
+    /// unavailable" item when a counterpart exists but cannot be compared (its remote-tracking ref
+    /// is gone or was never fetched, or the lookup fails). Every item acts on the
     /// local branch: the row itself, or a remote row's counterpart.
     /// <list type="bullet">
     /// <item>Local ahead only: Push, whether or not the branch is checked out — <c>git push</c>
@@ -51,15 +53,19 @@ internal static class BranchMenu
     internal static async Task<IReadOnlyList<Control>> BuildDivergenceItemsAsync(
         Target t, IGitGateway gateway, IRepoActionBus actions, CancellationToken ct)
     {
-        if (t.CounterpartRef is not { } counterpart || t.RemoteAlias is not { } remoteAlias)
+        if (t.CounterpartRef is not { } counterpart)
             return [];
 
         var (local, remote) = t.IsLocal ? (t.TrackingRef, counterpart) : (counterpart, t.TrackingRef);
+        if (t.RemoteAlias is not { } remoteAlias)
+            return [Unavailable(remote)];
 
         AheadBehind? ab;
         try { ab = await gateway.GetDivergenceAsync(local, remote, ct); }
-        catch { return []; }
-        if (ab is not { } div || (div.Ahead == 0 && div.Behind == 0))
+        catch { return [Unavailable(remote)]; }
+        if (ab is not { } div)
+            return [Unavailable(remote)];
+        if (div.Ahead == 0 && div.Behind == 0)
             return [];
 
         var isCurrentLocalBranch = t.IsLocal
@@ -107,6 +113,16 @@ internal static class BranchMenu
                 () => Request(RepoNetworkAction.MergeAndPush, localBranch)));
         }
         return items;
+    }
+
+    // The remote side of a branch pair cannot be compared, so push and pull cannot be offered; the
+    // item says so and how to fix it instead of leaving the slot empty.
+    private static Control Unavailable(string remoteRef)
+    {
+        var item = new MenuItem { Header = "Push / pull unavailable", IsEnabled = false };
+        ToolTip.SetTip(item, $"{remoteRef} is gone or hasn't been fetched. Fetch to refresh.");
+        ToolTip.SetShowOnDisabled(item, true);
+        return item;
     }
 
     public static List<Control> Build(

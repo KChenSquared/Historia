@@ -615,6 +615,41 @@ public sealed class DiffViewModelTests : IAsyncDisposable
         Assert.False(_patches.LastApplyToken.IsCancellationRequested);
     }
 
+    [Fact]
+    public async Task IsApplyingPatch_is_true_only_while_the_patch_runs()
+    {
+        var vm = await Loaded(Create());
+        var changes = new List<bool>();
+        vm.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(DiffViewModel.IsApplyingPatch))
+                changes.Add(vm.IsApplyingPatch);
+        };
+        Assert.False(vm.IsApplyingPatch);
+        var gate = new TaskCompletionSource<bool>();
+        _patches.CheckGate = gate;
+
+        var apply = vm.ApplyHunkAsync(0);
+
+        Assert.True(vm.IsApplyingPatch);
+        await vm.ApplyHunkAsync(1);
+        Assert.Equal(1, _patches.GeneratePatchCount);
+        Assert.True(vm.IsApplyingPatch);
+
+        _patches.CheckGate = null;
+        gate.SetResult(true);
+        await apply;
+
+        Assert.False(vm.IsApplyingPatch);
+        Assert.Equal([true, false], changes);
+
+        _patches.ThrowOnApply = new InvalidOperationException("simulated failure");
+        await vm.ApplyHunkAsync(0);
+
+        Assert.False(vm.IsApplyingPatch);
+        Assert.Equal([true, false, true, false], changes);
+    }
+
     private sealed class FakePatchService : IPatchService
     {
         public PatchScope LastScope { get; private set; }

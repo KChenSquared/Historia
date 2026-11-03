@@ -47,7 +47,6 @@ public sealed partial class DiffViewModel : ViewModelBase
     private readonly CancellationTokenSource _loadingCts = new();
     private readonly CancellationTokenSource _readCts;
     private readonly CancellationToken _readToken;
-    private bool _patchInFlight;
     private bool _focusLinePending;
     private int _focusLineAttempts;
 
@@ -93,6 +92,12 @@ public sealed partial class DiffViewModel : ViewModelBase
 
     /// <summary>The caption of the mode button: the mode a press switches to.</summary>
     public string ToggleLabel => IsSideBySide ? "Unified" : "Side-by-side";
+
+    /// <summary>True from the moment a hunk or line patch is requested until the diff has been
+    /// reloaded or the attempt has failed; a second request in that time is ignored, so the
+    /// presenters disable their staging actions while it is set.</summary>
+    [ObservableProperty]
+    public partial bool IsApplyingPatch { get; private set; }
 
     /// <summary>The loaded diff, or null while loading or after a failed load.</summary>
     [ObservableProperty]
@@ -320,10 +325,10 @@ public sealed partial class DiffViewModel : ViewModelBase
     // what is left. A second request while one runs is ignored. A failure is reported, never thrown.
     private async Task ApplyPatchAsync(PatchScope scope, IReadOnlySet<DiffLineRef> selected, string what)
     {
-        if (_patches is null || Diff is null || IsDisposed || _patchInFlight)
+        if (_patches is null || Diff is null || IsDisposed || IsApplyingPatch)
             return;
 
-        _patchInFlight = true;
+        IsApplyingPatch = true;
         var diffAtEntry = Diff;
         var stage = Request.Source == DiffSource.UnstagedChanges;
         var reverse = !stage;
@@ -376,7 +381,7 @@ public sealed partial class DiffViewModel : ViewModelBase
         }
         finally
         {
-            _patchInFlight = false;
+            IsApplyingPatch = false;
         }
     }
 

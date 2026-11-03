@@ -34,6 +34,7 @@ public sealed partial class DiffView : UserControl, IDisposable
         ViewModel.PresentationChanged += OnPresentationChanged;
         ViewModel.NavigationRequested += OnNavigationRequested;
         ViewModel.FocusLineRequested += OnFocusLineRequested;
+        ViewModel.PropertyChanged += OnViewModelPropertyChanged;
         DataContext = ViewModel;
         ApplyPresentation();
     }
@@ -64,6 +65,22 @@ public sealed partial class DiffView : UserControl, IDisposable
 
     private void OnPresentationChanged(object? sender, EventArgs e) => ApplyPresentation();
 
+    private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(DiffViewModel.IsApplyingPatch))
+            ApplyHunkActionsEnabled();
+    }
+
+    // The staging buttons and menu items are disabled while a patch applies.
+    private void ApplyHunkActionsEnabled()
+    {
+        var enabled = !ViewModel.IsApplyingPatch;
+        if (_sideBySidePresenter is { } sbs)
+            sbs.HunkActionsEnabled = enabled;
+        if (_combinedPresenter is { } combined)
+            combined.HunkActionsEnabled = enabled;
+    }
+
     // Builds the presenter for the view model's mode and model, or clears the body when the view
     // model shows a message instead.
     private void ApplyPresentation()
@@ -93,6 +110,7 @@ public sealed partial class DiffView : UserControl, IDisposable
                 Model = model,
                 AllowStaging = ViewModel.CanStage,
                 StageVerb = ViewModel.StageVerb,
+                HunkActionsEnabled = !ViewModel.IsApplyingPatch,
             };
             sbs.LeftPresenter.WordWrap = false;
             sbs.RightPresenter.WordWrap = false;
@@ -113,6 +131,7 @@ public sealed partial class DiffView : UserControl, IDisposable
                 AllowStaging = ViewModel.CanStage,
                 StageVerb = ViewModel.StageVerb,
                 WordWrap = ViewModel.WordWrap,
+                HunkActionsEnabled = !ViewModel.IsApplyingPatch,
             };
             combined.HunkActionRequested += OnHunkActionRequested;
             combined.SelectionActionRequested += OnSelectionActionRequested;
@@ -209,6 +228,7 @@ public sealed partial class DiffView : UserControl, IDisposable
         ViewModel.PresentationChanged -= OnPresentationChanged;
         ViewModel.NavigationRequested -= OnNavigationRequested;
         ViewModel.FocusLineRequested -= OnFocusLineRequested;
+        ViewModel.PropertyChanged -= OnViewModelPropertyChanged;
         DetachPresenters();
         PresenterHost.Content = null;
         ViewModel.Dispose();
