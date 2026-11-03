@@ -176,7 +176,7 @@ public sealed partial class CommitGraphControl : IGraphMenuActions
                 counterpartRef = name;
             remoteAlias = remote;
         }
-        if (counterpartRef is null || remoteAlias is null)
+        if (counterpartRef is null)
             return [];
 
         var isLocal = branch.Type == DecorationType.LocalBranch;

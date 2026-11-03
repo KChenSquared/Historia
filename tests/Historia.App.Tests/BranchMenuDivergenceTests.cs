@@ -9,12 +9,15 @@ public sealed class BranchMenuDivergenceTests
     private sealed class StubGateway : IGitGateway
     {
         public AheadBehind? Result { get; set; }
+        public Exception? Throws { get; set; }
         public (string Local, string Remote)? LastArgs { get; private set; }
         public string RepositoryPath => "/repo";
 
         public Task<AheadBehind?> GetDivergenceAsync(string local, string remote, CancellationToken ct = default)
         {
             LastArgs = (local, remote);
+            if (Throws is not null)
+                throw Throws;
             return Task.FromResult(Result);
         }
 
@@ -295,6 +298,59 @@ public sealed class BranchMenuDivergenceTests
 
         var item = Assert.Single(items);
         Assert.Equal("Pull origin/main", Header(item));
+    }
+
+    private static void AssertUnavailable(IReadOnlyList<Control> items, string remoteRef)
+    {
+        var item = Assert.IsType<MenuItem>(Assert.Single(items));
+        Assert.Equal("Push / pull unavailable", item.Header);
+        Assert.False(item.IsEnabled);
+        Assert.Equal($"{remoteRef} is gone or hasn't been fetched. Fetch to refresh.", ToolTip.GetTip(item));
+        Assert.True(ToolTip.GetShowOnDisabled(item));
+    }
+
+    [Fact]
+    public async Task Gone_upstream_shows_disabled_item_with_tooltip()
+    {
+        var gw = new StubGateway { Result = new AheadBehind(0, 3) };
+        var t = LocalTarget("feature", currentBranch: "main", counterpart: "origin/feature", remoteAlias: null);
+
+        var items = await BranchMenu.BuildDivergenceItemsAsync(t, gw, new RepoActionBus(), CancellationToken.None);
+
+        AssertUnavailable(items, "origin/feature");
+        Assert.Null(gw.LastArgs);
+    }
+
+    [Fact]
+    public async Task Failed_lookup_shows_disabled_item()
+    {
+        var local = LocalTarget("feature", currentBranch: "main", counterpart: "origin/feature", remoteAlias: "origin");
+        var remote = RemoteTarget("main", "origin/main", currentBranch: "feature", counterpart: "main", remoteAlias: "origin");
+
+        AssertUnavailable(await BranchMenu.BuildDivergenceItemsAsync(local, new StubGateway { Result = null }, new RepoActionBus(), CancellationToken.None), "origin/feature");
+        AssertUnavailable(await BranchMenu.BuildDivergenceItemsAsync(local, new StubGateway { Throws = new InvalidOperationException("bad ref") }, new RepoActionBus(), CancellationToken.None), "origin/feature");
+        AssertUnavailable(await BranchMenu.BuildDivergenceItemsAsync(remote, new StubGateway { Result = null }, new RepoActionBus(), CancellationToken.None), "origin/main");
+    }
+
+    [Fact]
+    public async Task No_upstream_shows_nothing()
+    {
+        var gw = new StubGateway { Result = new AheadBehind(1, 1) };
+        var local = LocalTarget("scratch", currentBranch: "main", counterpart: null, remoteAlias: null);
+        var remote = RemoteTarget("feature", "origin/feature", currentBranch: "main", counterpart: null, remoteAlias: "origin");
+
+        Assert.Empty(await BranchMenu.BuildDivergenceItemsAsync(local, gw, new RepoActionBus(), CancellationToken.None));
+        Assert.Empty(await BranchMenu.BuildDivergenceItemsAsync(remote, gw, new RepoActionBus(), CancellationToken.None));
+        Assert.Null(gw.LastArgs);
+    }
+
+    [Fact]
+    public async Task Level_branch_shows_nothing()
+    {
+        var gw = new StubGateway { Result = new AheadBehind(0, 0) };
+        var t = LocalTarget("main", currentBranch: "main", counterpart: "origin/main", remoteAlias: "origin");
+
+        Assert.Empty(await BranchMenu.BuildDivergenceItemsAsync(t, gw, new RepoActionBus(), CancellationToken.None));
     }
 
     [Fact]
