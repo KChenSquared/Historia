@@ -453,6 +453,51 @@ public sealed class AppBandViewModelTests : IAsyncDisposable
         Assert.True(double.IsPositiveInfinity(tab.NameMaxWidth));
     }
 
+    [Fact]
+    public async Task LinkedTab_GetsHalfWidth_FixedMode()
+    {
+        var rig = NewRig();
+        Group(rig);
+        using var vm = rig.Create();
+
+        await rig.Settings.UpdateAsync(s => s with { TabWidthMode = TabWidthMode.Fixed, FixedTabWidth = 200 });
+
+        var tabs = RepoTabs(vm);
+        var fixedWidth = AppSettings.ClampFixedTabWidth(200);
+        Assert.Equal(fixedWidth, tabs[0].BodyWidth);
+        Assert.Equal(fixedWidth / 2, tabs[1].BodyWidth);
+        Assert.Equal(fixedWidth, tabs[2].BodyWidth);
+        Assert.True(double.IsPositiveInfinity(tabs[1].NameMaxWidth));
+    }
+
+    [Fact]
+    public void LinkedTab_GetsHalfNameCap_AutoMode()
+    {
+        var rig = NewRig();
+        Group(rig);
+        using var vm = rig.Create();
+
+        var tabs = RepoTabs(vm);
+        Assert.True(double.IsNaN(tabs[1].BodyWidth));
+        Assert.Equal(AppBandViewModel.TabNameMaxChars * AppBandViewModel.ApproxCharPx / 2, tabs[1].NameMaxWidth);
+    }
+
+    [Fact]
+    public async Task OwnerTab_KeepsFullWidth()
+    {
+        var rig = NewRig();
+        Group(rig);
+        using var vm = rig.Create();
+        var fullCap = AppBandViewModel.TabNameMaxChars * AppBandViewModel.ApproxCharPx;
+
+        Assert.Equal(fullCap, RepoTabs(vm)[0].NameMaxWidth);
+        Assert.Equal(fullCap, RepoTabs(vm)[2].NameMaxWidth);
+
+        await rig.Settings.UpdateAsync(s => s with { TabWidthMode = TabWidthMode.Fixed, FixedTabWidth = 200 });
+
+        Assert.Equal(AppSettings.ClampFixedTabWidth(200), RepoTabs(vm)[0].BodyWidth);
+    }
+
     [Theory]
     [InlineData(WheelScrollDirection.Standard, true, 1)]
     [InlineData(WheelScrollDirection.Inverted, false, -1)]
