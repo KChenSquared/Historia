@@ -224,7 +224,8 @@
                                         <ComboBox Name="DiffLimitBox"
                                                   HorizontalAlignment="Stretch"
                                                   ItemsSource="{Binding DiffLimitLabels}"
-                                                  SelectedIndex="{Binding DiffLimitIndex}" />
+                                                  SelectedIndex="{Binding DiffLimitIndex}"
+                                                  ToolTip.Tip="The limit is in tokens, counted approximately at 4 bytes per token." />
                                     </StackPanel>
 
                                     <StackPanel Spacing="4">

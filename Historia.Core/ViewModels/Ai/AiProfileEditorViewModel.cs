@@ -72,7 +72,7 @@ public sealed partial class AiProfileEditorViewModel : ViewModelBase
 
     public IReadOnlyList<string> ReasoningEffortLevels => AiReasoningEffort.Levels;
 
-    public IReadOnlyList<string> DiffLimitLabels { get; } = ["Unlimited", "64 KB", "128 KB", "192 KB", "256 KB", "320 KB"];
+    public IReadOnlyList<string> DiffLimitLabels { get; } = ["5,000 tokens", "10,000 tokens", "25,000 tokens", "50,000 tokens", "100,000 tokens", "Uncapped"];
 
     [ObservableProperty]
     public partial string Name { get; set; }
@@ -298,8 +298,8 @@ public sealed partial class AiProfileEditorViewModel : ViewModelBase
 
     partial void OnDiffLimitIndexChanged(int value)
     {
-        if (value >= 0 && value <= AiDiffCap.MaxUnits)
-            Edit(value, DiffLimitIndexOf, (p, i) => p with { DiffCapUnits = i });
+        if (value >= 0 && value < AiDiffCap.TokenSteps.Count)
+            Edit(value, DiffLimitIndexOf, (p, i) => p with { DiffCapTokens = AiDiffCap.TokenSteps[i] });
     }
 
     partial void OnTemplateIndexChanged(int value)
@@ -481,7 +481,7 @@ public sealed partial class AiProfileEditorViewModel : ViewModelBase
     private static int EffortIndex(AiServiceProfile p) =>
         Math.Max(0, AiReasoningEffort.Levels.ToList().FindIndex(l => l == p.ReasoningEffort));
 
-    private static int DiffLimitIndexOf(AiServiceProfile p) => Math.Clamp(p.DiffCapUnits, 0, AiDiffCap.MaxUnits);
+    private static int DiffLimitIndexOf(AiServiceProfile p) => AiDiffCap.TokenSteps.ToList().IndexOf(AiDiffCap.NearestStep(p.DiffCapTokens));
 
     private static int TemplateIndexOf(AiServiceProfile p) => p.Kind == AiServiceKind.Gemini ? 1 : 0;
 

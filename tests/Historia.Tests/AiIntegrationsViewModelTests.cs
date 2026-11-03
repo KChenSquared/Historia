@@ -413,7 +413,7 @@ public class AiIntegrationsViewModelTests
         Assert.Equal("X-Test: 1", saved.ExtraHeaders);
         Assert.False(saved.AutoFetchModels);
         Assert.Equal("high", saved.ReasoningEffort);
-        Assert.Equal(3, saved.DiffCapUnits);
+        Assert.Equal(50_000, saved.DiffCapTokens);
     }
 
     [Fact]

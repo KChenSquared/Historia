@@ -11,10 +11,6 @@ public sealed partial class StagingPanelViewModel
     [ObservableProperty]
     public partial string MessageText { get; set; } = "";
 
-    /// <summary>True while the message box cannot be typed in, which a running generation sets.</summary>
-    [ObservableProperty]
-    public partial bool IsMessageReadOnly { get; set; }
-
     /// <summary>Amend the previous commit instead of creating a new one.</summary>
     [ObservableProperty]
     public partial bool IsAmend { get; set; }
@@ -92,9 +88,7 @@ public sealed partial class StagingPanelViewModel
             AdoptCurrentStatus();
         }
 
-        // While a generated message is on its way, Ctrl+Enter must not commit the old draft just
-        // before the generated text replaces it.
-        if (_committing || _generateCts is not null || _status.Conflicted.Count > 0) return;
+        if (_committing || _status.Conflicted.Count > 0) return;
         if (string.IsNullOrWhiteSpace(MessageText) || (_status.Staged.Count == 0 && !IsAmend))
         {
             _notifications.Publish(NotificationSeverity.Warning, "Stage changes and enter a message before committing.");
@@ -170,6 +164,9 @@ public sealed partial class StagingPanelViewModel
             MessageText = "";
             IsAmend = false;
             _drafts.Set(_ctx.Id, null);
+
+            // A reply still on its way would describe changes that are now committed.
+            _generateCts?.Cancel();
             if (pendingAtStart is not null)
                 _ctx.State.ClearPendingCommitMessage(onlyIf: pendingAtStart);
             if (_ctx.State.PendingCommitMessage is null)
@@ -235,9 +232,8 @@ public sealed partial class StagingPanelViewModel
     private void ApplyProposal(string proposal)
     {
         var current = MessageText ?? "";
-        var busy = IsMessageReadOnly || _committing;
-        if (!busy && (string.IsNullOrWhiteSpace(current)
-                      || string.Equals(current.Trim(), proposal.Trim(), StringComparison.Ordinal)))
+        if (!_committing && (string.IsNullOrWhiteSpace(current)
+                             || string.Equals(current.Trim(), proposal.Trim(), StringComparison.Ordinal)))
         {
             TakeProposal(proposal);
             return;
@@ -261,7 +257,7 @@ public sealed partial class StagingPanelViewModel
     [RelayCommand]
     private async Task UseOfferAsync()
     {
-        if (IsDisposed || _offered is null || IsMessageReadOnly || _committing)
+        if (IsDisposed || _offered is null || _committing)
             return;
 
         try
@@ -273,7 +269,7 @@ public sealed partial class StagingPanelViewModel
                 && !await ConfirmReplaceDraftAsync("the coding agent's message", draft.Length))
                 return;
 
-            if (IsDisposed || IsMessageReadOnly || _committing)
+            if (IsDisposed || _committing)
                 return;
 
             TakeProposal(_ctx.State.PendingCommitMessage ?? offer);
@@ -317,6 +313,7 @@ public sealed partial class StagingPanelViewModel
         // Cancelled before the draft is saved: the generated text would otherwise land in a dead
         // panel while the store kept the old text.
         _generateCts?.Cancel();
+        StopGeneratingTimer();
         _modelLoadCts?.Cancel();
         _modelLoadCts?.Dispose();
         _drafts.Set(_ctx.Id, MessageText);

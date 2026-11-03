@@ -19,17 +19,34 @@ public static class AiReasoningEffort
     public static IReadOnlyList<string> Levels { get; } = [Unspecified, "none", "minimal", "low", "medium", "high"];
 }
 
-/// <summary>The per-profile Diff size limit: 0 is unlimited, n is n × 64 KB up to 5.</summary>
+/// <summary>
+/// The per-profile Diff size limit, in tokens; 0 is uncapped. No tokenizer ships with Historia, so
+/// the limit is converted to bytes at <see cref="BytesPerToken"/>, a rough average for English and code.
+/// </summary>
 public static class AiDiffCap
 {
-    public const int MaxUnits = 5;
-    public const int BytesPerUnit = 64 * 1024;
+    public const int DefaultTokens = 25_000;
+    public const int BytesPerToken = 4;
 
-    /// <summary>Null means unlimited. Out-of-range values clamp to 0…<see cref="MaxUnits"/>.</summary>
-    public static long? ToBytes(int units)
+    /// <summary>The choices the editor offers, in order; 0 is uncapped.</summary>
+    public static IReadOnlyList<int> TokenSteps { get; } = [5_000, 10_000, 25_000, 50_000, 100_000, 0];
+
+    /// <summary>Null means uncapped (any value of 0 or less).</summary>
+    public static long? ToBytes(int tokens) => tokens <= 0 ? null : (long)tokens * BytesPerToken;
+
+    /// <summary>The offered choice closest to <paramref name="tokens"/>. A value of 0 or less is
+    /// uncapped; a value above the largest cap stays at the largest cap.</summary>
+    public static int NearestStep(int tokens)
     {
-        var clamped = Math.Clamp(units, 0, MaxUnits);
-        return clamped == 0 ? null : (long)clamped * BytesPerUnit;
+        if (tokens <= 0)
+            return 0;
+        var best = TokenSteps[0];
+        foreach (var step in TokenSteps)
+        {
+            if (step > 0 && Math.Abs((long)step - tokens) < Math.Abs((long)best - tokens))
+                best = step;
+        }
+        return best;
     }
 }
 
@@ -56,8 +73,8 @@ public sealed record AiServiceProfile
     /// <summary>One <c>Name: Value</c> per line.</summary>
     public string ExtraHeaders { get; init; } = "";
 
-    /// <summary>0–5, see <see cref="AiDiffCap"/>.</summary>
-    public int DiffCapUnits { get; init; }
+    /// <summary>Approximate token limit for the diff sent to the model; 0 is uncapped. See <see cref="AiDiffCap"/>.</summary>
+    public int DiffCapTokens { get; init; } = AiDiffCap.DefaultTokens;
 
     /// <summary>For information only. Display order is list order.</summary>
     public DateTime CreatedUtc { get; init; }

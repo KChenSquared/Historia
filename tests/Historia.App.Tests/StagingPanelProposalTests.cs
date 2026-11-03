@@ -260,30 +260,6 @@ public class StagingPanelProposalTests : IDisposable
     }
 
     [AvaloniaFact]
-    public async Task A_read_only_box_is_never_written_and_use_it_does_nothing_until_it_is_free()
-    {
-        var panel = NewPanel();
-        panel.ViewModel.IsMessageReadOnly = true;
-
-        Propose();
-
-        Assert.True(panel.OfferBar.IsVisible);
-        Assert.Equal("", panel.MessageInput.Text);
-
-        await panel.ViewModel.UseOfferCommand.ExecuteAsync(null);
-
-        Assert.Equal("", panel.MessageInput.Text);
-        Assert.True(panel.OfferBar.IsVisible);
-        Assert.Equal(Proposal, _context.State.PendingCommitMessage);
-
-        panel.ViewModel.IsMessageReadOnly = false;
-        await panel.ViewModel.UseOfferCommand.ExecuteAsync(null);
-
-        Assert.Equal(Proposal, panel.MessageInput.Text);
-        Assert.Empty(_dialogs.ConfirmDestructiveCalls);
-    }
-
-    [AvaloniaFact]
     public void A_proposal_made_before_the_panel_exists_is_applied_on_construction()
     {
         Propose();

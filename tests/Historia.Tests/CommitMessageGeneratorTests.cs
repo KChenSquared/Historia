@@ -79,8 +79,8 @@ public class CommitMessageGeneratorTests
             return Profiles.Profiles.Single();
         }
 
-        public Task<AiServiceProfile> ActivateGemini(string model = "gemini-2.5-flash", int cap = 0) =>
-            Activate(p => AiServiceTemplates.ApplyGemini(p) with { ApiKey = "key", Model = model, DiffCapUnits = cap });
+        public Task<AiServiceProfile> ActivateGemini(string model = "gemini-2.5-flash", int capTokens = 0) =>
+            Activate(p => AiServiceTemplates.ApplyGemini(p) with { ApiKey = "key", Model = model, DiffCapTokens = capTokens });
 
         public Task<AiServiceProfile> ActivateCustom(string model = "gpt", string key = "key") =>
             Activate(p => p with { Server = "https://ai.example.test/v1", Model = model, ApiKey = key });
@@ -194,14 +194,14 @@ public class CommitMessageGeneratorTests
     public async Task The_profile_cap_reaches_the_prompt()
     {
         var rig = new Rig();
-        await rig.ActivateGemini(cap: 1);
-        rig.Gateway.Patches = [("a.txt", new string('x', 70_000)), ("b.txt", "small")];
+        await rig.ActivateGemini(capTokens: 5_000);
+        rig.Gateway.Patches = [("a.txt", new string('x', 25_000)), ("b.txt", "small")];
 
         await rig.Run(status: Status("a.txt", "b.txt"));
 
         var prompt = rig.Client.Completes.Single().Prompt;
         Assert.Contains(CommitMessagePrompt.OmittedDiffNote, prompt);
-        Assert.DoesNotContain(new string('x', 70_000), prompt);
+        Assert.DoesNotContain(new string('x', 25_000), prompt);
         Assert.Contains("M\tb.txt", prompt);
     }
 
@@ -209,7 +209,7 @@ public class CommitMessageGeneratorTests
     public async Task Without_a_cap_the_whole_diff_is_sent()
     {
         var rig = new Rig();
-        await rig.ActivateGemini(cap: 0);
+        await rig.ActivateGemini(capTokens: 0);
         rig.Gateway.Patches = [("a.txt", new string('x', 300_000))];
 
         await rig.Run();

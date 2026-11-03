@@ -10,7 +10,13 @@ public sealed partial class StagingPanelViewModel
     private readonly ICommitMessageGenerator? _aiGenerator;
     private readonly IAiModelCatalog? _catalog;
 
+    private static readonly TimeSpan GeneratingTipInterval = TimeSpan.FromSeconds(1);
+
     private CancellationTokenSource? _generateCts;
+    private Task _generateTask = Task.CompletedTask;
+    private IUiTimer? _generatingTimer;
+    private long _generateStarted;
+    private string _generatingLabel = "";
     private CancellationTokenSource? _modelLoadCts;
     private bool _syncingPicker;
     private bool _loadingModels;
@@ -25,7 +31,11 @@ public sealed partial class StagingPanelViewModel
     [ObservableProperty]
     public partial bool IsGenerating { get; private set; }
 
-    /// <summary>True when an AI profile is active or a generation can be cancelled.</summary>
+    /// <summary>Reads "Waiting for the profile (sent N s ago)" while a request runs.</summary>
+    [ObservableProperty]
+    public partial string GeneratingTip { get; private set; } = "";
+
+    /// <summary>True when an AI profile is active or a request is running.</summary>
     [ObservableProperty]
     public partial bool IsWandEnabled { get; private set; }
 
@@ -77,7 +87,7 @@ public sealed partial class StagingPanelViewModel
         var generating = _generateCts is not null;
         IsWandEnabled = enabled || generating;
         IsWandActive = enabled;
-        WandTip = generating ? "Generating… click to cancel" : WandToolTip;
+        WandTip = generating ? "Generating… click for options" : WandToolTip;
 
         RefreshModelPicker();
     }
@@ -232,48 +242,21 @@ public sealed partial class StagingPanelViewModel
         }
     }
 
-    /// <summary>Writes a commit message for the staged changes into the box. A second call while
-    /// one is running cancels it. The box is read-only while the request runs, and the draft is
-    /// replaced only after the request succeeds.</summary>
+    /// <summary>Writes a commit message for the staged changes into the box. Nothing is blocked
+    /// while the request runs, so the box is checked when the reply arrives. A second call while
+    /// one is running asks whether to send a new request or stop waiting.</summary>
     [RelayCommand(AllowConcurrentExecutions = true)]
     private async Task GenerateAsync()
     {
-        if (_generateCts is { } running)
-        {
-#pragma warning disable S6966 // synchronous cancel is intended; it keeps the order here
-            running.Cancel();
-#pragma warning restore S6966
-            return;
-        }
-        var profile = _aiProfiles?.ActiveProfile;
-        if (profile is null || _aiPanel is null || _aiGenerator is null)
-            return;
-
         try
         {
-            if (_status.Staged.Count == 0 && !IsAmend)
+            if (_generateCts is { } running)
             {
-                _notifications.Publish(NotificationSeverity.Warning, "Stage changes before generating a commit message.");
+                await AskWhileWaitingAsync(running);
                 return;
             }
 
-            var keyless = profile.Kind == AiServiceKind.Custom && !profile.ReadApiKeyFromEnv && string.IsNullOrWhiteSpace(profile.ApiKey);
-            if (!_aiProfiles!.HasApiKey(profile) && !keyless)
-            {
-                _aiPanel.Open(profile.Id);
-                _notifications.Publish(NotificationSeverity.Warning,
-                    $"{_aiProfiles.DisplayLabel(profile)} has no API key. Add one in AI Integrations.");
-                return;
-            }
-
-            var draft = MessageText ?? "";
-            if (!string.IsNullOrWhiteSpace(draft)
-                && !await ConfirmReplaceDraftAsync("an AI-generated message", draft.Length))
-                return;
-            if (IsDisposed || _generateCts is not null)
-                return;
-
-            await GenerateIntoBoxAsync(profile);
+            await StartGenerationAsync();
         }
         catch (Exception ex)
         {
@@ -281,24 +264,105 @@ public sealed partial class StagingPanelViewModel
         }
     }
 
+    private async Task StartGenerationAsync()
+    {
+        var profile = _aiProfiles?.ActiveProfile;
+        if (IsDisposed || _generateCts is not null || profile is null || _aiPanel is null || _aiGenerator is null)
+            return;
+
+        if (_status.Staged.Count == 0 && !IsAmend)
+        {
+            _notifications.Publish(NotificationSeverity.Warning, "Stage changes before generating a commit message.");
+            return;
+        }
+
+        var keyless = profile.Kind == AiServiceKind.Custom && !profile.ReadApiKeyFromEnv && string.IsNullOrWhiteSpace(profile.ApiKey);
+        if (!_aiProfiles!.HasApiKey(profile) && !keyless)
+        {
+            _aiPanel.Open(profile.Id);
+            _notifications.Publish(NotificationSeverity.Warning,
+                $"{_aiProfiles.DisplayLabel(profile)} has no API key. Add one in AI Integrations.");
+            return;
+        }
+
+        var generation = GenerateIntoBoxAsync(profile);
+        _generateTask = generation;
+        await generation;
+    }
+
+    /// <summary>The second click while a request is still unanswered. The request is captured
+    /// before asking, because its reply can land while the prompt is open.</summary>
+    private async Task AskWhileWaitingAsync(CancellationTokenSource waiting)
+    {
+        var sentSeconds = (long)Stopwatch.GetElapsedTime(_generateStarted).TotalSeconds;
+        var choice = await _dialogs.ChooseAsync(
+            "Still waiting",
+            $"The last request was sent {sentSeconds} s ago and hasn't answered yet. " +
+            $"Requests give up after {DescribeDeadline(AiHttp.OverallDeadline)}.",
+            ["Send a new request", "Stop waiting"],
+            defaultIndex: 0);
+
+        if (IsDisposed)
+            return;
+
+        if (choice == 0)
+        {
+            if (ReferenceEquals(_generateCts, waiting))
+            {
+                var finishing = _generateTask;
+#pragma warning disable S6966 // synchronous cancel keeps the order; the wait below lets the old request finish first
+                waiting.Cancel();
+#pragma warning restore S6966
+                await finishing;
+            }
+
+            await StartGenerationAsync();
+        }
+        else if (choice == 1 && ReferenceEquals(_generateCts, waiting))
+        {
+#pragma warning disable S6966 // synchronous cancel is intended; it keeps the order here
+            waiting.Cancel();
+#pragma warning restore S6966
+        }
+    }
+
+    private static string DescribeDeadline(TimeSpan deadline)
+    {
+        if (deadline.TotalMinutes >= 1 && deadline.Seconds == 0)
+        {
+            var minutes = (int)deadline.TotalMinutes;
+            return minutes == 1 ? "1 minute" : $"{minutes} minutes";
+        }
+
+        var seconds = (int)Math.Ceiling(deadline.TotalSeconds);
+        return seconds == 1 ? "1 second" : $"{seconds} seconds";
+    }
+
+    private void UpdateGeneratingTip()
+    {
+        var seconds = (long)Stopwatch.GetElapsedTime(_generateStarted).TotalSeconds;
+        GeneratingTip = $"Waiting for {_generatingLabel} (sent {seconds} s ago)";
+    }
+
     private async Task GenerateIntoBoxAsync(AiServiceProfile profile)
     {
         var cts = CancellationTokenSource.CreateLinkedTokenSource(_ctx.Lifetime);
+        var headAtSend = _ctx.State.Repository.HeadCommitId;
+        CommitMessageResult? reply = null;
+
         _generateCts = cts;
+        _generateStarted = Stopwatch.GetTimestamp();
+        _generatingLabel = _aiProfiles!.DisplayLabel(profile);
+        UpdateGeneratingTip();
+        _generatingTimer = _ui.CreateTimer(GeneratingTipInterval, UpdateGeneratingTip, UiPriority.Normal);
+        _generatingTimer.Start();
         IsGenerating = true;
-        IsMessageReadOnly = true;
         RefreshAiButtons();
         try
         {
             var result = await _aiGenerator!.GenerateAsync(_ctx, IsAmend, cts.Token);
-            if (IsDisposed || cts.IsCancellationRequested)
-                return;
-
-            MessageText = result.Message;
-            var label = _aiProfiles!.DisplayLabel(_aiProfiles.ActiveProfile ?? profile);
-            if (result.ReplacedModel is not null && result.NewModel is not null)
-                _notifications.Publish(NotificationSeverity.Warning,
-                    $"'{result.ReplacedModel}' is no longer available. '{label}' now uses '{result.NewModel}'.");
+            if (!IsDisposed && !cts.IsCancellationRequested)
+                reply = result;
         }
         catch (OperationCanceledException)
         {
@@ -317,12 +381,52 @@ public sealed partial class StagingPanelViewModel
         {
             _generateCts = null;
             cts.Dispose();
+            StopGeneratingTimer();
             IsGenerating = false;
             if (!IsDisposed)
-            {
-                IsMessageReadOnly = false;
                 RefreshAiButtons();
-            }
         }
+
+        if (reply is not null && !IsDisposed)
+            await ApplyReplyAsync(profile, reply, headAtSend);
+    }
+
+    private void StopGeneratingTimer()
+    {
+        _generatingTimer?.Stop();
+        _generatingTimer?.Dispose();
+        _generatingTimer = null;
+    }
+
+    /// <summary>Puts a reply in the box. It runs after the request is cleared, so a click on the
+    /// wand while a confirmation is open starts a fresh request. A reply for changes that are
+    /// already committed is dropped, an empty box is filled, and text in the box is replaced only
+    /// after the user confirms against what the box holds now.</summary>
+    private async Task ApplyReplyAsync(AiServiceProfile profile, CommitMessageResult reply, GitObjectId? headAtSend)
+    {
+        if (_ctx.State.Repository.HeadCommitId != headAtSend)
+        {
+            _notifications.Publish(NotificationSeverity.Info,
+                "AI message discarded; the repository changed while it was being written.");
+            return;
+        }
+
+        var current = MessageText ?? "";
+        if (!string.IsNullOrWhiteSpace(current)
+            && !await ConfirmReplaceDraftAsync("an AI-generated message", current.Length))
+        {
+            if (!IsDisposed)
+                _notifications.Publish(NotificationSeverity.Info, "AI message discarded; your text was kept.");
+            return;
+        }
+
+        if (IsDisposed)
+            return;
+
+        MessageText = reply.Message;
+        var label = _aiProfiles!.DisplayLabel(_aiProfiles.ActiveProfile ?? profile);
+        if (reply.ReplacedModel is not null && reply.NewModel is not null)
+            _notifications.Publish(NotificationSeverity.Warning,
+                $"'{reply.ReplacedModel}' is no longer available. '{label}' now uses '{reply.NewModel}'.");
     }
 }
