@@ -35,11 +35,19 @@ internal static class BranchMenu
     internal static string TruncateBranchLabelForMenu(string name) => RefMenuItemViewModel.TrimName(name);
 
     /// <summary>Resolves (ahead, behind) for <paramref name="t"/> against its counterpart
-    /// and returns the matching push/pull/fast-forward menu item(s), or empty when there is no
-    /// counterpart, the lookup fails, or the refs are identical. <c>git pull</c> always merges
-    /// into whatever is currently checked out, so a Pull/Fast-forward item is only offered when
-    /// the branch in question is the current branch; a Push item needs no such guard since
-    /// <c>git push</c> takes an explicit local ref regardless of checkout state.</summary>
+    /// and returns the matching push/pull/fast-forward/merge-and-push menu item(s), or empty when
+    /// there is no counterpart, the lookup fails, or the refs are identical. Every item acts on the
+    /// local branch: the row itself, or a remote row's counterpart.
+    /// <list type="bullet">
+    /// <item>Local ahead only: Push, whether or not the branch is checked out — <c>git push</c>
+    /// takes an explicit local ref.</item>
+    /// <item>Local behind, checked out: Pull ("Fast-forward from …" when not ahead) — <c>git pull</c>
+    /// always merges into whatever is checked out.</item>
+    /// <item>Local behind only, not checked out: "Fast-forward … to …", which moves the branch ref
+    /// without a checkout.</item>
+    /// <item>Diverged: "Merge … and push" beside the Pull on the checked-out branch, or "Check out,
+    /// merge … and push" on any other branch.</item>
+    /// </list></summary>
     internal static async Task<IReadOnlyList<Control>> BuildDivergenceItemsAsync(
         Target t, IGitGateway gateway, IRepoActionBus actions, CancellationToken ct)
     {
@@ -63,8 +71,14 @@ internal static class BranchMenu
             ? (counterpart.StartsWith(prefix, StringComparison.Ordinal) ? counterpart[prefix.Length..] : counterpart)
             : (t.TrackingRef.StartsWith(prefix, StringComparison.Ordinal) ? t.TrackingRef[prefix.Length..] : t.TrackingRef);
 
-        void Push(string branchName) => actions.RequestNetworkAction(new RepoNetworkRequest(RepoNetworkAction.Push, remoteAlias, branchName, remoteBranch));
-        void Pull(string branchName) => actions.RequestNetworkAction(new RepoNetworkRequest(RepoNetworkAction.Pull, remoteAlias, branchName, remoteBranch));
+        // The local branch every item acts on, and the remote-tracking ref it is measured against.
+        var localBranch = t.IsLocal ? t.Name : counterpart;
+        var remoteRef = t.IsLocal ? counterpart : t.TrackingRef;
+
+        void Request(RepoNetworkAction action, string branchName) =>
+            actions.RequestNetworkAction(new RepoNetworkRequest(action, remoteAlias, branchName, remoteBranch));
+        void Push(string branchName) => Request(RepoNetworkAction.Push, branchName);
+        void Pull(string branchName) => Request(RepoNetworkAction.Pull, branchName);
 
         var items = new List<Control>();
         if (t.IsLocal)
@@ -80,6 +94,17 @@ internal static class BranchMenu
                 items.Add(MenuLeaf($"Push {t.Name} to {remoteAlias}", () => Push(t.Name)));
             else if (div.Behind > 0 && isCurrentLocalBranch)
                 items.Add(MenuLeaf($"Pull {t.TrackingRef}", () => Pull(t.Name)));
+        }
+
+        if (div.Ahead == 0 && div.Behind > 0 && !isCurrentLocalBranch)
+        {
+            items.Add(MenuLeaf($"Fast-forward {localBranch} to {remoteRef}",
+                () => Request(RepoNetworkAction.FastForwardBranch, localBranch)));
+        }
+        else if (div.Ahead > 0 && div.Behind > 0)
+        {
+            items.Add(MenuLeaf(isCurrentLocalBranch ? $"Merge {remoteRef} and push" : $"Check out, merge {remoteRef} and push",
+                () => Request(RepoNetworkAction.MergeAndPush, localBranch)));
         }
         return items;
     }

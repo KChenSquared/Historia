@@ -150,6 +150,20 @@ public sealed class LoggingGitGatewayTests : IDisposable
     }
 
     [Fact]
+    public async Task FastForwardBranchAsync_delegates_and_logs_arguments()
+    {
+        StartLogging();
+        var inner = new FakeGateway();
+        var gw = new LoggingGitGateway(inner, DemoRepo);
+
+        await gw.FastForwardBranchAsync("main", "refs/remotes/origin/main");
+
+        Assert.Equal([("main", "refs/remotes/origin/main")], inner.FastForwardCalls);
+        var text = SessionText();
+        Assert.Contains("[demo] FastForwardBranchAsync(main, refs/remotes/origin/main)", text);
+    }
+
+    [Fact]
     public async Task Pure_passthrough_when_logging_is_disabled()
     {
         var inner = new FakeGateway { Branches = [Branch("main")] };
@@ -176,6 +190,7 @@ public sealed class LoggingGitGatewayTests : IDisposable
         public IReadOnlyList<BranchInfo> Branches { get; set; } = [];
         public Exception? CheckoutThrows { get; set; }
         public int GetBranchesCalls { get; private set; }
+        public List<(string Branch, string Target)> FastForwardCalls { get; } = [];
 
         public string RepositoryPath => DemoRepo;
 
@@ -216,6 +231,11 @@ public sealed class LoggingGitGatewayTests : IDisposable
             => CountCommitsLeavingResult is { } n ? Task.FromResult(n) : No<Task<int>>();
         public Task<BranchInfo> CreateBranchAsync(string name, string startPoint, bool checkout, CancellationToken ct = default) => No<Task<BranchInfo>>();
         public Task DeleteBranchAsync(string name, bool force, CancellationToken ct = default) => No<Task>();
+        public Task FastForwardBranchAsync(string branch, string target, CancellationToken ct = default)
+        {
+            FastForwardCalls.Add((branch, target));
+            return Task.CompletedTask;
+        }
         public Task RenameBranchAsync(string oldName, string newName, CancellationToken ct = default) => No<Task>();
         public Task SetUpstreamAsync(string branchName, string upstreamRef, CancellationToken ct = default) => No<Task>();
         public Task<TagInfo> CreateTagAsync(string name, string target, string? message, CancellationToken ct = default) => No<Task<TagInfo>>();
