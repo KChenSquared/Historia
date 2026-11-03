@@ -10,6 +10,7 @@ namespace HistoriaApp.Tests;
 public sealed class AppBandLinkedTabsTests : IAsyncDisposable
 {
     private const double RowHeight = 31;
+    private const double LinkedHeight = 25;
 
     private readonly string _ownerDir = TestScratch.NewDirectory("historia-test-owner-");
     private readonly string _childDir;
@@ -102,7 +103,7 @@ public sealed class AppBandLinkedTabsTests : IAsyncDisposable
         var childShell = shells.Single(b => ReferenceEquals(((RepoTabViewModel)b.DataContext!).Context, child));
 
         Assert.Equal(RowHeight, ownerShell.Height);
-        Assert.Equal(RowHeight - 3, childShell.Height);
+        Assert.Equal(LinkedHeight, childShell.Height);
         Assert.Equal(Avalonia.Layout.VerticalAlignment.Bottom, childShell.VerticalAlignment);
         Assert.Equal(Avalonia.Layout.VerticalAlignment.Stretch, ownerShell.VerticalAlignment);
 
@@ -110,6 +111,37 @@ public sealed class AppBandLinkedTabsTests : IAsyncDisposable
         // continuous unit; the owner (first tab) never had one either way.
         Assert.Equal(0, childShell.BorderThickness.Left);
         Assert.Equal(0, ownerShell.BorderThickness.Left);
+
+        window.Close();
+        band.Dispose();
+    }
+
+    [AvaloniaFact]
+    public async Task LinkedTab_Is25pxHigh()
+    {
+        _sp = CreateServices();
+        var workspace = _sp.GetRequiredService<IWorkspaceService>();
+        var owner = await workspace.OpenAsync(_ownerDir);
+        var sub = new SubmoduleInfo { Name = "vendor/lib", Path = "vendor/lib", Url = _childDir, Status = SubmoduleStatus.Clean };
+        var child = await workspace.OpenSubmoduleAsync(owner, sub);
+
+        var band = new AppBandView();
+        band.Initialize(_sp);
+
+        var window = new Window { Width = 1280, Height = 40, Content = band };
+        window.Show();
+        Dispatcher.UIThread.RunJobs();
+        window.UpdateLayout();
+
+        var shells = band.GetVisualDescendants().OfType<Border>()
+            .Where(b => b.Classes.Contains("tabShell") && b.DataContext is RepoTabViewModel)
+            .ToList();
+        var ownerShell = shells.Single(b => ReferenceEquals(((RepoTabViewModel)b.DataContext!).Context, owner));
+        var childShell = shells.Single(b => ReferenceEquals(((RepoTabViewModel)b.DataContext!).Context, child));
+
+        Assert.Equal(RowHeight, ownerShell.Bounds.Height);
+        Assert.Equal(LinkedHeight, childShell.Bounds.Height);
+        Assert.True(childShell.Bounds.Width < ownerShell.Bounds.Width);
 
         window.Close();
         band.Dispose();

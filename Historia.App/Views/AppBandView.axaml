@@ -20,9 +20,9 @@
         <Style Selector="Border.tabShell.separator">
             <Setter Property="BorderThickness" Value="1,0,0,0" />
         </Style>
-        <!-- A linked tab renders 3 px shorter, flush with the strip's bottom edge. -->
+        <!-- A linked tab renders at 80 % of the normal height (25 of 31 px), flush with the strip's bottom edge. -->
         <Style Selector="Border.tabShell.linked">
-            <Setter Property="Height" Value="28" />
+            <Setter Property="Height" Value="25" />
             <Setter Property="VerticalAlignment" Value="Bottom" />
         </Style>
         <Style Selector="Border.tabShell.dragging">
