@@ -1,7 +1,7 @@
 namespace HistoriaApp.Tests;
 
-/// <summary><c>BranchMenu.BuildDivergenceItemsAsync</c> — the push/pull/fast-forward menu
-/// item(s) for each (row kind, ahead, behind) combination, driven through a stub
+/// <summary><c>BranchMenu.BuildDivergenceItemsAsync</c> — the push/pull/fast-forward/merge-and-push
+/// menu item(s) for each (row kind, ahead, behind) combination, driven through a stub
 /// <see cref="IGitGateway"/> rather than a real repository.</summary>
 [Trait("tier", "unit")]
 public sealed class BranchMenuDivergenceTests
@@ -82,6 +82,8 @@ public sealed class BranchMenuDivergenceTests
             CounterpartRef: counterpart, RemoteAlias: remoteAlias);
 
     private static string? Header(Control c) => (c as MenuItem)?.Header as string;
+
+    private static void Click(Control c) => c.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(MenuItem.ClickEvent));
 
     [Fact]
     public async Task Local_behind_current_branch_pulls_the_upstream_name()
@@ -170,28 +172,103 @@ public sealed class BranchMenuDivergenceTests
     }
 
     [Fact]
-    public async Task Local_diverged_current_branch_offers_pull_not_fast_forward()
+    public async Task Diverged_current_offers_pull_and_merge_and_push()
     {
         var gw = new StubGateway { Result = new AheadBehind(1, 3) };
         var t = LocalTarget("main", currentBranch: "main", counterpart: "origin/main", remoteAlias: "origin");
+        var bus = new CapturingActionBus();
 
-        var items = await BranchMenu.BuildDivergenceItemsAsync(t, gw, new RepoActionBus(), CancellationToken.None);
+        var items = await BranchMenu.BuildDivergenceItemsAsync(t, gw, bus, CancellationToken.None);
 
-        var item = Assert.Single(items);
-        Assert.Equal("Pull from origin/main", Header(item));
+        Assert.Equal(["Pull from origin/main", "Merge origin/main and push"], items.Select(Header));
+        Click(items[1]);
+        Assert.Equal(new RepoNetworkRequest(RepoNetworkAction.MergeAndPush, "origin", "main", "main"), bus.LastRequest);
     }
 
     [Fact]
-    public async Task Local_behind_a_non_current_branch_offers_nothing()
+    public async Task Diverged_non_current_offers_checkout_merge_and_push()
     {
-        // git pull always merges into whatever is checked out — offering Pull/Fast-forward on a
-        // branch that isn't current would silently target the wrong branch.
+        var gw = new StubGateway { Result = new AheadBehind(1, 3) };
+        var t = LocalTarget("feature", currentBranch: "main", counterpart: "origin/feat-x", remoteAlias: "origin");
+        var bus = new CapturingActionBus();
+
+        var items = await BranchMenu.BuildDivergenceItemsAsync(t, gw, bus, CancellationToken.None);
+
+        var item = Assert.Single(items);
+        Assert.Equal("Check out, merge origin/feat-x and push", Header(item));
+        Click(item);
+        Assert.Equal(new RepoNetworkRequest(RepoNetworkAction.MergeAndPush, "origin", "feature", "feat-x"), bus.LastRequest);
+    }
+
+    [Fact]
+    public async Task Remote_row_diverged_from_non_current_local_offers_checkout_merge_and_push()
+    {
+        var gw = new StubGateway { Result = new AheadBehind(2, 1) };
+        var t = RemoteTarget("main", "origin/main", currentBranch: "feature", counterpart: "main", remoteAlias: "origin");
+        var bus = new CapturingActionBus();
+
+        var items = await BranchMenu.BuildDivergenceItemsAsync(t, gw, bus, CancellationToken.None);
+
+        var item = Assert.Single(items);
+        Assert.Equal("Check out, merge origin/main and push", Header(item));
+        Click(item);
+        Assert.Equal(new RepoNetworkRequest(RepoNetworkAction.MergeAndPush, "origin", "main", "main"), bus.LastRequest);
+    }
+
+    [Fact]
+    public async Task Non_current_local_behind_offers_fast_forward()
+    {
+        // git pull always merges into whatever is checked out, so a branch that isn't current is
+        // moved by a ref fast-forward instead of a Pull.
         var gw = new StubGateway { Result = new AheadBehind(0, 3) };
         var t = LocalTarget("feature", currentBranch: "main", counterpart: "origin/feature", remoteAlias: "origin");
 
         var items = await BranchMenu.BuildDivergenceItemsAsync(t, gw, new RepoActionBus(), CancellationToken.None);
 
-        Assert.Empty(items);
+        var item = Assert.Single(items);
+        Assert.Equal("Fast-forward feature to origin/feature", Header(item));
+    }
+
+    [Fact]
+    public async Task Remote_ahead_of_non_current_local_offers_fast_forward()
+    {
+        // GetDivergenceAsync(local, remote): the local side is behind.
+        var gw = new StubGateway { Result = new AheadBehind(0, 2) };
+        var t = RemoteTarget("main", "origin/main", currentBranch: "feature", counterpart: "main", remoteAlias: "origin");
+
+        var items = await BranchMenu.BuildDivergenceItemsAsync(t, gw, new RepoActionBus(), CancellationToken.None);
+
+        var item = Assert.Single(items);
+        Assert.Equal("Fast-forward main to origin/main", Header(item));
+        Assert.Equal(("main", "origin/main"), gw.LastArgs);
+    }
+
+    [Fact]
+    public async Task Current_branch_behind_keeps_pull_fast_forward()
+    {
+        var gw = new StubGateway { Result = new AheadBehind(0, 3) };
+        var t = LocalTarget("main", currentBranch: "main", counterpart: "origin/main", remoteAlias: "origin");
+        var bus = new CapturingActionBus();
+
+        var items = await BranchMenu.BuildDivergenceItemsAsync(t, gw, bus, CancellationToken.None);
+
+        var item = Assert.Single(items);
+        Assert.Equal("Fast-forward from origin/main", Header(item));
+        Click(item);
+        Assert.Equal(RepoNetworkAction.Pull, bus.LastRequest?.Action);
+    }
+
+    [Fact]
+    public async Task Fast_forward_item_sends_request_with_target()
+    {
+        var gw = new StubGateway { Result = new AheadBehind(0, 1) };
+        var t = LocalTarget("main", currentBranch: "feature", counterpart: "team/infra/release", remoteAlias: "team/infra");
+        var bus = new CapturingActionBus();
+
+        var items = await BranchMenu.BuildDivergenceItemsAsync(t, gw, bus, CancellationToken.None);
+
+        Click(Assert.Single(items));
+        Assert.Equal(new RepoNetworkRequest(RepoNetworkAction.FastForwardBranch, "team/infra", "main", "release"), bus.LastRequest);
     }
 
     [Fact]
