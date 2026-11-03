@@ -111,7 +111,7 @@ internal static class BranchMenu
 
     public static List<Control> Build(
         Target t, RepositoryContext ctx, IDialogService dialogs, INotificationService notify,
-        IStashService stash, IRepoActionBus actions, Action<string> copyToClipboard)
+        IStashService stash, IRepoActionBus actions, Action<string> copyToClipboard, PullRequestFlow? pullRequests = null)
     {
         var items = new List<Control>();
 
@@ -148,6 +148,14 @@ internal static class BranchMenu
             var into = t.CurrentBranch ?? "current";
             items.Add(MenuLeaf($"Merge into {into} branch",
                 () => BranchActions.MergeIntoCurrentAsync(ctx, dialogs, notify, stash, mergeRef, t.CurrentBranch)));
+        }
+
+        if (pullRequests is not null && ctx.State.Remotes.Count > 0)
+        {
+            if (t.IsLocal)
+                items.Add(MenuLeaf("Push and create pull request…", () => pullRequests.PushAndOpenAsync(ctx, t.Name)));
+            else if (t.RemoteAlias is { Length: > 0 } pullRemote)
+                items.Add(MenuLeaf("Create pull request…", () => pullRequests.OpenAsync(ctx, pullRemote, t.Name)));
         }
 
         if (!t.IsLocal && t.RemoteAlias is { Length: > 0 } alias)

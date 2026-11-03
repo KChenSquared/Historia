@@ -32,6 +32,7 @@ public sealed partial class RefNavigatorView : UserControl, IDisposable
     private readonly IRepoActionBus _actions;
     private readonly IExternalLauncher _launcher;
     private readonly INavigationBus _nav;
+    private readonly PullRequestFlow? _pullRequests;
 
     private readonly Dictionary<TextBox, (RefSectionViewModel Section, EventHandler Handler)> _filterFocus = [];
 
@@ -43,6 +44,7 @@ public sealed partial class RefNavigatorView : UserControl, IDisposable
         _actions = sp.GetRequiredService<IRepoActionBus>();
         _launcher = sp.GetRequiredService<IExternalLauncher>();
         _nav = sp.GetRequiredService<INavigationBus>();
+        _pullRequests = PullRequestFlow.From(sp);
 
         InitializeComponent();
         OuterScroll.ScrollChanged += (_, _) => UpdateNestedMargin();
@@ -215,7 +217,7 @@ public sealed partial class RefNavigatorView : UserControl, IDisposable
             CounterpartRef: counterpartRef,
             RemoteAlias: remoteAlias);
 
-        var baseItems = BranchMenu.Build(target, ctx, _dialogs, _notifications, _stashes, _actions, s => CopyToClipboard(s));
+        var baseItems = BranchMenu.Build(target, ctx, _dialogs, _notifications, _stashes, _actions, s => CopyToClipboard(s), _pullRequests);
 
         var menu = new ContextMenu { ItemsSource = baseItems };
         // The divergence lookup shells out to git — resolve it lazily on Opening so the

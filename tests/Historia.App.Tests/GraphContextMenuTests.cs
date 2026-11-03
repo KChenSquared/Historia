@@ -43,6 +43,8 @@ public sealed class GraphContextMenuTests
         public Task DeleteTag(string tag) => Record($"delete-tag {tag}");
         public Task Copy(string text) => Record($"copy {text}");
         public Task CopyMessage(GitObjectId id) => Record($"copy-message {id}");
+        public Task PushAndCreatePullRequest(string localBranch) => Record($"push-pr {localBranch}");
+        public Task CreatePullRequest(string remote, string branch) => Record($"pr {remote} {branch}");
 
         public Task<IReadOnlyList<Control>> DivergenceItemsAsync(GraphMenuRef branch)
         {
@@ -235,6 +237,53 @@ public sealed class GraphContextMenuTests
     }
 
     [AvaloniaFact]
+    public void Local_submenu_offers_push_and_create_pull_request()
+    {
+        var a = new RecordingActions();
+        var items = GraphContextMenu.Build(Target(Refs(Deco(DecorationType.LocalBranch, "feat", true))), a);
+
+        var sub = Children(Item(items, "feat"));
+        Assert.Equal(["Checkout feat", "Push and create pull request…", "Rename…"], Headers(sub).Take(3));
+        Click(Item(sub, "Push and create pull request…"));
+        Assert.Equal(["push-pr feat"], a.Calls);
+    }
+
+    [AvaloniaFact]
+    public void Remote_submenu_offers_create_pull_request()
+    {
+        var a = new RecordingActions();
+        var items = GraphContextMenu.Build(Target(Refs(Deco(DecorationType.RemoteBranch, "feat", false, ["origin", "fork"]))), a);
+
+        var sub = Children(Item(items, "fork/feat"));
+        Assert.DoesNotContain("Push and create pull request…", Headers(sub));
+        Click(Item(sub, "Create pull request…"));
+        Assert.Equal(["pr fork feat"], a.Calls);
+    }
+
+    [AvaloniaFact]
+    public void No_pull_request_items_without_remotes()
+    {
+        var local = GraphContextMenu.Build(
+            Target(Refs(Deco(DecorationType.LocalBranch, "feat", true)), remotes: []), new RecordingActions());
+        var remote = GraphContextMenu.Build(
+            Target(Refs(Deco(DecorationType.RemoteBranch, "feat", false, ["origin"])), remotes: []), new RecordingActions());
+
+        Assert.DoesNotContain(LeafHeaders(local), h => h.Contains("pull request", StringComparison.Ordinal));
+        Assert.DoesNotContain(LeafHeaders(remote), h => h.Contains("pull request", StringComparison.Ordinal));
+    }
+
+    [AvaloniaFact]
+    public void Nested_remote_submenu_has_no_pull_request_item()
+    {
+        var items = GraphContextMenu.Build(
+            Target(Refs(Deco(DecorationType.LocalBranch, "main", true, ["origin"]))), new RecordingActions());
+
+        var nested = Children(Item(Children(Item(items, "main")), "origin/main"));
+
+        Assert.DoesNotContain(Headers(nested), h => h.Contains("pull request", StringComparison.Ordinal));
+    }
+
+    [AvaloniaFact]
     public void Tag_submenu_pushes_to_each_configured_remote_and_deletes()
     {
         var a = new RecordingActions();
@@ -270,7 +319,7 @@ public sealed class GraphContextMenuTests
 
         Assert.DoesNotContain(Headers(items), h => h.EndsWith("/main", StringComparison.Ordinal));
         var main = Children(Item(items, "main"));
-        Assert.Equal(["Checkout main", "Rename…", "Delete local…", "origin/main", "upstream/main", "Copy name"], Headers(main));
+        Assert.Equal(["Checkout main", "Push and create pull request…", "Rename…", "Delete local…", "origin/main", "upstream/main", "Copy name"], Headers(main));
         Assert.IsType<Separator>(main[^2]);
         foreach (var remote in new[] { "origin", "upstream" })
             Assert.Equal(["Merge into develop", "Delete…"], Headers(Children(Item(main, $"{remote}/main"))));
@@ -309,7 +358,7 @@ public sealed class GraphContextMenuTests
         var items = GraphContextMenu.Build(Target(refs), a);
 
         var sub = Children(Item(items, "origin/feat"));
-        Assert.Equal(["Checkout origin/feat as a new branch", "Merge into develop", "Delete…", "Copy name"], Headers(sub));
+        Assert.Equal(["Checkout origin/feat as a new branch", "Merge into develop", "Create pull request…", "Delete…", "Copy name"], Headers(sub));
         Click(Item(sub, "Merge into develop"));
         Assert.Equal(["merge origin/feat"], a.Calls);
 
@@ -393,7 +442,7 @@ public sealed class GraphContextMenuTests
         await GraphContextMenu.LoadDivergenceAsync(sub, refs[0], a);
 
         Assert.Equal(1, a.DivergenceCalls);
-        Assert.Equal(["Checkout main", "Push 2 commit(s) to origin", "Rename…"], Headers(Children(sub)).Take(3));
+        Assert.Equal(["Checkout main", "Push 2 commit(s) to origin", "Push and create pull request…", "Rename…"], Headers(Children(sub)).Take(4));
     }
 
     [AvaloniaFact]
@@ -415,7 +464,7 @@ public sealed class GraphContextMenuTests
         await GraphContextMenu.LoadDivergenceAsync(sub, refs[0], a);
 
         Assert.Equal(1, a.DivergenceCalls);
-        Assert.Equal(["Checkout main", "Push 2 commit(s) to origin", "Rename…"], Headers(Children(sub)).Take(3));
+        Assert.Equal(["Checkout main", "Push 2 commit(s) to origin", "Push and create pull request…", "Rename…"], Headers(Children(sub)).Take(4));
     }
 
     [AvaloniaFact]
@@ -428,7 +477,7 @@ public sealed class GraphContextMenuTests
         sub.IsSubMenuOpen = true;
         await GraphContextMenu.LoadDivergenceAsync(sub, refs[0], a);
 
-        Assert.Equal(["Checkout main", "Push 2 commit(s) to origin", "Rename…", "Delete local…", "origin/main", "Copy name"],
+        Assert.Equal(["Checkout main", "Push 2 commit(s) to origin", "Push and create pull request…", "Rename…", "Delete local…", "origin/main", "Copy name"],
             Headers(Children(sub)));
         Assert.Equal(["Merge into develop", "Delete…"], Headers(Children(Item(Children(sub), "origin/main"))));
     }
