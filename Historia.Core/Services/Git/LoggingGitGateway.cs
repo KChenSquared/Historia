@@ -134,6 +134,9 @@ public sealed class LoggingGitGateway(IGitGateway inner, string repositoryPath) 
     public Task DeleteBranchAsync(string name, bool force, CancellationToken ct = default)
         => Run($"DeleteBranchAsync({name}, force={force})", () => inner.DeleteBranchAsync(name, force, ct));
 
+    public Task FastForwardBranchAsync(string branch, string target, CancellationToken ct = default)
+        => Run($"FastForwardBranchAsync({branch}, {target})", () => inner.FastForwardBranchAsync(branch, target, ct));
+
     public Task RenameBranchAsync(string oldName, string newName, CancellationToken ct = default)
         => Run($"RenameBranchAsync({oldName} -> {newName})", () => inner.RenameBranchAsync(oldName, newName, ct));
 

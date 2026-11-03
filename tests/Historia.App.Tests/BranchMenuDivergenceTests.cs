@@ -41,6 +41,7 @@ public sealed class BranchMenuDivergenceTests
         public Task CheckoutAsync(string refName, GitCheckoutOptions options, CancellationToken ct = default) => No<Task>();
         public Task<BranchInfo> CreateBranchAsync(string name, string startPoint, bool checkout, CancellationToken ct = default) => No<Task<BranchInfo>>();
         public Task DeleteBranchAsync(string name, bool force, CancellationToken ct = default) => No<Task>();
+        public Task FastForwardBranchAsync(string branch, string target, CancellationToken ct = default) => No<Task>();
         public Task RenameBranchAsync(string oldName, string newName, CancellationToken ct = default) => No<Task>();
         public Task SetUpstreamAsync(string branchName, string upstreamRef, CancellationToken ct = default) => No<Task>();
         public Task<TagInfo> CreateTagAsync(string name, string target, string? message, CancellationToken ct = default) => No<Task<TagInfo>>();

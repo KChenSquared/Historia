@@ -77,6 +77,18 @@ public interface IGitGateway
     Task CheckoutAsync(string refName, GitCheckoutOptions options, CancellationToken ct = default);
     Task<BranchInfo> CreateBranchAsync(string name, string startPoint, bool checkout, CancellationToken ct = default);
     Task DeleteBranchAsync(string name, bool force, CancellationToken ct = default);
+
+    /// <summary>Moves the local branch <paramref name="branch"/> forward to
+    /// <paramref name="target"/> without checking it out, inside the write lock. It refuses
+    /// anything that is not a fast-forward (the branch must be an ancestor of the target), the
+    /// checked-out branch (pull that one instead) and a branch checked out in another worktree,
+    /// each with an <see cref="InvalidOperationException"/>; a missing branch or target is
+    /// <see cref="Models.GitErrorKind.RefNotFound"/>. The ref write passes the old value, so a
+    /// branch that moved meanwhile is left alone. Local only: it never fetches. A target that
+    /// already equals the branch does nothing. Callers pass the full ref
+    /// (<c>refs/remotes/&lt;remote&gt;/&lt;branch&gt;</c>) so a same-named local branch cannot shadow it.</summary>
+    Task FastForwardBranchAsync(string branch, string target, CancellationToken ct = default);
+
     Task RenameBranchAsync(string oldName, string newName, CancellationToken ct = default);
     Task SetUpstreamAsync(string branchName, string upstreamRef, CancellationToken ct = default);
     Task<TagInfo> CreateTagAsync(string name, string target, string? message, CancellationToken ct = default);
