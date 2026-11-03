@@ -155,7 +155,7 @@ macOS and Linux packages are included in release downloads with `-experimental` 
 3. Click **Run workflow**, choose your branch or tag, and select the desired operating systems (`MacOSX-arm64` for Apple Silicon, `MacOSX-x64` for Intel, `linux-x64`) and package kinds (archives or installers).
 4. When the run finishes, download the package artifacts from the workflow summary.
 
-You can also package locally with `packaging/package.ps1` or build from source (see [Quick Start](#-quick-start)).
+You can also package locally (see [Packaging](#packaging)) or build from source (see [Quick Start](#-quick-start)).
 
 #### Installing macOS packages
 - **Disk Image (`Historia-<version>-MacOSX-<arch>-experimental.dmg`):** Open the `.dmg` and drag `Historia.app` to `Applications`. Builds are ad-hoc signed, so clear the quarantine attribute before first launch:
@@ -235,6 +235,42 @@ When packaged as a `Historia.app` bundle, sign the bundle root instead:
 codesign --force --deep --sign - Historia.app
 xattr -dr com.apple.quarantine Historia.app
 ```
+
+### Packaging
+
+`packaging/package.ps1` builds the release packages from a `Release` publish of `Historia.App`.
+Run it in PowerShell from any directory.
+
+```powershell
+# Windows: zip only
+.\packaging\package.ps1 -Rid win-x64 -Archives
+
+# Windows: zip and installer
+.\packaging\package.ps1 -Rid win-x64 -Archives -Installers
+```
+
+| Parameter | Meaning |
+| --- | --- |
+| `-Rid` | Required. The target: `win-x64`, `osx-arm64`, `osx-x64` or `linux-x64`. |
+| `-Archives` | Build the archive. |
+| `-Installers` | Build the installer. |
+| `-OutDir` | Where packages are written, relative to the repository root. Default `dist`. |
+| `-RuntimeInstaller` | Path to a .NET Desktop Runtime installer (`.exe`) to bundle into the Windows installer, which runs it when the runtime is missing. Windows installer only. |
+
+Pass at least one of `-Archives` and `-Installers`. Packages land in `-OutDir`, named with the
+version MinVer resolves from the repository tags (`<version>`):
+
+| `-Rid` | `-Archives` | `-Installers` |
+| --- | --- | --- |
+| `win-x64` | `Historia-<version>-win-x64.zip` | `Historia-<version>-win-x64-setup.exe` |
+| `osx-arm64`, `osx-x64` | `Historia-<version>-MacOSX-<arch>-experimental.tar.gz` | `Historia-<version>-MacOSX-<arch>-experimental.dmg` |
+| `linux-x64` | `Historia-<version>-linux-x64-experimental.tar.gz` | `historia_<debver>_amd64-experimental.deb` |
+
+Prerequisites: the .NET SDK pinned in `global.json`; for the Windows installer, Inno Setup 6
+(`ISCC.exe` on `PATH` or under Program Files); for the `.dmg`, macOS with `hdiutil`, `sips`,
+`iconutil` and `codesign`; for the `.deb`, `dpkg-deb`. Windows packages bundle a fallback Git: the
+script downloads MinGit and Git LFS on first use, verifies their SHA-256 against
+`packaging/bundled-git.json`, and caches them under `obj/bundled-git-cache`.
 
 ---
 
