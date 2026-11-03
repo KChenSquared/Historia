@@ -42,7 +42,7 @@ public sealed class CommitMessageGenerator(
         }
 
         // With a size limit, git's output is read only as far as the prompt can use.
-        var cap = AiDiffCap.ToBytes(profile.DiffCapUnits);
+        var cap = AiDiffCap.ToBytes(profile.DiffCapTokens);
         var patches = await gateway.GetStagedPatchesAsync(amend, cap, ct).ConfigureAwait(false);
         if (patches.Count == 0)
             throw new AiException(AiErrorKind.NothingStaged, "Stage changes before generating a commit message.");

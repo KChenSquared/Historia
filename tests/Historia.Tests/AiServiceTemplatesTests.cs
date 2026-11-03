@@ -77,13 +77,24 @@ public class AiServiceTemplatesTests
     }
 
     [Theory]
+    [InlineData(5_000, 20_000L)]
+    [InlineData(25_000, 100_000L)]
+    [InlineData(100_000, 400_000L)]
     [InlineData(0, null)]
-    [InlineData(1, 65_536L)]
-    [InlineData(2, 131_072L)]
-    [InlineData(3, 196_608L)]
-    [InlineData(4, 262_144L)]
-    [InlineData(5, 327_680L)]
-    [InlineData(-3, null)]
-    [InlineData(9, 327_680L)]
-    public void Diff_cap_bytes(int units, long? expected) => Assert.Equal(expected, AiDiffCap.ToBytes(units));
+    [InlineData(-1, null)]
+    public void Diff_cap_bytes(int tokens, long? expected) => Assert.Equal(expected, AiDiffCap.ToBytes(tokens));
+
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(-5, 0)]
+    [InlineData(5_000, 5_000)]
+    [InlineData(7_000, 5_000)]
+    [InlineData(8_000, 10_000)]
+    [InlineData(30_000, 25_000)]
+    [InlineData(1_000_000, 100_000)]
+    public void Diff_cap_snaps_to_the_nearest_choice(int tokens, int expected) => Assert.Equal(expected, AiDiffCap.NearestStep(tokens));
+
+    [Fact]
+    public void New_profiles_default_to_25000_tokens() =>
+        Assert.Equal(25_000, AiServiceTemplates.NewCustom(DateTime.UtcNow).DiffCapTokens);
 }

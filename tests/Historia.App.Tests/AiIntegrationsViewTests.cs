@@ -501,7 +501,7 @@ public class AiIntegrationsViewTests
     public async Task The_effort_and_diff_limit_boxes_show_and_save_their_choice()
     {
         var rig = new Rig();
-        await rig.Add("A", p => p with { ReasoningEffort = "low", DiffCapUnits = 2 });
+        await rig.Add("A", p => p with { ReasoningEffort = "low", DiffCapTokens = 25_000 });
         var view = rig.View();
         var effort = Find<ComboBox>(view, "EffortBox");
         var limit = Find<ComboBox>(view, "DiffLimitBox");
@@ -509,11 +509,13 @@ public class AiIntegrationsViewTests
         Assert.Equal(AiReasoningEffort.Levels.ToList().IndexOf("low"), effort.SelectedIndex);
         Assert.Equal(2, limit.SelectedIndex);
         Assert.Equal(6, limit.ItemCount);
+        Assert.Equal(["5,000 tokens", "10,000 tokens", "25,000 tokens", "50,000 tokens", "100,000 tokens", "Uncapped"],
+            limit.Items.Cast<string>());
 
         limit.SelectedIndex = 4;
         Dispatcher.UIThread.RunJobs();
 
-        Assert.Equal(4, rig.Profiles.Profiles.Single().DiffCapUnits);
+        Assert.Equal(100_000, rig.Profiles.Profiles.Single().DiffCapTokens);
     }
 
     [AvaloniaFact]
