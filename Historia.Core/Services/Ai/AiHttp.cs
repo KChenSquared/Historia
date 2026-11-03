@@ -14,6 +14,9 @@ public sealed class AiHttp
 
     public static AiHttp Shared { get; } = new();
 
+    /// <summary>How long a whole request, retries included, may take before it is given up on.</summary>
+    public static TimeSpan OverallDeadline { get; } = TimeSpan.FromMinutes(4);
+
     private readonly HttpClient _client;
     private readonly TimeSpan _attemptTimeout;
     private readonly TimeSpan _overallDeadline;
@@ -32,7 +35,7 @@ public sealed class AiHttp
             Timeout = Timeout.InfiniteTimeSpan,
         };
         _attemptTimeout = attemptTimeout ?? TimeSpan.FromSeconds(180);
-        _overallDeadline = overallDeadline ?? TimeSpan.FromMinutes(4);
+        _overallDeadline = overallDeadline ?? OverallDeadline;
         _delay = delay ?? Task.Delay;
     }
 
@@ -69,6 +72,8 @@ public sealed class AiHttp
                 status = (int)response.StatusCode;
                 reason = response.ReasonPhrase ?? "";
                 retryAfter = ParseRetryAfter(response);
+                if (status == 429)
+                    retryAfter ??= RetryDelayFromBody(body);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -92,14 +97,14 @@ public sealed class AiHttp
             {
                 var wait = retryAfter ?? TimeSpan.FromSeconds(1 << attempt);
                 if (wait > MaxRetryAfter)
-                    throw Fail(AiErrorKind.RateLimited, status, reason, body, secrets);
+                    throw Fail(AiErrorKind.RateLimited, status, reason, body, secrets, retryAfter);
 
-                await WaitAsync(wait, overall.Token, ct, status, reason, body, secrets).ConfigureAwait(false);
+                await WaitAsync(wait, overall.Token, ct, status, reason, body, secrets, retryAfter).ConfigureAwait(false);
                 continue;
             }
 
             var kind = refine?.Invoke(status, body) ?? Classify(status, body);
-            throw Fail(kind, status, reason, body, secrets);
+            throw Fail(kind, status, reason, body, secrets, retryAfter);
         }
     }
 
@@ -131,7 +136,7 @@ public sealed class AiHttp
     }
 
     private async Task WaitAsync(TimeSpan wait, CancellationToken overall, CancellationToken caller,
-        int status, string reason, string body, IReadOnlyCollection<string> secrets)
+        int status, string reason, string body, IReadOnlyCollection<string> secrets, TimeSpan? retryAfter)
     {
         try
         {
@@ -143,7 +148,7 @@ public sealed class AiHttp
         }
         catch (OperationCanceledException)
         {
-            throw Fail(Classify(status, body), status, reason, body, secrets);
+            throw Fail(Classify(status, body), status, reason, body, secrets, retryAfter);
         }
     }
 
@@ -180,8 +185,112 @@ public sealed class AiHttp
         return null;
     }
 
-    private static AiException Fail(AiErrorKind kind, int status, string reason, string body, IReadOnlyCollection<string> secrets) =>
-        new(kind, Summary(kind, status), Details(status, reason, body, secrets));
+    private static AiException Fail(AiErrorKind kind, int status, string reason, string body,
+        IReadOnlyCollection<string> secrets, TimeSpan? retryAfter = null) =>
+        new(kind,
+            kind == AiErrorKind.RateLimited ? RateLimitedSummary(retryAfter, QuotaFromBody(body)) : Summary(kind, status),
+            Details(status, reason, body, secrets));
+
+    /// <summary>The summary for a rate-limit or quota failure. Only what the service reported goes
+    /// in: the quota, the limit and the wait. Without any of them the text stays generic.</summary>
+    private static string RateLimitedSummary(TimeSpan? retryAfter, (string Metric, string? Limit)? quota)
+    {
+        if (retryAfter is null && quota is null)
+            return Summary(AiErrorKind.RateLimited, 429);
+
+        var text = new StringBuilder("The AI service's rate limit or quota was reached");
+        if (quota is { } q)
+        {
+            text.Append(" (").Append(q.Metric);
+            if (q.Limit is not null)
+                text.Append(", limit ").Append(q.Limit);
+            text.Append(')');
+        }
+        text.Append('.');
+        if (retryAfter is { } wait)
+            text.Append(" Try again in ").Append(Math.Max(1, (long)Math.Ceiling(wait.TotalSeconds))).Append(" s.");
+        return text.ToString();
+    }
+
+    /// <summary>The wait a service reports in its error body (<c>error.details[*].retryDelay</c>,
+    /// a duration such as <c>48s</c> or <c>1.5s</c>), or null. Never throws.</summary>
+    internal static TimeSpan? RetryDelayFromBody(string body)
+    {
+        foreach (var detail in ErrorDetails(body))
+        {
+            var text = detail["retryDelay"] is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
+            if (text is { Length: > 1 } && text[^1] == 's'
+                && double.TryParse(text.AsSpan(0, text.Length - 1), NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds)
+                && seconds >= 0 && seconds < TimeSpan.MaxValue.TotalSeconds)
+            {
+                return TimeSpan.FromSeconds(seconds);
+            }
+        }
+        return null;
+    }
+
+    /// <summary>The first quota violation in an error body (<c>error.details[*].violations[0]</c>):
+    /// the metric in words and the limit as text. Null when the body has none. Never throws.</summary>
+    internal static (string Metric, string? Limit)? QuotaFromBody(string body)
+    {
+        foreach (var detail in ErrorDetails(body))
+        {
+            if (detail["violations"] is not JsonArray { Count: > 0 } violations || violations[0] is not JsonObject violation)
+                continue;
+
+            var metric = ReadableMetric(violation["quotaMetric"] is JsonValue m && m.TryGetValue<string>(out var ms) ? ms : null);
+            if (metric is null)
+                continue;
+
+            string? limit = null;
+            if (violation["quotaValue"] is JsonValue q)
+            {
+                if (q.TryGetValue<string>(out var qs))
+                    limit = qs;
+                else if (q.TryGetValue<long>(out var ql))
+                    limit = ql.ToString(CultureInfo.InvariantCulture);
+            }
+            if (limit is not null && !(limit.Length is > 0 and <= 20 && limit.All(c => char.IsAsciiDigit(c) || c == '.')))
+                limit = null;
+            return (metric, limit);
+        }
+        return null;
+    }
+
+    /// <summary>Turns <c>host/generate_content_free_tier_input_token_count</c> into
+    /// <c>free-tier input tokens</c>. Null when nothing plain is left.</summary>
+    private static string? ReadableMetric(string? quotaMetric)
+    {
+        if (string.IsNullOrWhiteSpace(quotaMetric))
+            return null;
+
+        var name = quotaMetric[(quotaMetric.LastIndexOf('/') + 1)..];
+        if (name.Length == 0 || !name.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-'))
+            return null;
+
+        const string prefix = "generate_content_";
+        if (name.StartsWith(prefix, StringComparison.Ordinal) && name.Length > prefix.Length)
+            name = name[prefix.Length..];
+        if (name.EndsWith("_token_count", StringComparison.Ordinal))
+            name = name[..^"_token_count".Length] + "_tokens";
+        return name.Replace("free_tier", "free-tier", StringComparison.Ordinal).Replace('_', ' ');
+    }
+
+    private static IReadOnlyList<JsonObject> ErrorDetails(string body)
+    {
+        try
+        {
+            return JsonNode.Parse(body) is JsonObject { } root
+                && root["error"] is JsonObject error
+                && error["details"] is JsonArray details
+                    ? [.. details.OfType<JsonObject>()]
+                    : [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
 
     internal static string Summary(AiErrorKind kind, int status) => kind switch
     {
