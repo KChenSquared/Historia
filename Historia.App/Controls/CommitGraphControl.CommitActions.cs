@@ -143,6 +143,16 @@ public sealed partial class CommitGraphControl : IGraphMenuActions
         return Task.CompletedTask;
     }
 
+    Task IGraphMenuActions.PushAndCreatePullRequest(string localBranch)
+        => _context is { } ctx && PullRequestFlow.From(_services) is { } flow
+            ? flow.PushAndOpenAsync(ctx, localBranch)
+            : Task.CompletedTask;
+
+    Task IGraphMenuActions.CreatePullRequest(string remote, string branch)
+        => _context is { } ctx && PullRequestFlow.From(_services) is { } flow
+            ? flow.OpenAsync(ctx, remote, branch)
+            : Task.CompletedTask;
+
     /// <summary>The push/pull/fast-forward items for a branch against its counterpart: a local
     /// branch against its upstream, a remote branch against the local branch of the same name.</summary>
     async Task<IReadOnlyList<Control>> IGraphMenuActions.DivergenceItemsAsync(GraphMenuRef branch)

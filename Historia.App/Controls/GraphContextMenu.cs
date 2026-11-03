@@ -41,6 +41,12 @@ internal interface IGraphMenuActions
     Task Copy(string text);
     Task CopyMessage(GitObjectId id);
 
+    /// <summary>Pushes a local branch to its remote, then opens the Create pull request dialog on it.</summary>
+    Task PushAndCreatePullRequest(string localBranch);
+
+    /// <summary>Opens the Create pull request dialog on a remote-tracking branch, without pushing.</summary>
+    Task CreatePullRequest(string remote, string branch);
+
     /// <summary>The push/pull/fast-forward items for a branch against its counterpart; empty
     /// when there is none or the two are level.</summary>
     Task<IReadOnlyList<Control>> DivergenceItemsAsync(GraphMenuRef branch);
@@ -205,6 +211,8 @@ internal static class GraphContextMenu
         {
             case DecorationType.LocalBranch:
                 items.Add(MenuLeaf($"Checkout {shown}", () => a.CheckoutBranch(r.Name)));
+                if (t.ConfiguredRemotes.Count > 0)
+                    items.Add(MenuLeaf("Push and create pull request…", () => a.PushAndCreatePullRequest(r.Name)));
                 items.Add(MenuLeaf("Rename…", () => a.Rename(r.Name)));
                 items.Add(MenuLeaf("Delete local…", () => a.DeleteLocal(r.Name)));
                 foreach (var n in nested)
@@ -218,6 +226,8 @@ internal static class GraphContextMenu
                     items.Add(MenuLeaf($"Checkout {shown} as a new branch", () => a.CheckoutTracking(r.Name, display)));
                     if (canMergeIntoCurrent)
                         items.Add(MenuLeaf($"Merge into {t.CurrentBranch}", () => a.Merge(display, display)));
+                    if (t.ConfiguredRemotes.Count > 0)
+                        items.Add(MenuLeaf("Create pull request…", () => a.CreatePullRequest(remote, r.Name)));
                     items.Add(MenuLeaf("Delete…", () => a.DeleteRemote(remote, r.Name)));
                     items.Add(new Separator());
                 }
