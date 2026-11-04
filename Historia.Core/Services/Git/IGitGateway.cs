@@ -81,8 +81,9 @@ public interface IGitGateway
     /// <summary>Moves the local branch <paramref name="branch"/> forward to
     /// <paramref name="target"/> without checking it out, inside the write lock. It refuses
     /// anything that is not a fast-forward (the branch must be an ancestor of the target), the
-    /// checked-out branch (pull that one instead) and a branch checked out in another worktree,
-    /// each with an <see cref="InvalidOperationException"/>; a missing branch or target is
+    /// checked-out branch (pull that one instead), a branch checked out in another worktree and a
+    /// branch being rebased or bisected in any worktree, each with an
+    /// <see cref="InvalidOperationException"/>; a missing branch or target is
     /// <see cref="Models.GitErrorKind.RefNotFound"/>. The ref write passes the old value, so a
     /// branch that moved meanwhile is left alone. Local only: it never fetches. A target that
     /// already equals the branch does nothing. Callers pass the full ref

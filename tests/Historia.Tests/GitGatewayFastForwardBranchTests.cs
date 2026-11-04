@@ -113,6 +113,67 @@ public sealed class GitGatewayFastForwardBranchTests : IAsyncDisposable
         }
     }
 
+    /// <summary>Starts a rebase of the branch checked out in <paramref name="dir"/> that stops
+    /// after its first commit, leaving HEAD detached and the branch named only in the rebase's
+    /// <c>head-name</c>.</summary>
+    private static void StopMidRebase(string dir) =>
+        TestGit.Run(dir, ["rebase", "--exec", "exit 1", "--root"], testIdentity: false);
+
+    [Fact]
+    public async Task Refuses_branch_being_rebased()
+    {
+        using var repo = RepoWithRemote();
+        AdvanceOriginMain(repo);
+        repo.Checkout("main");
+        StopMidRebase(repo.Path);
+        var before = Sha(repo, "refs/heads/main");
+
+        await using var ctx = _host.Open(repo.Path);
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => MakeGateway(ctx).FastForwardBranchAsync("main", OriginMain));
+
+        Assert.Contains("being rebased or bisected", ex.Message);
+        Assert.Equal(before, Sha(repo, "refs/heads/main"));
+    }
+
+    [Fact]
+    public async Task Refuses_branch_being_rebased_in_another_worktree()
+    {
+        using var repo = RepoWithRemote();
+        AdvanceOriginMain(repo);
+        var worktree = TestScratch.NewPath("historia-ff-worktree-");
+        _scratch.Add(worktree);
+        repo.Git("worktree", "add", worktree, "main");
+        StopMidRebase(worktree);
+        var before = Sha(repo, "refs/heads/main");
+
+        try
+        {
+            await using var ctx = _host.Open(repo.Path);
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => MakeGateway(ctx).FastForwardBranchAsync("main", OriginMain));
+
+            Assert.Contains("being rebased or bisected", ex.Message);
+            Assert.Equal(before, Sha(repo, "refs/heads/main"));
+        }
+        finally
+        {
+            repo.Git("worktree", "remove", "--force", worktree);
+        }
+    }
+
+    [Fact]
+    public async Task Missing_target_is_RefNotFound()
+    {
+        using var repo = RepoWithRemote();
+
+        await using var ctx = _host.Open(repo.Path);
+        var ex = await Assert.ThrowsAsync<HistoriaGitException>(
+            () => MakeGateway(ctx).FastForwardBranchAsync("main", "refs/remotes/origin/nope"));
+
+        Assert.Equal(GitErrorKind.RefNotFound, ex.Kind);
+    }
+
     [Fact]
     public async Task Refuses_diverged_branch_and_leaves_ref_unchanged()
     {

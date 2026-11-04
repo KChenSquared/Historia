@@ -234,6 +234,46 @@ public sealed partial class GitGateway
     // second; any other non-zero code is an error.
     private const int NotAncestorExitCode = 1;
 
+    /// <summary>Whether a rebase or bisect in any worktree of the repository started from
+    /// <paramref name="branch"/>. HEAD is detached while either runs, so neither HEAD nor
+    /// <c>%(worktreepath)</c> names the branch, yet the operation writes the branch when it ends.
+    /// These are the markers <c>git branch -f</c> checks.</summary>
+    private static bool IsBeingRebasedOrBisected(string gitDir, string branch)
+    {
+        var commonDir = RefStateToken.ResolveCommonDir(gitDir);
+        var worktreesDir = Path.Combine(commonDir, "worktrees");
+        IEnumerable<string> gitDirs = Directory.Exists(worktreesDir)
+            ? [commonDir, .. Directory.EnumerateDirectories(worktreesDir)]
+            : [commonDir];
+
+        var branchRef = $"refs/heads/{branch}";
+        foreach (var dir in gitDirs)
+        {
+            if (ReadMarker(Path.Combine(dir, "rebase-merge", "head-name")) == branchRef
+                || ReadMarker(Path.Combine(dir, "rebase-apply", "head-name")) == branchRef
+                // BISECT_START holds the short name of the branch bisect returns to.
+                || ReadMarker(Path.Combine(dir, "BISECT_START")) == branch)
+                return true;
+        }
+        return false;
+    }
+
+    private static string? ReadMarker(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? File.ReadAllText(path).Trim() : null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
     public async Task FastForwardBranchAsync(string branch, string target, CancellationToken ct = default)
     {
         using var _ = context.BeginSelfOperation();
@@ -272,6 +312,8 @@ public sealed partial class GitGateway
                 throw HistoriaGitException.FromCli(worktreeCheck, "Fast-forward");
             if (!string.IsNullOrWhiteSpace(worktreeCheck.StandardOutput))
                 throw new InvalidOperationException($"{branch} is checked out in another worktree.");
+            if (IsBeingRebasedOrBisected(context.GitDirectory, branch))
+                throw new InvalidOperationException($"{branch} is being rebased or bisected; finish that first.");
 
             var newResult = await cli.RunAsync(new GitCliRequest
             {
