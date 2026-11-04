@@ -83,8 +83,12 @@ public class StagingPanelRowMenuTests : IDisposable
         var panel = ShowPanel(out _);
         Row(panel, "one.txt").IsChecked = true;
         Row(panel, "two.txt").IsChecked = true;
+        var one = Row(panel, "one.txt");
 
-        await Row(panel, "one.txt").StageCommand.ExecuteAsync(null);
+        await one.StageCommand.ExecuteAsync(null);
+        // The clicked row leaves the checked set as soon as the command runs, before the refresh.
+        Assert.False(one.IsChecked);
+        Assert.Null(panel.ViewModel.ChangesCheckState);
         await WaitUntilAsync(() => _context.State.Status.Staged.Count == 1);
 
         Assert.Equal(["one.txt"], Paths(_context.State.Status.Staged));
@@ -249,12 +253,36 @@ public class StagingPanelRowMenuTests : IDisposable
     }
 
     [AvaloniaFact]
+    public async Task Ignore_staged_deletion_publishes_no_tracking_note()
+    {
+        await File.WriteAllTextAsync(FilePath("gone.txt"), "gone\n");
+        await _context.Gateway.StageAsync(["gone.txt"]);
+        await _context.Gateway.CommitAsync(new CommitRequest { Message = "add gone.txt", AuthorName = "Dev", AuthorEmail = "dev@example.com" });
+        File.Delete(FilePath("gone.txt"));
+        await WaitUntilAsync(() => _context.State.Status.Unstaged.Any(f => f.Path == "gone.txt"));
+        await StageDirectAsync("gone.txt");
+        var panel = ShowPanel(out _);
+
+        await Row(panel, "gone.txt", staged: true).IgnoreCommand.ExecuteAsync(null);
+        await WaitUntilAsync(() => File.Exists(FilePath(".gitignore")));
+
+        Assert.Equal("/gone.txt\n", await File.ReadAllTextAsync(FilePath(".gitignore")));
+        var toasts = _sp.GetRequiredService<INotificationService>().Current;
+        Assert.Contains(toasts, n => n.Severity == NotificationSeverity.Success && n.Message.StartsWith("Added 1 entry", StringComparison.Ordinal));
+        Assert.DoesNotContain(toasts, n => n.Message.Contains("keeps tracking", StringComparison.Ordinal));
+    }
+
+    [AvaloniaFact]
     public async Task Menu_items_disabled_while_busy()
     {
+        await WriteUntrackedAsync("zero.txt");
+        await StageDirectAsync("zero.txt");
         await WriteUntrackedAsync("one.txt", "two.txt");
         var panel = ShowPanel(out _);
         var changes = Row(panel, "one.txt");
+        var stagedZero = Row(panel, "zero.txt", staged: true);
         Assert.True(changes.StageCommand.CanExecute(null));
+        Assert.True(stagedZero.UnstageCommand.CanExecute(null));
 
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -273,6 +301,10 @@ public class StagingPanelRowMenuTests : IDisposable
         Assert.False(changes.MoveSelectedCommand.CanExecute(null));
         Assert.False(changes.IgnoreCommand.CanExecute(null));
         Assert.False(changes.IgnoreSelectedCommand.CanExecute(null));
+        Assert.False(stagedZero.UnstageCommand.CanExecute(null));
+        Assert.False(stagedZero.MoveSelectedCommand.CanExecute(null));
+        Assert.False(stagedZero.IgnoreCommand.CanExecute(null));
+        Assert.False(stagedZero.IgnoreSelectedCommand.CanExecute(null));
 
         release.SetResult();
         await holder;
@@ -280,7 +312,7 @@ public class StagingPanelRowMenuTests : IDisposable
         Dispatcher.UIThread.RunJobs();
 
         Assert.False(panel.ViewModel.IsStagingBusy);
-        await WaitUntilAsync(() => _context.State.Status.Staged.Count == 2);
+        await WaitUntilAsync(() => _context.State.Status.Staged.Count == 3);
         var staged = Row(panel, "one.txt", staged: true);
         Assert.True(staged.UnstageCommand.CanExecute(null));
         Assert.True(staged.IgnoreCommand.CanExecute(null));

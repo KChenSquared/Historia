@@ -645,8 +645,10 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
     {
         if (IsStagingBusy || paths.Count == 0) return;
 
+        // A staged deletion has already left the index, so the ignore applies once it is committed.
         var trackedPaths = new HashSet<string>(
-            _status.Unstaged.Concat(_status.Staged).Select(f => f.Path), StringComparer.Ordinal);
+            _status.Unstaged.Concat(_status.Staged.Where(f => f.Kind != FileChangeKind.Deleted)).Select(f => f.Path),
+            StringComparer.Ordinal);
         var anyTracked = paths.Any(p => GitIgnoreWriter.CanWrite(p) && trackedPaths.Contains(p));
         var skipped = paths.Count(p => !GitIgnoreWriter.CanWrite(p));
 
