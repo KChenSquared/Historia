@@ -53,7 +53,8 @@ public static class GitIgnoreWriter
     /// a missing final newline is added first. Runs inside the repository write lock.
     /// </summary>
     /// <returns>The number of lines added.</returns>
-    /// <exception cref="InvalidOperationException">The repository is bare and has no working tree.</exception>
+    /// <exception cref="InvalidOperationException">The repository is bare and has no working tree, or
+    /// the existing <c>.gitignore</c> is UTF-16.</exception>
     public static async Task<int> AppendAsync(RepositoryContext ctx, IReadOnlyList<string> paths, CancellationToken ct)
     {
         if (ctx.IsBare)
@@ -71,12 +72,20 @@ public static class GitIgnoreWriter
         return added;
     }
 
+    // Only the new lines are written, in append mode: the existing bytes (a BOM, bytes that are not
+    // UTF-8, an edit saved by another program) stay exactly as they are, and a failed write can
+    // only leave part of the new lines.
     private static async Task<int> AppendCoreAsync(string target, List<string> entries, CancellationToken ct)
     {
-        var existing = File.Exists(target) ? await File.ReadAllTextAsync(target, ct).ConfigureAwait(false) : "";
-        var newline = existing.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        var existing = File.Exists(target) ? await File.ReadAllBytesAsync(target, ct).ConfigureAwait(false) : [];
+        if (existing.Length >= 2 && ((existing[0] == 0xFF && existing[1] == 0xFE) || (existing[0] == 0xFE && existing[1] == 0xFF)))
+            throw new InvalidOperationException(".gitignore is saved as UTF-16, which git does not read. Save it as UTF-8 and try again.");
 
-        var present = existing
+        // The text is only compared against, so a byte that is not UTF-8 cannot change the file.
+        var text = Encoding.UTF8.GetString(existing).TrimStart('﻿');
+        var newline = text.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+
+        var present = text
             .Split('\n')
             .Select(line => line.TrimEnd('\r'))
             .ToHashSet(StringComparer.Ordinal);
@@ -84,14 +93,15 @@ public static class GitIgnoreWriter
         if (toAdd.Count == 0)
             return 0;
 
-        var sb = new StringBuilder(existing);
-        if (existing.Length > 0 && existing[^1] != '\n')
+        var sb = new StringBuilder();
+        if (existing.Length > 0 && existing[^1] != (byte)'\n')
             sb.Append(newline);
         foreach (var entry in toAdd)
             sb.Append(entry).Append(newline);
 
-        await File.WriteAllTextAsync(target, sb.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), ct)
-            .ConfigureAwait(false);
+        var bytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(sb.ToString());
+        await using var stream = new FileStream(target, FileMode.Append, FileAccess.Write, FileShare.Read, bufferSize: 4096, useAsync: true);
+        await stream.WriteAsync(bytes, ct).ConfigureAwait(false);
         return toAdd.Count;
     }
 }

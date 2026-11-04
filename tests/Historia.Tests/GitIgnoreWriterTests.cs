@@ -113,6 +113,38 @@ public sealed class GitIgnoreWriterTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Append_keeps_existing_bytes_and_bom()
+    {
+        // A UTF-8 BOM, then "caf" + 0xE9 (é in Latin-1, not valid UTF-8) + "/" with no final newline.
+        byte[] original = [0xEF, 0xBB, 0xBF, (byte)'c', (byte)'a', (byte)'f', 0xE9, (byte)'/'];
+        await File.WriteAllBytesAsync(IgnorePath, original);
+
+        var added = await AppendAsync("a.txt");
+
+        Assert.Equal(1, added);
+        byte[] expected = [.. original, .. "\n/a.txt\n"u8];
+        Assert.Equal(expected, await File.ReadAllBytesAsync(IgnorePath));
+    }
+
+    [Fact]
+    public async Task Append_skips_existing_first_line_after_bom()
+    {
+        await File.WriteAllBytesAsync(IgnorePath, [0xEF, 0xBB, 0xBF, .. "/a.txt\n"u8]);
+
+        Assert.Equal(0, await AppendAsync("a.txt"));
+    }
+
+    [Fact]
+    public async Task Append_refuses_utf16_file()
+    {
+        byte[] original = [0xFF, 0xFE, (byte)'b', 0, (byte)'\n', 0];
+        await File.WriteAllBytesAsync(IgnorePath, original);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => AppendAsync("a.txt"));
+        Assert.Equal(original, await File.ReadAllBytesAsync(IgnorePath));
+    }
+
+    [Fact]
     public async Task Append_refuses_a_bare_repository()
     {
         using var bare = TestRepositoryBuilder.Create();
