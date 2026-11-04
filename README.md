@@ -240,8 +240,9 @@ xattr -dr com.apple.quarantine Historia.app
 
 ### Packaging
 
-`packaging/package.ps1` builds the release packages from a `Release` publish of `Historia.App`.
-Run it in PowerShell from any directory.
+`packaging/package.ps1` builds the release packages from a framework-dependent `Release` publish of
+`Historia.App`, so the target machine needs the .NET 10 Desktop Runtime. Run it in PowerShell from any
+directory; on macOS and Linux use PowerShell 7 (`pwsh`).
 
 ```powershell
 # Windows: zip only
@@ -257,10 +258,11 @@ Run it in PowerShell from any directory.
 | `-Archives` | Build the archive. |
 | `-Installers` | Build the installer. |
 | `-OutDir` | Where packages are written, relative to the repository root. Default `dist`. |
-| `-RuntimeInstaller` | Path to a .NET Desktop Runtime installer (`.exe`) to bundle into the Windows installer, which runs it when the runtime is missing. Windows installer only. |
+| `-RuntimeInstaller` | Absolute path to a .NET Desktop Runtime installer (`.exe`) to bundle into the Windows installer, which runs it when the runtime is missing. Windows installer only. |
 
 Pass at least one of `-Archives` and `-Installers`. Packages land in `-OutDir`, named with the
-version MinVer resolves from the repository tags (`<version>`):
+version MinVer resolves from the repository tags (`<version>`; `<debver>` is the same with `-`
+replaced by `~`):
 
 | `-Rid` | `-Archives` | `-Installers` |
 | --- | --- | --- |
@@ -268,10 +270,10 @@ version MinVer resolves from the repository tags (`<version>`):
 | `osx-arm64`, `osx-x64` | `Historia-<version>-MacOSX-<arch>-experimental.tar.gz` | `Historia-<version>-MacOSX-<arch>-experimental.dmg` |
 | `linux-x64` | `Historia-<version>-linux-x64-experimental.tar.gz` | `historia_<debver>_amd64-experimental.deb` |
 
-Prerequisites: the .NET SDK pinned in `global.json`; for the Windows installer, Inno Setup 6
-(`ISCC.exe` on `PATH` or under Program Files); for the `.dmg`, macOS with `hdiutil`, `sips`,
-`iconutil` and `codesign`; for the `.deb`, `dpkg-deb`. Windows packages bundle a fallback Git: the
-script downloads MinGit and Git LFS on first use, verifies their SHA-256 against
+Prerequisites: the .NET SDK pinned in `global.json`; for the macOS and Linux archives, `tar`; for
+the Windows installer, Inno Setup 6 (`ISCC.exe` on `PATH` or under Program Files); for the `.dmg`,
+macOS with `hdiutil`, `sips`, `iconutil` and `codesign`; for the `.deb`, `dpkg-deb`. Windows packages
+bundle a fallback Git: the script downloads MinGit and Git LFS on first use, verifies their SHA-256 against
 `packaging/bundled-git.json`, and caches them under `obj/bundled-git-cache`.
 
 ---
