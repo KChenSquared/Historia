@@ -127,6 +127,108 @@ public sealed class RepoNetworkMergeAndPushTests
         Assert.Equal(remoteBefore, fixture.Rev(fixture.RemotePath, "main"));
         Assert.DoesNotContain(rig.Notify.Published, n => n.Severity == NotificationSeverity.Success);
     }
+
+    [AvaloniaFact]
+    public async Task Rejected_push_recovers_against_the_requested_remote_branch()
+    {
+        using var fixture = new BranchSyncFixture().DivergeRenamed("feature", "feat-x");
+        await using var rig = new BranchSyncRig();
+        rig.Dialogs.ChooseAnswers.Enqueue(0);
+        var repo = await rig.OpenAsync(fixture.LocalPath);
+
+        await rig.RunToIdleAsync(() => rig.Bus.RequestNetworkAction(
+            new RepoNetworkRequest(RepoNetworkAction.Push, "origin", "feature", "feat-x", Repo: repo)));
+
+        var choose = Assert.Single(rig.Dialogs.Chooses);
+        Assert.Contains("'origin/feat-x'", choose.Message);
+        Assert.Equal("feature", fixture.CurrentBranch());
+        Assert.Equal(2, fixture.ParentCount("feature"));
+        Assert.Equal(fixture.Rev(fixture.LocalPath, "feature"), fixture.Rev(fixture.RemotePath, "feat-x"));
+        Assert.False(fixture.HasRef(fixture.RemotePath, "refs/heads/feature"));
+        Assert.DoesNotContain(rig.Notify.Published, n => n.Severity == NotificationSeverity.Error);
+    }
+
+    [AvaloniaFact]
+    public async Task Rejected_push_force_names_and_targets_the_requested_remote_branch()
+    {
+        using var fixture = new BranchSyncFixture().DivergeRenamed("feature", "feat-x");
+        await using var rig = new BranchSyncRig();
+        rig.Dialogs.ChooseAnswers.Enqueue(1);
+        rig.Dialogs.ConfirmDestructiveAnswers.Enqueue(true);
+        var repo = await rig.OpenAsync(fixture.LocalPath);
+
+        await rig.RunToIdleAsync(() => rig.Bus.RequestNetworkAction(
+            new RepoNetworkRequest(RepoNetworkAction.Push, "origin", "feature", "feat-x", Repo: repo)));
+
+        // --force-if-includes refuses the overwrite itself (feature never saw origin/feat-x's
+        // commit); what matters here is that the push aimed at feat-x and created no other branch.
+        Assert.Contains("origin/feat-x", Assert.Single(rig.Dialogs.DestructiveEffects));
+        Assert.False(fixture.HasRef(fixture.RemotePath, "refs/heads/feature"));
+    }
+
+    [AvaloniaFact]
+    public async Task Rejected_push_rebase_conflict_is_a_warning()
+    {
+        using var fixture = new BranchSyncFixture(conflicting: true).Diverge();
+        await using var rig = new BranchSyncRig();
+        rig.Dialogs.ChooseAnswers.Enqueue(1);
+        var repo = await rig.OpenAsync(fixture.LocalPath);
+        var remoteBefore = fixture.Rev(fixture.RemotePath, "main");
+
+        await rig.RunToIdleAsync(() => rig.Bus.RequestNetworkAction(
+            new RepoNetworkRequest(RepoNetworkAction.Push, "origin", "main", Repo: repo)));
+
+        Assert.Contains(rig.Notify.Published,
+            n => n.Severity == NotificationSeverity.Warning && n.Message == "Resolve the conflicts, then push again.");
+        Assert.DoesNotContain(rig.Notify.Published, n => n.Severity == NotificationSeverity.Error);
+        Assert.Equal(remoteBefore, fixture.Rev(fixture.RemotePath, "main"));
+    }
+
+    [AvaloniaFact]
+    public async Task MergeAndPush_dirty_tree_offers_stash_and_retry()
+    {
+        using var fixture = new BranchSyncFixture().Diverge();
+        fixture.WriteFile("f.txt", "dirty\n");
+        await using var rig = new BranchSyncRig();
+        rig.Dialogs.ConfirmAnswers.Enqueue(true);
+        var repo = await rig.OpenAsync(fixture.LocalPath);
+
+        await rig.RunToIdleAsync(() => rig.Bus.RequestNetworkAction(
+            new RepoNetworkRequest(RepoNetworkAction.MergeAndPush, "origin", "main", "main", Repo: repo)));
+
+        var error = Assert.Single(rig.Notify.Published, n => n.Severity == NotificationSeverity.Error);
+        var retry = Assert.Single(error.Actions, a => a.Label == "Stash & retry");
+        await retry.Invoke();
+        await rig.WaitUntilAsync(() => rig.Runner.CurrentProgress(repo) is null
+            && fixture.Rev(fixture.LocalPath, "main") == fixture.Rev(fixture.RemotePath, "main"));
+
+        Assert.Equal(2, fixture.ParentCount("main"));
+    }
+
+    [AvaloniaFact]
+    public async Task MergeAndPush_failed_checkout_stops_before_merge()
+    {
+        using var fixture = new BranchSyncFixture().Diverge().CheckoutNew("feature");
+        fixture.CommitFile("f.txt", "feature\n");
+        fixture.WriteFile("f.txt", "dirty\n");
+        await using var rig = new BranchSyncRig();
+        rig.Dialogs.ConfirmAnswers.Enqueue(true);
+        var repo = await rig.OpenAsync(fixture.LocalPath);
+        var localBefore = fixture.Rev(fixture.LocalPath, "main");
+        var remoteBefore = fixture.Rev(fixture.RemotePath, "main");
+
+        rig.Bus.RequestNetworkAction(
+            new RepoNetworkRequest(RepoNetworkAction.MergeAndPush, "origin", "main", "main", Repo: repo));
+        await rig.WaitUntilAsync(() => rig.Notify.Published.Any(n => n.Severity == NotificationSeverity.Error));
+        await rig.PumpAsync(TimeSpan.FromMilliseconds(300));
+
+        var error = Assert.Single(rig.Notify.Published, n => n.Severity == NotificationSeverity.Error);
+        Assert.Contains(error.Actions, a => a.Label == "Stash & retry");
+        Assert.Equal("feature", fixture.CurrentBranch());
+        Assert.Equal(localBefore, fixture.Rev(fixture.LocalPath, "main"));
+        Assert.Equal(remoteBefore, fixture.Rev(fixture.RemotePath, "main"));
+        Assert.Null(rig.Runner.CurrentProgress(repo));
+    }
 }
 
 /// <summary>A bare remote and a clone ("local") with <c>main</c> pushed and one more local commit
@@ -198,6 +300,40 @@ internal sealed class BranchSyncFixture : IDisposable
     public int ParentCount(string rev) =>
         TestGit.Run(LocalPath, ["rev-list", "--parents", "-n", "1", rev], testIdentity: false)
             .Stdout.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length - 1;
+
+    /// <summary>Creates local <paramref name="branch"/> at <c>main</c> tracking
+    /// <c>origin/<paramref name="remoteBranch"/></c>, a remote branch of another name, then pushes
+    /// a commit to that remote branch from another clone and fetches, so the two have diverged.
+    /// <c>main</c> stays checked out.</summary>
+    public BranchSyncFixture DivergeRenamed(string branch, string remoteBranch)
+    {
+        Git(LocalPath, "push", "origin", $"main~1:refs/heads/{remoteBranch}");
+        Git(LocalPath, "fetch", "origin");
+        Git(LocalPath, "branch", branch, "main");
+        Git(LocalPath, "branch", $"--set-upstream-to=origin/{remoteBranch}", branch);
+        var other = Path.Combine(_root, "other-renamed");
+        Git(_root, "clone", RemotePath, other);
+        Configure(other);
+        Git(other, "checkout", remoteBranch);
+        File.WriteAllText(Path.Combine(other, "f.txt"), "other\n");
+        Git(other, "add", "f.txt");
+        Git(other, "commit", "-m", "other commit");
+        Git(other, "push", "origin", remoteBranch);
+        Git(LocalPath, "fetch", "origin");
+        return this;
+    }
+
+    public void WriteFile(string name, string content) => File.WriteAllText(Path.Combine(LocalPath, name), content);
+
+    public void CommitFile(string name, string content)
+    {
+        WriteFile(name, content);
+        Git(LocalPath, "add", name);
+        Git(LocalPath, "commit", "-m", $"edit {name}");
+    }
+
+    public bool HasRef(string dir, string refName) =>
+        TestGit.Run(dir, ["rev-parse", "--verify", "-q", refName], testIdentity: false).ExitCode == 0;
 
     private static void Configure(string dir)
     {
@@ -372,7 +508,8 @@ internal sealed class BranchSyncRig : IAsyncDisposable
         public Queue<bool> ConfirmDestructiveAnswers { get; } = new();
         public List<ChooseCall> Chooses { get; } = [];
         public List<ConfirmCall> Confirms { get; } = [];
-        public int ConfirmDestructiveCalls { get; private set; }
+        public int ConfirmDestructiveCalls => DestructiveEffects.Count;
+        public List<string> DestructiveEffects { get; } = [];
 
         public Task<int> ChooseAsync(string title, string message, IReadOnlyList<string> options,
             int defaultIndex = 0, int destructiveIndex = -1, DialogIcon icon = DialogIcon.None)
@@ -390,7 +527,7 @@ internal sealed class BranchSyncRig : IAsyncDisposable
 
         public Task<bool> ConfirmDestructiveAsync(string title, string effect, string confirmLabel)
         {
-            ConfirmDestructiveCalls++;
+            DestructiveEffects.Add(effect);
             return Task.FromResult(ConfirmDestructiveAnswers.TryDequeue(out var answer) && answer);
         }
 
