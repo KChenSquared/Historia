@@ -100,61 +100,63 @@ public sealed partial class StagingPanelViewModel
 
     private async Task CommitCoreAsync(bool push)
     {
-        // A stage or unstage still running, or its status refresh, decides what is staged; the
-        // checks below must see its result.
-        if (!_pendingStage.IsCompleted)
-        {
-            await _pendingStage;
-            AdoptCurrentStatus();
-        }
-
-        // A repeated Ctrl+Enter while a commit runs is not worth a message.
+        // A repeated Ctrl+Enter while a commit runs is not worth a message. The commit counts as
+        // running from here, so both commit buttons stay disabled through the checks below.
         if (_committing) return;
-        if (_status.Conflicted.Count > 0)
-        {
-            _notifications.Publish(NotificationSeverity.Info, CommitBlockedByConflictsText);
-            return;
-        }
-
-        if (string.IsNullOrWhiteSpace(MessageText) || (_status.Staged.Count == 0 && !IsAmend))
-        {
-            _notifications.Publish(NotificationSeverity.Warning, "Stage changes and enter a message before committing.");
-            return;
-        }
-
-        // Amending a commit that's already on its upstream (as of the last
-        // fetch) rewrites published history — pushing it afterwards needs a force push. An
-        // unpushed commit's amend doesn't touch anything else and needs no prompt.
-        if (IsAmend)
-        {
-            var upstream = _ctx.State.CurrentBranch?.UpstreamName;
-            if (upstream is not null && _status.AheadBy == 0)
-            {
-                var headSha = _ctx.State.CurrentBranch?.TipCommitId?.ToString();
-                var shortSha = headSha is { Length: >= 7 } ? headSha[..7] : headSha ?? "HEAD";
-                try
-                {
-                    if (!await _dialogs.ConfirmDestructiveAsync("Amend a pushed commit",
-                            $"Amend {shortSha}, which is already on {upstream}? This rewrites " +
-                            "published history; pushing it afterwards needs a force push.", "Amend"))
-                        return;
-                }
-                catch (Exception ex)
-                {
-                    _notifications.Publish(NotificationSeverity.Error, ex.NotificationMessage("Commit"), ex.NotificationDetails());
-                    return;
-                }
-            }
-        }
-
         _committing = true;
-        _commitRunning = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         RefreshCommitState();
-        // A proposal that arrives while the commit runs is meant for the next commit; only the
-        // one already pending now is spent by this commit.
-        var pendingAtStart = _ctx.State.PendingCommitMessage;
         try
         {
+            // A stage or unstage still running, or its status refresh, decides what is staged; the
+            // checks below must see its result.
+            if (!_pendingStage.IsCompleted)
+            {
+                await _pendingStage;
+                AdoptCurrentStatus();
+            }
+
+            if (_status.Conflicted.Count > 0)
+            {
+                _notifications.Publish(NotificationSeverity.Info, CommitBlockedByConflictsText);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(MessageText) || (_status.Staged.Count == 0 && !IsAmend))
+            {
+                _notifications.Publish(NotificationSeverity.Warning, "Stage changes and enter a message before committing.");
+                return;
+            }
+
+            // Amending a commit that's already on its upstream (as of the last
+            // fetch) rewrites published history — pushing it afterwards needs a force push. An
+            // unpushed commit's amend doesn't touch anything else and needs no prompt.
+            if (IsAmend)
+            {
+                var upstream = _ctx.State.CurrentBranch?.UpstreamName;
+                if (upstream is not null && _status.AheadBy == 0)
+                {
+                    var headSha = _ctx.State.CurrentBranch?.TipCommitId?.ToString();
+                    var shortSha = headSha is { Length: >= 7 } ? headSha[..7] : headSha ?? "HEAD";
+                    try
+                    {
+                        if (!await _dialogs.ConfirmDestructiveAsync("Amend a pushed commit",
+                                $"Amend {shortSha}, which is already on {upstream}? This rewrites " +
+                                "published history; pushing it afterwards needs a force push.", "Amend"))
+                            return;
+                    }
+                    catch (Exception ex)
+                    {
+                        _notifications.Publish(NotificationSeverity.Error, ex.NotificationMessage("Commit"), ex.NotificationDetails());
+                        return;
+                    }
+                }
+            }
+
+            _commitRunning = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            // A proposal that arrives while the commit runs is meant for the next commit; only the
+            // one already pending now is spent by this commit.
+            var pendingAtStart = _ctx.State.PendingCommitMessage;
+
             var profile = _ctx.State.ActiveProfile;
             var name = profile?.GitUserName ?? "";
             var email = profile?.GitUserEmail ?? "";

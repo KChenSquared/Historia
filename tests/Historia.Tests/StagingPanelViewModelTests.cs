@@ -1316,6 +1316,39 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Commit_is_disabled_while_a_commit_waits_for_a_stage()
+    {
+        if (GitMissing) return;
+        var (repo, ctx, vm) = await ModifiedAsync();
+        vm.MessageText = "feat: after the stage";
+        var before = Head(repo);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holder = ctx.WithWriteLockAsync(async ct =>
+        {
+            entered.SetResult();
+            await release.Task.WaitAsync(ct);
+        }, label: "Index refresh");
+        await entered.Task;
+
+        var stage = vm.StageAllChangesCommand.ExecuteAsync(null);
+        var commit = vm.CommitAndPushCommand.ExecuteAsync(null);
+
+        Assert.False(vm.CommitCommand.CanExecute(null));
+        Assert.False(vm.CommitAndPushCommand.CanExecute(null));
+        Assert.Equal(before, Head(repo));
+
+        release.SetResult();
+        await holder;
+        await stage;
+        await commit;
+
+        Assert.NotEqual(before, Head(repo));
+        Assert.True(vm.CommitCommand.CanExecute(null));
+        Assert.True(vm.CommitAndPushCommand.CanExecute(null));
+    }
+
+    [Fact]
     public async Task Ctrl_enter_with_conflicts_says_why()
     {
         if (GitMissing) return;
