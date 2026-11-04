@@ -22,6 +22,8 @@ permissions:
 
 jobs:
   sync:
+    # A manual run from another branch would publish that branch's unmerged notes.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

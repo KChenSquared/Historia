@@ -110,6 +110,11 @@ def diff_name_status(before, after, cwd=None):
     return result.stdout
 
 
+def commit_exists(oid, cwd=None):
+    """True when `oid` names a commit in the local clone."""
+    return _run(["git", "cat-file", "-e", f"{oid}^{{commit}}"], cwd=cwd).returncode == 0
+
+
 def release_exists(gh, repo, tag):
     """True when a release (draft or published) exists for the tag; raises on other failures."""
     result = _run([gh, "release", "view", tag, "--repo", repo])
@@ -180,6 +185,17 @@ def main(argv=None):
     before = args.before.strip()
     after = args.after.strip()
     deleted = []
+
+    rewritten = (
+        not resync_all
+        and before
+        and after
+        and not is_zero_oid(before)
+        and not commit_exists(before)
+    )
+    if rewritten:
+        print(f"{before} is not in the clone (history rewritten?); resyncing every notes file")
+        resync_all = True
 
     if resync_all or (before and is_zero_oid(before)):
         tags = tracked_notes_tags()

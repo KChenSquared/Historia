@@ -124,7 +124,7 @@ class RepoTestCase(unittest.TestCase):
             func(path)
 
         os.chdir(self.original_cwd)
-        shutil.rmtree(self.root, onerror=make_writable)
+        shutil.rmtree(self.root, onexc=make_writable)
 
     def git(self, *args):
         result = subprocess.run(
@@ -258,6 +258,19 @@ class TestMainWithGhStub(RepoTestCase):
 
         self.assertEqual(code, 1)
         self.assertIn("v0.1.0: failed", err)
+
+    def test_unknown_before_resyncs_every_notes_file(self):
+        self.release_commit("v0.1.0")
+        self.release_commit("v0.2.0")
+        self.configure(releases=["v0.1.0", "v0.2.0"], generated="")
+        after = self.git("rev-parse", "HEAD")
+
+        code, out, _ = self.run_main("--before", "1" * 40, "--after", after)
+
+        self.assertEqual(code, 0)
+        self.assertIn("resyncing every notes file", out)
+        self.assertIn("v0.1.0: updated", out)
+        self.assertIn("v0.2.0: updated", out)
 
     def test_without_range_or_resync_does_nothing(self):
         self.release_commit("v0.1.0")

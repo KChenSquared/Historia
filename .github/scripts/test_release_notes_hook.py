@@ -48,7 +48,7 @@ class TestPrePushHook(unittest.TestCase):
             os.chmod(path, stat.S_IWRITE)
             func(path)
 
-        shutil.rmtree(self.root, onerror=make_writable)
+        shutil.rmtree(self.root, onexc=make_writable)
 
     def git(self, cwd, *args, check=True):
         result = subprocess.run(
