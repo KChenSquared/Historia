@@ -4,16 +4,16 @@ Only the Windows packages are supported. The MacOSX and Linux packages are exper
 
 ## Highlights
 
-- 
+-
 
 ## Changes
 
-- 
+-
 
 ## Fixes
 
-- 
+-
 
 ## Known issues
 
-- 
+-

@@ -5,8 +5,9 @@
 #
 # git feeds one line per updated ref on standard input:
 #   <local ref> <local object> <remote ref> <remote object>
-# Only the local object and the remote ref are used. The notes file is read from the pushed object (an annotated or lightweight tag peels to its
-# commit's tree), never from the working tree. Deleting a tag is always allowed.
+# Only the local object and the remote ref are used. The notes file is read from the pushed
+# object (an annotated or lightweight tag peels to its commit's tree), never from the working
+# tree. Deleting a tag is always allowed.
 set -eu
 
 failed=0

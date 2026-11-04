@@ -18,7 +18,7 @@ $ErrorActionPreference = 'Stop'
 function Invoke-Git {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
 
-    $output = & git @Arguments
+    $output = & git -C $RepoRoot @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "git $($Arguments -join ' ') exited with code $LASTEXITCODE"
     }
@@ -33,7 +33,7 @@ function Test-Git {
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & git @Arguments 2>$null | Out-Null
+        & git -C $RepoRoot @Arguments 2>$null | Out-Null
         return $LASTEXITCODE -eq 0
     }
     finally {
@@ -46,9 +46,8 @@ if ($Tag -notmatch '^v\d+\.\d+\.\d+([-+][0-9A-Za-z.+-]+)?$') {
 }
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
-Set-Location $RepoRoot
 
-$hooksPath = (& git config --get core.hooksPath)
+$hooksPath = (& git -C $RepoRoot config --get core.hooksPath)
 if ($hooksPath -ne '.githooks') {
     Write-Warning "core.hooksPath is not '.githooks', so the pre-push hook will not check the release notes. Enable it with: git config core.hooksPath .githooks"
 }
