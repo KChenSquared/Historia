@@ -367,6 +367,20 @@ public sealed class GraphContextMenuTests
     }
 
     [AvaloniaFact]
+    public void Merge_into_current_trims_a_long_current_branch_name()
+    {
+        var current = "feature/" + new string('x', BranchMenu.MenuNameMaxChars + 20);
+        var expected = $"Merge into {BranchMenu.TruncateBranchLabelForMenu(current)}";
+        var remoteOnly = GraphContextMenu.Build(Target(Refs(Deco(DecorationType.RemoteBranch, "feat", false, ["origin"])), current: current),
+            new RecordingActions());
+        var nested = GraphContextMenu.Build(Target(Refs(Deco(DecorationType.LocalBranch, "main", true, ["origin"])), current: current),
+            new RecordingActions());
+
+        Assert.Contains(expected, Headers(Children(Item(remoteOnly, "origin/feat"))));
+        Assert.Equal([expected, "Delete…"], Headers(Children(Item(Children(Item(nested, "main")), "origin/main"))));
+    }
+
+    [AvaloniaFact]
     public void Copy_submenu_copies_sha_short_sha_and_message()
     {
         var a = new RecordingActions();

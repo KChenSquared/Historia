@@ -225,7 +225,7 @@ internal static class GraphContextMenu
                 {
                     items.Add(MenuLeaf($"Checkout {shown} as a new branch", () => a.CheckoutTracking(r.Name, display)));
                     if (canMergeIntoCurrent)
-                        items.Add(MenuLeaf($"Merge into {t.CurrentBranch}", () => a.Merge(display, display)));
+                        items.Add(MergeIntoCurrentLeaf(display, t, a));
                     if (t.ConfiguredRemotes.Count > 0)
                         items.Add(MenuLeaf("Create pull request…", () => a.CreatePullRequest(remote, r.Name)));
                     items.Add(MenuLeaf("Delete…", () => a.DeleteRemote(remote, r.Name)));
@@ -244,13 +244,7 @@ internal static class GraphContextMenu
                 break;
         }
 
-        var submenu = new MenuItem
-        {
-            Header = r.Type == DecorationType.Tag ? $"{shown} (tag)" : shown,
-            ItemsSource = items,
-        };
-        if (display.Length > BranchMenu.MenuNameMaxChars)
-            ToolTip.SetTip(submenu, display);
+        var submenu = NamedSubmenu(r.Type == DecorationType.Tag ? $"{shown} (tag)" : shown, display, items);
         if (r.IsBranch)
         {
             submenu.SubmenuOpened += (_, e) =>
@@ -271,14 +265,20 @@ internal static class GraphContextMenu
         var remote = r.Remote!;
         var items = new List<Control>();
         if (canMergeIntoCurrent)
-            items.Add(MenuLeaf($"Merge into {t.CurrentBranch}", () => a.Merge(display, display)));
+            items.Add(MergeIntoCurrentLeaf(display, t, a));
         items.Add(MenuLeaf("Delete…", () => a.DeleteRemote(remote, r.Name)));
+        return NamedSubmenu(BranchMenu.TruncateBranchLabelForMenu(display), display, items);
+    }
 
-        var submenu = new MenuItem
-        {
-            Header = BranchMenu.TruncateBranchLabelForMenu(display),
-            ItemsSource = items,
-        };
+    /// <summary>Merges a remote branch into the current one; only built when HEAD is on a branch.</summary>
+    private static MenuItem MergeIntoCurrentLeaf(string display, GraphMenuTarget t, IGraphMenuActions a) =>
+        MenuLeaf($"Merge into {BranchMenu.TruncateBranchLabelForMenu(t.CurrentBranch!)}", () => a.Merge(display, display));
+
+    /// <summary>A ref's submenu under <paramref name="header"/>, with the full name as its tooltip
+    /// when the header had to trim it.</summary>
+    private static MenuItem NamedSubmenu(string header, string display, IEnumerable<Control> items)
+    {
+        var submenu = new MenuItem { Header = header, ItemsSource = items };
         if (display.Length > BranchMenu.MenuNameMaxChars)
             ToolTip.SetTip(submenu, display);
         return submenu;
