@@ -104,6 +104,7 @@ public sealed partial class StagingPanelViewModel
         // running from here, so both commit buttons stay disabled through the checks below.
         if (_committing) return;
         _committing = true;
+        _commitRunning = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         RefreshCommitState();
         try
         {
@@ -152,7 +153,6 @@ public sealed partial class StagingPanelViewModel
                 }
             }
 
-            _commitRunning = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             // A proposal that arrives while the commit runs is meant for the next commit; only the
             // one already pending now is spent by this commit.
             var pendingAtStart = _ctx.State.PendingCommitMessage;

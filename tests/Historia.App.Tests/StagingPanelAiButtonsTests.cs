@@ -876,6 +876,47 @@ public class StagingPanelAiButtonsTests : IDisposable
     }
 
     [AvaloniaFact]
+    public async Task Reply_during_the_amend_confirm_waits_for_the_commit()
+    {
+        await ActivateAsync();
+        await StageChangeAsync();
+        using (var repo = new LibGit2Sharp.Repository(_repoDir))
+        {
+            repo.Network.Remotes.Add("origin", _repoDir);
+            repo.Refs.Add($"refs/remotes/origin/{repo.Head.FriendlyName}", repo.Head.Tip.Id);
+            var head = repo.Head.CanonicalName;
+            repo.Branches.Update(repo.Head, b => b.Remote = "origin", b => b.UpstreamBranch = head);
+        }
+        await _context.State.RefreshAllAsync();
+        var panel = NewPanel();
+        panel.ViewModel.IsAmend = true;
+        panel.MessageInput.Text = "feat: amended";
+        panel.ViewModel.AuthorOverride = "Test <test@example.com>";
+        var gate = HoldReplies();
+        await StartWaitingAsync(panel);
+        var answer = new TaskCompletionSource<bool>();
+        _dialogs.ConfirmDestructiveAnswer = () => answer.Task;
+
+        var commit = panel.ViewModel.CommitCommand.ExecuteAsync(null);
+        await AiTestSupport.PumpUntil(() => _dialogs.ConfirmDestructiveCalls.Count == 1);
+        gate.SetResult(new CommitMessageResult("feat: stale reply", null, null));
+        await AiTestSupport.PumpUntil(() => !panel.ViewModel.IsGenerating);
+        Dispatcher.UIThread.RunJobs();
+
+        Assert.Single(_dialogs.ConfirmDestructiveCalls);
+        Assert.Equal("feat: amended", panel.MessageInput.Text);
+
+        answer.SetResult(true);
+        await commit;
+        await Settled(panel);
+
+        using (var repo = new LibGit2Sharp.Repository(_repoDir))
+            Assert.Equal("feat: amended", repo.Head.Tip.MessageShort);
+        Assert.Single(_dialogs.ConfirmDestructiveCalls);
+        Assert.Equal("", panel.MessageInput.Text);
+    }
+
+    [AvaloniaFact]
     public async Task HEAD_moving_while_the_replace_confirm_is_open_drops_the_reply()
     {
         await ActivateAsync();
