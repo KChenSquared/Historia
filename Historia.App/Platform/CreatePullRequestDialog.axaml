@@ -38,6 +38,10 @@
                     MinWidth="80"
                     Command="{Binding PushCommand}" />
         </Grid>
+        <TextBlock x:Name="PushingNote"
+                   Classes="note"
+                   Text="Pushing… Close cancels the push."
+                   IsVisible="{Binding IsPushing}" />
         <TextBlock Classes="field-label" Text="Target" />
         <ComboBox x:Name="TargetBox"
                   IsEditable="True"

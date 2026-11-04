@@ -97,7 +97,7 @@ public sealed class CreatePullRequestDialogTests
         Assert.False(open.IsEffectivelyEnabled);
         Assert.Equal("", dialog.FindControl<TextBox>("UrlBox")!.Text);
 
-        var note = dialog.GetVisualDescendants().OfType<TextBlock>().Single(t => t.Classes.Contains("note"));
+        var note = dialog.GetVisualDescendants().OfType<TextBlock>().Single(t => t.Classes.Contains("note") && t.Name != "PushingNote");
         Assert.True(note.IsVisible);
         Assert.Equal("Pull request links are built for GitHub remotes only.", note.Text);
     }
@@ -113,6 +113,25 @@ public sealed class CreatePullRequestDialogTests
         open.Command!.Execute(open.CommandParameter);
 
         Assert.Equal(["https://github.com/acme/widgets/compare/main...feature?expand=1"], launcher.Opened);
+    }
+
+    [AvaloniaFact]
+    public async Task Pushing_note_shows_while_the_push_runs()
+    {
+        var release = new TaskCompletionSource<bool>();
+        var request = Request() with { Push = (_, _, _) => release.Task };
+        var dialog = Open(request);
+        var note = dialog.FindControl<TextBlock>("PushingNote")!;
+        Assert.False(note.IsVisible);
+
+        var push = dialog.ViewModel.PushCommand.ExecuteAsync(null);
+        Dispatcher.UIThread.RunJobs();
+        Assert.True(note.IsVisible);
+
+        release.SetResult(false);
+        await push;
+        Dispatcher.UIThread.RunJobs();
+        Assert.False(note.IsVisible);
     }
 
     [AvaloniaFact]
