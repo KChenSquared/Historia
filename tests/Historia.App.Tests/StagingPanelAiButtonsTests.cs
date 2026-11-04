@@ -833,6 +833,137 @@ public class StagingPanelAiButtonsTests : IDisposable
         await Settled(panel);
     }
 
+    /// <summary>A pre-commit hook that waits until the test creates <c>.git/release</c>.</summary>
+    private string HoldCommits()
+    {
+        var hooks = System.IO.Path.Combine(_repoDir, ".git", "hooks");
+        Directory.CreateDirectory(hooks);
+        File.WriteAllText(System.IO.Path.Combine(hooks, "pre-commit"),
+            "#!/bin/sh\nwhile [ ! -f .git/release ]; do sleep 0.05; done\nexit 0\n");
+        return System.IO.Path.Combine(_repoDir, ".git", "release");
+    }
+
+    [AvaloniaFact]
+    public async Task Reply_during_a_commit_waits_for_it_and_is_dropped_when_it_lands()
+    {
+        await ActivateAsync();
+        await StageChangeAsync();
+        var release = HoldCommits();
+        var panel = NewPanel();
+        panel.MessageInput.Text = "feat: typed meanwhile";
+        panel.ViewModel.AuthorOverride = "Test <test@example.com>";
+        var gate = HoldReplies();
+        await StartWaitingAsync(panel);
+
+        var commit = panel.ViewModel.CommitCommand.ExecuteAsync(null);
+        await AiTestSupport.PumpUntil(() => panel.ViewModel.CommitCommand.IsRunning);
+        gate.SetResult(new CommitMessageResult("feat: stale reply", null, null));
+        await AiTestSupport.PumpUntil(() => !panel.ViewModel.IsGenerating);
+        Dispatcher.UIThread.RunJobs();
+
+        Assert.Empty(_dialogs.ConfirmDestructiveCalls);
+
+        File.WriteAllText(release, "");
+        await commit;
+        await Settled(panel);
+
+        using (var repo = new LibGit2Sharp.Repository(_repoDir))
+            Assert.Equal("feat: typed meanwhile", repo.Head.Tip.MessageShort);
+        Assert.Equal("", panel.MessageInput.Text);
+        Assert.Empty(_dialogs.ConfirmDestructiveCalls);
+        Assert.Contains(_notifications.Published, n =>
+            n.Severity == NotificationSeverity.Info && n.Message.StartsWith("AI message discarded; the repository changed", StringComparison.Ordinal));
+    }
+
+    [AvaloniaFact]
+    public async Task HEAD_moving_while_the_replace_confirm_is_open_drops_the_reply()
+    {
+        await ActivateAsync();
+        await StageChangeAsync();
+        var panel = NewPanel();
+        var gate = HoldReplies();
+        await StartWaitingAsync(panel);
+        panel.MessageInput.Text = "typed while waiting";
+        var answer = new TaskCompletionSource<bool>();
+        _dialogs.ConfirmDestructiveAnswer = () => answer.Task;
+
+        gate.SetResult(new CommitMessageResult("feat: stale reply", null, null));
+        await AiTestSupport.PumpUntil(() => _dialogs.ConfirmDestructiveCalls.Count == 1);
+        using (var repo = new LibGit2Sharp.Repository(_repoDir))
+        {
+            var sig = new LibGit2Sharp.Signature("Test", "test@example.com", DateTimeOffset.Now);
+            repo.Commit("committed elsewhere", sig, sig, new LibGit2Sharp.CommitOptions());
+        }
+        await _context.State.RefreshStatusAsync();
+        answer.SetResult(true);
+        await Settled(panel);
+
+        Assert.Equal("typed while waiting", panel.MessageInput.Text);
+        Assert.Contains(_notifications.Published, n =>
+            n.Severity == NotificationSeverity.Info && n.Message.StartsWith("AI message discarded; the repository changed", StringComparison.Ordinal));
+    }
+
+    [AvaloniaFact]
+    public async Task Stop_after_the_reply_landed_under_the_prompt_changes_nothing()
+    {
+        await ActivateAsync();
+        await StageChangeAsync();
+        var panel = NewPanel();
+        var gate = HoldReplies();
+        await StartWaitingAsync(panel);
+        var choice = new TaskCompletionSource<int>();
+        _dialogs.ChooseAnswer = () => choice.Task;
+
+        Click(panel.Wand);
+        await AiTestSupport.PumpUntil(() => _dialogs.ChooseCalls.Count == 1);
+        gate.SetResult(new CommitMessageResult("feat: landed under the prompt", null, null));
+        await AiTestSupport.PumpUntil(() => !panel.ViewModel.IsGenerating);
+        choice.SetResult(1);
+        await Settled(panel);
+
+        Assert.Equal("feat: landed under the prompt", panel.MessageInput.Text);
+        Assert.Equal(1, _generator.Calls);
+        Assert.False(_generator.LastToken.IsCancellationRequested);
+        Assert.DoesNotContain(_notifications.Published, n => n.Severity is NotificationSeverity.Info or NotificationSeverity.Warning);
+    }
+
+    [AvaloniaFact]
+    public async Task Send_after_the_reply_landed_under_the_prompt_starts_one_new_request()
+    {
+        await ActivateAsync();
+        await StageChangeAsync();
+        var panel = NewPanel();
+        var tokens = new List<CancellationToken>();
+        var first = new TaskCompletionSource<CommitMessageResult>();
+        var second = new TaskCompletionSource<CommitMessageResult>();
+        _generator.Behavior = ct =>
+        {
+            tokens.Add(ct);
+            return tokens.Count == 1 ? first.Task : second.Task;
+        };
+        await StartWaitingAsync(panel);
+        var choice = new TaskCompletionSource<int>();
+        _dialogs.ChooseAnswer = () => choice.Task;
+
+        Click(panel.Wand);
+        await AiTestSupport.PumpUntil(() => _dialogs.ChooseCalls.Count == 1);
+        first.SetResult(new CommitMessageResult("feat: first", null, null));
+        await AiTestSupport.PumpUntil(() => !panel.ViewModel.IsGenerating);
+        choice.SetResult(0);
+        await AiTestSupport.PumpUntil(() => tokens.Count == 2);
+
+        Assert.False(tokens[0].IsCancellationRequested);
+        Assert.False(tokens[1].IsCancellationRequested);
+        Assert.Equal("feat: first", panel.MessageInput.Text);
+
+        second.SetResult(new CommitMessageResult("feat: second", null, null));
+        await Settled(panel);
+
+        Assert.Equal(2, _generator.Calls);
+        Assert.Equal("feat: second", panel.MessageInput.Text);
+        Assert.Single(_dialogs.ConfirmDestructiveCalls);
+    }
+
     [AvaloniaFact]
     public async Task Dispose_unsubscribes_from_profile_changes()
     {

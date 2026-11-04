@@ -4,6 +4,9 @@ public sealed partial class StagingPanelViewModel
 {
     private readonly ICommitDraftStore _drafts;
     private bool _committing;
+    // Set while a commit runs, so an AI reply that lands meanwhile waits for its outcome.
+    private TaskCompletionSource? _commitRunning;
+    private int _commitsCreated;
     private string? _offered;
     private string? _agentNoteText;
 
@@ -145,6 +148,7 @@ public sealed partial class StagingPanelViewModel
         }
 
         _committing = true;
+        _commitRunning = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         RefreshCommitState();
         // A proposal that arrives while the commit runs is meant for the next commit; only the
         // one already pending now is spent by this commit.
@@ -186,6 +190,7 @@ public sealed partial class StagingPanelViewModel
                 AmendPreviousCommit = IsAmend,
                 Sign = sign,
             }, _ctx.Lifetime);
+            _commitsCreated++;
             MessageText = "";
             IsAmend = false;
             _drafts.Set(_ctx.Id, null);
@@ -217,6 +222,8 @@ public sealed partial class StagingPanelViewModel
                 RefreshCommitState();
             if (!IsDisposed && _ctx.State.PendingCommitMessage is { } pending)
                 ApplyProposal(pending);
+            _commitRunning?.TrySetResult();
+            _commitRunning = null;
         }
     }
 

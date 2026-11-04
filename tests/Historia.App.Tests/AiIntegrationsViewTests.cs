@@ -12,6 +12,12 @@ internal static class AiTestSupport
         public List<(string Title, string Effect, string ConfirmLabel)> ConfirmDestructiveCalls { get; } = [];
         public List<(string Title, string Message, IReadOnlyList<string> Options, int DefaultIndex)> ChooseCalls { get; } = [];
 
+        /// <summary>When set, answers ConfirmDestructiveAsync instead of ConfirmDestructiveResult, so a test can hold it open.</summary>
+        public Func<Task<bool>>? ConfirmDestructiveAnswer { get; set; }
+
+        /// <summary>When set, answers ChooseAsync instead of ChooseResult, so a test can hold it open.</summary>
+        public Func<Task<int>>? ChooseAnswer { get; set; }
+
         public Task<string?> PickFolderAsync(string title, string? initialDirectory = null) => Task.FromResult<string?>(null);
         public Task<string?> PickFileAsync(string title, string filter, string? initialDirectory = null) => Task.FromResult<string?>(null);
 
@@ -25,14 +31,14 @@ internal static class AiTestSupport
         public Task<bool> ConfirmDestructiveAsync(string title, string effect, string confirmLabel)
         {
             ConfirmDestructiveCalls.Add((title, effect, confirmLabel));
-            return Task.FromResult(ConfirmDestructiveResult);
+            return ConfirmDestructiveAnswer?.Invoke() ?? Task.FromResult(ConfirmDestructiveResult);
         }
 
         public Task<int> ChooseAsync(string title, string message, IReadOnlyList<string> options, int defaultIndex = 0,
             int destructiveIndex = -1, DialogIcon icon = DialogIcon.None)
         {
             ChooseCalls.Add((title, message, options, defaultIndex));
-            return Task.FromResult(ChooseResult);
+            return ChooseAnswer?.Invoke() ?? Task.FromResult(ChooseResult);
         }
 
         public Task ShowMessageAsync(string title, string message) => Task.CompletedTask;

@@ -348,18 +348,20 @@ public sealed partial class StagingPanelViewModel
     {
         var cts = CancellationTokenSource.CreateLinkedTokenSource(_ctx.Lifetime);
         var headAtSend = _ctx.State.Repository.HeadCommitId;
+        var commitsAtSend = _commitsCreated;
         CommitMessageResult? reply = null;
 
         _generateCts = cts;
-        _generateStarted = Stopwatch.GetTimestamp();
-        _generatingLabel = _aiProfiles!.DisplayLabel(profile);
-        UpdateGeneratingTip();
-        _generatingTimer = _ui.CreateTimer(GeneratingTipInterval, UpdateGeneratingTip, UiPriority.Normal);
-        _generatingTimer.Start();
-        IsGenerating = true;
-        RefreshAiButtons();
         try
         {
+            _generateStarted = Stopwatch.GetTimestamp();
+            _generatingLabel = _aiProfiles!.DisplayLabel(profile);
+            UpdateGeneratingTip();
+            _generatingTimer = _ui.CreateTimer(GeneratingTipInterval, UpdateGeneratingTip, UiPriority.Normal);
+            _generatingTimer.Start();
+            IsGenerating = true;
+            RefreshAiButtons();
+
             var result = await _aiGenerator!.GenerateAsync(_ctx, IsAmend, cts.Token);
             if (!IsDisposed && !cts.IsCancellationRequested)
                 reply = result;
@@ -388,7 +390,7 @@ public sealed partial class StagingPanelViewModel
         }
 
         if (reply is not null && !IsDisposed)
-            await ApplyReplyAsync(profile, reply, headAtSend);
+            await ApplyReplyAsync(profile, reply, headAtSend, commitsAtSend);
     }
 
     private void StopGeneratingTimer()
@@ -401,32 +403,44 @@ public sealed partial class StagingPanelViewModel
     /// <summary>Puts a reply in the box. It runs after the request is cleared, so a click on the
     /// wand while a confirmation is open starts a fresh request. A reply for changes that are
     /// already committed is dropped, an empty box is filled, and text in the box is replaced only
-    /// after the user confirms against what the box holds now.</summary>
-    private async Task ApplyReplyAsync(AiServiceProfile profile, CommitMessageResult reply, GitObjectId? headAtSend)
+    /// after the user confirms against what the box holds now. A commit running when the reply
+    /// arrives is waited for first, and the checks run again after the confirmation.</summary>
+    private async Task ApplyReplyAsync(AiServiceProfile profile, CommitMessageResult reply, GitObjectId? headAtSend, int commitsAtSend)
     {
-        if (_ctx.State.Repository.HeadCommitId != headAtSend)
-        {
-            _notifications.Publish(NotificationSeverity.Info,
-                "AI message discarded; the repository changed while it was being written.");
+        if (_commitRunning is { } commit)
+            await commit.Task;
+        if (IsDisposed || DropIfStale(headAtSend, commitsAtSend))
             return;
-        }
 
         var current = MessageText ?? "";
-        if (!string.IsNullOrWhiteSpace(current)
-            && !await ConfirmReplaceDraftAsync("an AI-generated message", current.Length))
+        if (!string.IsNullOrWhiteSpace(current))
         {
-            if (!IsDisposed)
+            var replace = await ConfirmReplaceDraftAsync("an AI-generated message", current.Length);
+            if (IsDisposed || DropIfStale(headAtSend, commitsAtSend))
+                return;
+            if (!replace)
+            {
                 _notifications.Publish(NotificationSeverity.Info, "AI message discarded; your text was kept.");
-            return;
+                return;
+            }
         }
-
-        if (IsDisposed)
-            return;
 
         MessageText = reply.Message;
         var label = _aiProfiles!.DisplayLabel(_aiProfiles.ActiveProfile ?? profile);
         if (reply.ReplacedModel is not null && reply.NewModel is not null)
             _notifications.Publish(NotificationSeverity.Warning,
                 $"'{reply.ReplacedModel}' is no longer available. '{label}' now uses '{reply.NewModel}'.");
+    }
+
+    /// <summary>True, after telling the user, when a commit was made here or HEAD moved since the
+    /// request was sent: the reply then describes changes that are already committed.</summary>
+    private bool DropIfStale(GitObjectId? headAtSend, int commitsAtSend)
+    {
+        if (_commitsCreated == commitsAtSend && _ctx.State.Repository.HeadCommitId == headAtSend)
+            return false;
+
+        _notifications.Publish(NotificationSeverity.Info,
+            "AI message discarded; the repository changed while it was being written.");
+        return true;
     }
 }
