@@ -26,6 +26,31 @@ public sealed class WindowPlacementWiringTests : IDisposable
         Assert.True(window.IsLoaded);
     }
 
+    // Placement saves wait for the dispatcher to settle, so drain it before flushing the writer.
+    private static async Task SettleAsync(AtomicFileWriter writer)
+    {
+        Dispatcher.UIThread.RunJobs();
+        await writer.FlushAsync();
+    }
+
+    private static List<PixelArea> WorkAreas(Window window)
+    {
+        Assert.NotNull(window.Screens);
+        return window.Screens.All
+            .Select(s => new PixelArea(s.WorkingArea.X, s.WorkingArea.Y, s.WorkingArea.Width, s.WorkingArea.Height))
+            .ToList();
+    }
+
+    private static PixelArea PixelBounds(Window window)
+    {
+        var scaling = window.RenderScaling > 0 ? window.RenderScaling : 1;
+        return new PixelArea(
+            window.Position.X,
+            window.Position.Y,
+            (int)Math.Round(window.Bounds.Width * scaling),
+            (int)Math.Round(window.Bounds.Height * scaling));
+    }
+
     [AvaloniaFact]
     public async Task MinimizedWindow_DoesNotPersistPlacement()
     {
@@ -36,12 +61,12 @@ public sealed class WindowPlacementWiringTests : IDisposable
         try
         {
             window.Position = new PixelPoint(220, 140);
-            await writer.FlushAsync();
+            await SettleAsync(writer);
             var before = File.ReadAllText(AppPaths.WindowPlacementFile);
 
             window.WindowState = WindowState.Minimized;
             window.Position = new PixelPoint(-32000, -32000);
-            await writer.FlushAsync();
+            await SettleAsync(writer);
 
             Assert.Equal(before, File.ReadAllText(AppPaths.WindowPlacementFile));
             Assert.Equal(220, ReadSaved().Left);
@@ -62,9 +87,12 @@ public sealed class WindowPlacementWiringTests : IDisposable
         try
         {
             window.Position = new PixelPoint(220, 140);
-            window.WindowState = WindowState.Maximized;
+            await SettleAsync(writer);
+
+            // Win32 order: the window moves to the monitor corner before WindowState changes.
             window.Position = new PixelPoint(-8, -8);
-            await writer.FlushAsync();
+            window.WindowState = WindowState.Maximized;
+            await SettleAsync(writer);
 
             var saved = ReadSaved();
             Assert.True(saved.Maximized);
@@ -84,16 +112,11 @@ public sealed class WindowPlacementWiringTests : IDisposable
             """{ "left": -32000, "top": -32000, "width": 1536, "height": 792, "maximized": false }""");
 
         var window = new MainWindow();
+        Assert.Equal(WindowStartupLocation.CenterScreen, window.WindowStartupLocation);
         ShowLoaded(window);
         try
         {
-            var screens = window.Screens;
-            Assert.NotNull(screens);
-            var workAreas = screens.All
-                .Select(s => new PixelArea(s.WorkingArea.X, s.WorkingArea.Y, s.WorkingArea.Width, s.WorkingArea.Height))
-                .ToList();
-            Assert.True(WindowPlacementCalculator.IsVisible(
-                new PixelArea(window.Position.X, window.Position.Y, 600, 400), workAreas));
+            Assert.True(WindowPlacementCalculator.IsVisible(PixelBounds(window), WorkAreas(window)));
         }
         finally
         {
@@ -110,12 +133,35 @@ public sealed class WindowPlacementWiringTests : IDisposable
         var window = new MainWindow();
         try
         {
-            Assert.NotNull(window.Screens);
-            var workAreas = window.Screens.All
-                .Select(s => new PixelArea(s.WorkingArea.X, s.WorkingArea.Y, s.WorkingArea.Width, s.WorkingArea.Height))
-                .ToList();
             Assert.True(WindowPlacementCalculator.IsVisible(
-                new PixelArea(window.Position.X, window.Position.Y, 600, 400), workAreas));
+                new PixelArea(window.Position.X, window.Position.Y, 600, 400), WorkAreas(window)));
+        }
+        finally
+        {
+            window.Close();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task MaximizedOffScreenPlacementFile_SavesCorrectedNormalRectangle()
+    {
+        File.WriteAllText(AppPaths.WindowPlacementFile,
+            """{ "left": 9000, "top": 400, "width": 1000, "height": 700, "maximized": true }""");
+
+        var window = new MainWindow();
+        var writer = new AtomicFileWriter(AppPaths.WindowPlacementFile);
+        window.AttachPlacementWriter(writer);
+        ShowLoaded(window);
+        try
+        {
+            Assert.Equal(WindowState.Maximized, window.WindowState);
+            window.Position = new PixelPoint(-8, -8);
+            await SettleAsync(writer);
+
+            var saved = ReadSaved();
+            Assert.True(saved.Maximized);
+            Assert.True(WindowPlacementCalculator.IsVisible(
+                new PixelArea((int)saved.Left, (int)saved.Top, 600, 400), WorkAreas(window)));
         }
         finally
         {

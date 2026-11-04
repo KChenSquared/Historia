@@ -348,8 +348,22 @@ public partial class MainWindow : Window
             QueuePlacementSave();
     }
 
+    private bool _placementSavePosted;
+
+    // Win32 moves and resizes the window to its maximized or minimized rectangle before the
+    // WindowState property changes, so the save waits until the dispatcher has drained those
+    // events and reads the settled state.
     private void QueuePlacementSave()
     {
+        if (_placementSavePosted || _placementWriter is null || !IsLoaded)
+            return;
+        _placementSavePosted = true;
+        Dispatcher.UIThread.Post(SavePlacement, DispatcherPriority.Background);
+    }
+
+    private void SavePlacement()
+    {
+        _placementSavePosted = false;
         if (_placementWriter is null || !IsLoaded || WindowState == WindowState.Minimized)
             return;
 
@@ -397,12 +411,12 @@ public partial class MainWindow : Window
         Position = new PixelPoint((int)p.Left, (int)p.Top);
         Width = Math.Clamp(p.Width, 900, 10000);
         Height = Math.Clamp(p.Height, 600, 10000);
-        _lastNormal = new WindowPlacement { Left = Position.X, Top = Position.Y, Width = Width, Height = Height };
 
         // Correct before the window is shown so it never appears on a disconnected screen. When the
         // screens cannot be queried yet, fall back to centring; the Opened backstop runs the same check.
         if (!EnsureOnScreen())
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        _lastNormal = new WindowPlacement { Left = Position.X, Top = Position.Y, Width = Width, Height = Height };
 
         if (p.Maximized)
             WindowState = WindowState.Maximized;
@@ -420,12 +434,14 @@ public partial class MainWindow : Window
             return true;
 
         var workAreas = new PixelArea[screens.All.Count];
+        var primaryIndex = 0;
         for (var i = 0; i < workAreas.Length; i++)
         {
             var wa = screens.All[i].WorkingArea;
             workAreas[i] = new PixelArea(wa.X, wa.Y, wa.Width, wa.Height);
+            if (screens.All[i].IsPrimary)
+                primaryIndex = i;
         }
-        var primaryIndex = Math.Max(0, screens.All.ToList().IndexOf(screens.Primary!));
 
         // A minimized or not-yet-restored window reports a sentinel position; its last normal
         // rectangle is the better description of where it belongs.
