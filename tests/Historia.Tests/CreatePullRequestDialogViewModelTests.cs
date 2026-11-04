@@ -251,6 +251,45 @@ public class CreatePullRequestDialogViewModelTests
     }
 
     [Fact]
+    public async Task Disposing_cancels_a_running_push()
+    {
+        var token = new TaskCompletionSource<CancellationToken>();
+        var request = new CreatePullRequestRequest(
+            [Local("topic"), Remote("origin", "main")],
+            [RemoteOf("origin")],
+            "local.topic",
+            async (_, _, ct) =>
+            {
+                token.SetResult(ct);
+                await Task.Delay(Timeout.Infinite, ct);
+                return true;
+            },
+            () => []);
+        var vm = new CreatePullRequestDialogViewModel(request, new FakeLauncher());
+
+        var push = vm.PushCommand.ExecuteAsync(null);
+        var ct = await token.Task;
+        Assert.True(vm.IsPushing);
+        vm.Dispose();
+        await push;
+
+        Assert.True(ct.IsCancellationRequested);
+        Assert.False(vm.IsPushing);
+    }
+
+    [Fact]
+    public void Exact_case_match_wins_over_a_case_insensitive_one()
+    {
+        var branches = new List<BranchInfo> { Local("Topic"), Local("topic"), Remote("origin", "main") };
+
+        var (lower, _, _) = Create(branches, initialSource: "local.topic");
+        var (upper, _, _) = Create(branches, initialSource: "local.Topic");
+
+        Assert.Equal("local.topic", lower.SelectedSource);
+        Assert.Equal("local.Topic", upper.SelectedSource);
+    }
+
+    [Fact]
     public async Task Push_goes_to_the_first_remote_when_there_is_no_origin_or_upstream()
     {
         var (vm, _, pushes) = Create(

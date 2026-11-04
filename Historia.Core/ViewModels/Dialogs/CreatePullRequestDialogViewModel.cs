@@ -239,9 +239,12 @@ public sealed partial class CreatePullRequestDialogViewModel : ViewModelBase
     private static Entry? Find(IReadOnlyList<Entry> entries, string? text)
     {
         var trimmed = text?.Trim();
-        return string.IsNullOrEmpty(trimmed)
-            ? null
-            : entries.FirstOrDefault(e => string.Equals(e.Display, trimmed, StringComparison.OrdinalIgnoreCase));
+        if (string.IsNullOrEmpty(trimmed))
+            return null;
+
+        // Two refs can differ only in case, so an exact match wins over a case-insensitive one.
+        return entries.FirstOrDefault(e => string.Equals(e.Display, trimmed, StringComparison.Ordinal))
+            ?? entries.FirstOrDefault(e => string.Equals(e.Display, trimmed, StringComparison.OrdinalIgnoreCase));
     }
 
     private void UpdateSourceFilter() =>
@@ -279,7 +282,7 @@ public sealed partial class CreatePullRequestDialogViewModel : ViewModelBase
         if (source.IsLocal)
         {
             var upstream = UpstreamOf(source.Branch, _request.Remotes);
-            var remote = upstream?.Remote ?? ResolvePushRemote(source.Branch, _request.Remotes);
+            var remote = ResolvePushRemote(source.Branch, _request.Remotes);
             if (remote is null)
                 return (null, "This repository has no remotes.");
 
