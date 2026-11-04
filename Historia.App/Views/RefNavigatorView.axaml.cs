@@ -194,10 +194,9 @@ public sealed partial class RefNavigatorView : UserControl, IDisposable
         // it — resolved via BranchInfo.RemoteName (reliable even when the alias itself contains
         // a slash), never by splitting Name/UpstreamName on '/'.
         string? counterpartRef = null, remoteAlias = null;
-        if (!isRemote && b.UpstreamName is { } upstream)
+        if (!isRemote)
         {
-            counterpartRef = upstream;
-            remoteAlias = ctx.State.Branches.FirstOrDefault(x => x.IsRemote && x.Name == upstream)?.RemoteName;
+            (counterpartRef, remoteAlias) = BranchMenu.UpstreamCounterpart(b.UpstreamName, ctx.State.Branches);
         }
         else if (isRemote)
         {

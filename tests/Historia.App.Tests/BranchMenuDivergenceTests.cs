@@ -344,6 +344,29 @@ public sealed class BranchMenuDivergenceTests
         Assert.Null(gw.LastArgs);
     }
 
+    private static BranchInfo Branch(string name, bool isRemote, string? remoteName = null) =>
+        new() { Name = name, CanonicalName = name, IsRemote = isRemote, IsCurrent = false, RemoteName = remoteName };
+
+    [Fact]
+    public void Upstream_counterpart_resolves_remote_local_and_gone_upstreams()
+    {
+        BranchInfo[] branches = [Branch("main", isRemote: false), Branch("topic", isRemote: false), Branch("team/infra/main", isRemote: true, remoteName: "team/infra")];
+
+        Assert.Equal(("team/infra/main", "team/infra"), BranchMenu.UpstreamCounterpart("team/infra/main", branches));
+        Assert.Equal((null, null), BranchMenu.UpstreamCounterpart("main", branches));
+        Assert.Equal(("origin/topic", null), BranchMenu.UpstreamCounterpart("origin/topic", branches));
+        Assert.Equal((null, null), BranchMenu.UpstreamCounterpart(null, branches));
+    }
+
+    [Fact]
+    public async Task Cancelled_lookup_shows_nothing()
+    {
+        var gw = new StubGateway { Throws = new OperationCanceledException() };
+        var t = LocalTarget("feature", currentBranch: "main", counterpart: "origin/feature", remoteAlias: "origin");
+
+        Assert.Empty(await BranchMenu.BuildDivergenceItemsAsync(t, gw, new RepoActionBus(), CancellationToken.None));
+    }
+
     [Fact]
     public async Task Level_branch_shows_nothing()
     {

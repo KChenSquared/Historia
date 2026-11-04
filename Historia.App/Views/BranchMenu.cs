@@ -29,6 +29,30 @@ internal static class BranchMenu
     /// wider than the screen.</summary>
     internal const int MenuNameMaxChars = RefMenuItemViewModel.NameMaxChars;
 
+    /// <summary>The counterpart and owning remote alias for a local branch whose upstream is
+    /// <paramref name="upstream"/>. An upstream that is a remote-tracking branch gives that branch
+    /// and its remote; one that is a local branch (<c>branch.&lt;name&gt;.remote = .</c>) has no
+    /// remote side, so there is no counterpart; any other upstream is gone or not fetched, so the
+    /// counterpart is kept with no alias.</summary>
+    internal static (string? CounterpartRef, string? RemoteAlias) UpstreamCounterpart(
+        string? upstream, IEnumerable<BranchInfo> branches)
+    {
+        if (upstream is null)
+            return (null, null);
+        string? remoteAlias = null;
+        var isLocal = false;
+        foreach (var b in branches)
+        {
+            if (b.Name != upstream)
+                continue;
+            if (b.IsRemote)
+                remoteAlias = b.RemoteName;
+            else
+                isLocal = true;
+        }
+        return remoteAlias is null && isLocal ? (null, null) : (upstream, remoteAlias);
+    }
+
     /// <summary>Ellipsis-trims a branch/tag name to <see cref="MenuNameMaxChars"/> for display in
     /// a menu item — e.g. "Checkout origin/feature/very-long-name as a new branch" — without
     /// affecting the untrimmed name callers still use for the actual git operation.</summary>
@@ -62,6 +86,7 @@ internal static class BranchMenu
 
         AheadBehind? ab;
         try { ab = await gateway.GetDivergenceAsync(local, remote, ct); }
+        catch (OperationCanceledException) { return []; }
         catch { return [Unavailable(remote)]; }
         if (ab is not { } div)
             return [Unavailable(remote)];

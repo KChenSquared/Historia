@@ -164,11 +164,8 @@ public sealed partial class CommitGraphControl : IGraphMenuActions
         if (branch.Type == DecorationType.LocalBranch)
         {
             var local = _state?.Branches.FirstOrDefault(b => !b.IsRemote && b.Name == name);
-            if (local?.UpstreamName is { } upstream)
-            {
-                counterpartRef = upstream;
-                remoteAlias = _state?.Branches.FirstOrDefault(b => b.IsRemote && b.Name == upstream)?.RemoteName;
-            }
+            if (local is not null && _state is { } state)
+                (counterpartRef, remoteAlias) = BranchMenu.UpstreamCounterpart(local.UpstreamName, state.Branches);
         }
         else if (branch.Remote is { } remote)
         {
