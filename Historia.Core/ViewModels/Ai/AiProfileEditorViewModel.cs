@@ -72,7 +72,8 @@ public sealed partial class AiProfileEditorViewModel : ViewModelBase
 
     public IReadOnlyList<string> ReasoningEffortLevels => AiReasoningEffort.Levels;
 
-    public IReadOnlyList<string> DiffLimitLabels { get; } = ["5,000 tokens", "10,000 tokens", "25,000 tokens", "50,000 tokens", "100,000 tokens", "Uncapped"];
+    public IReadOnlyList<string> DiffLimitLabels { get; } =
+        [.. AiDiffCap.TokenSteps.Select(t => t == 0 ? "Uncapped" : $"{t.ToString("N0", CultureInfo.InvariantCulture)} tokens")];
 
     [ObservableProperty]
     public partial string Name { get; set; }

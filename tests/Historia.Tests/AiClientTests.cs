@@ -450,6 +450,21 @@ public class AiClientTests
         Assert.Empty(delays);
     }
 
+    [Fact]
+    public async Task A_503_with_a_long_retry_after_fails_as_a_server_error()
+    {
+        var delays = new List<TimeSpan>();
+        var h = new FakeHandler()
+            .Enqueue(HttpStatusCode.ServiceUnavailable, "overloaded", r => r.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(60)));
+
+        var ex = await Assert.ThrowsAsync<AiException>(() => new OpenAiCompatibleClient(Http(h, delays: delays)).CompleteAsync(Req(Server), default));
+
+        Assert.Equal(AiErrorKind.Server, ex.Kind);
+        Assert.DoesNotContain("rate limit", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(h.Requests);
+        Assert.Empty(delays);
+    }
+
     private static string GeminiQuotaBody(string retryDelay = "48s", string quotaValue = "\"250000\"") => $$"""
         {
           "error": {

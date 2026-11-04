@@ -97,7 +97,7 @@ public sealed class AiHttp
             {
                 var wait = retryAfter ?? TimeSpan.FromSeconds(1 << attempt);
                 if (wait > MaxRetryAfter)
-                    throw Fail(AiErrorKind.RateLimited, status, reason, body, secrets, retryAfter);
+                    throw Fail(Classify(status, body), status, reason, body, secrets, retryAfter);
 
                 await WaitAsync(wait, overall.Token, ct, status, reason, body, secrets, retryAfter).ConfigureAwait(false);
                 continue;
