@@ -25,8 +25,12 @@ internal sealed class PullRequestFlow(
     /// when the push fails, is cancelled, or is refused because the repository is busy.</summary>
     public async Task PushAndOpenAsync(RepositoryContext ctx, string localBranch)
     {
-        var branch = FindLocal(ctx, localBranch);
-        if (branch is null || CreatePullRequestDialogViewModel.ResolvePushRemote(branch, ctx.State.Remotes) is not { } remote)
+        if (FindLocal(ctx, localBranch) is not { } branch)
+        {
+            notifications.Publish(NotificationSeverity.Warning, $"Branch '{localBranch}' was not found.");
+            return;
+        }
+        if (CreatePullRequestDialogViewModel.ResolvePushRemote(branch, ctx.State.Remotes) is not { } remote)
         {
             notifications.Publish(NotificationSeverity.Warning, "This repository has no remotes configured.");
             return;
@@ -62,14 +66,18 @@ internal sealed class PullRequestFlow(
             branch.UpstreamName is not null);
 
         var pushed = false;
-        using var cancelOnClose = ct.Register(() => runner.Cancel(ctx));
         try
         {
-            await runner.RunExclusiveAsync(ctx, "Push", async (progress, token) =>
+            // Registered only around the push: once it ends, Cancel would stop whichever
+            // operation holds the repository's slot next.
+            using (ct.Register(() => runner.Cancel(ctx)))
             {
-                await ctx.Gateway.PushAsync(remote, spec, progress, token);
-                pushed = true;
-            });
+                await runner.RunExclusiveAsync(ctx, "Push", async (progress, token) =>
+                {
+                    await ctx.Gateway.PushAsync(remote, spec, progress, token);
+                    pushed = true;
+                });
+            }
         }
         catch (OperationCanceledException)
         {
@@ -91,6 +99,11 @@ internal sealed class PullRequestFlow(
         catch (OperationCanceledException)
         {
             // The repository closed meanwhile; there is nothing left to refresh.
+        }
+        catch (Exception ex)
+        {
+            // The push itself happened, so the dialog still opens on the branches as they were.
+            notifications.Publish(NotificationSeverity.Error, ex.NotificationMessage("Refresh"), ex.NotificationDetails());
         }
         notifications.Publish(NotificationSeverity.Success, $"Pushed {branchName} to {remote}.");
         return true;

@@ -30,9 +30,11 @@ public sealed class GraphPullRequestMenuTests
         Run,
         Busy,
         Fail,
+        Hold,
     }
 
-    /// <summary>Runs the delegate (or, like a busy repository, skips it, or fails) and records the label.</summary>
+    /// <summary>Runs the delegate (or, like a busy repository, skips it, or fails, or holds until
+    /// cancelled and then returns like a cancelled run) and records the label.</summary>
     private sealed class FakeRunner : IRepoNetworkActionRunner
     {
         public RunMode Mode { get; set; }
@@ -42,8 +44,14 @@ public sealed class GraphPullRequestMenuTests
         public event EventHandler<RepoNetworkProgress>? ProgressChanged;
 #pragma warning restore CS0067
 
+        private readonly TaskCompletionSource _cancelled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public int CancelCount { get; private set; }
+
         public void Cancel(RepositoryContext repo)
         {
+            CancelCount++;
+            _cancelled.TrySetResult();
         }
 
         public GitProgress? CurrentProgress(RepositoryContext repo) => null;
@@ -58,6 +66,9 @@ public sealed class GraphPullRequestMenuTests
                     return;
                 case RunMode.Fail:
                     throw new InvalidOperationException("The push failed.");
+                case RunMode.Hold:
+                    await _cancelled.Task;
+                    return;
                 default:
                     await operation(new Progress<GitProgress>(), CancellationToken.None);
                     break;
@@ -77,14 +88,14 @@ public sealed class GraphPullRequestMenuTests
     }
 
     /// <summary>Two commits on <c>main</c>; the tip also carries <c>feat</c>. Remotes <c>origin</c> and
-    /// <c>fork</c> are empty bare repositories; <c>withForkUpstream</c> makes <c>feat</c> track <c>fork/feat</c>.</summary>
+    /// <c>fork</c> are empty bare repositories; <c>withForkUpstream</c> makes <c>feat</c> track <c>fork/&lt;forkBranch&gt;</c>.</summary>
     private sealed class RepoFixture : IDisposable
     {
         public string Path { get; }
         public string Origin { get; }
         public string Fork { get; }
 
-        public RepoFixture(bool withForkUpstream)
+        public RepoFixture(bool withForkUpstream, string forkBranch)
         {
             Path = TestScratch.NewDirectory("historia-prmenu-");
             Origin = TestScratch.NewDirectory("historia-prmenu-origin-");
@@ -107,9 +118,9 @@ public sealed class GraphPullRequestMenuTests
             Git("update-ref", "refs/remotes/origin/main", "HEAD");
             if (withForkUpstream)
             {
-                Git("update-ref", "refs/remotes/fork/feat", "HEAD~1");
+                Git("update-ref", $"refs/remotes/fork/{forkBranch}", "HEAD~1");
                 Git("config", "branch.feat.remote", "fork");
-                Git("config", "branch.feat.merge", "refs/heads/feat");
+                Git("config", "branch.feat.merge", $"refs/heads/{forkBranch}");
             }
         }
 
@@ -189,9 +200,9 @@ public sealed class GraphPullRequestMenuTests
         }
     }
 
-    private static Setup CreateGraph(bool withForkUpstream = false, RunMode mode = RunMode.Run)
+    private static Setup CreateGraph(bool withForkUpstream = false, RunMode mode = RunMode.Run, string forkBranch = "feat")
     {
-        var repo = new RepoFixture(withForkUpstream);
+        var repo = new RepoFixture(withForkUpstream, forkBranch);
         var runner = new FakeRunner { Mode = mode };
         var dialogs = new FakeDialogs();
         var sp = CreateServices(runner, dialogs);
@@ -273,6 +284,36 @@ public sealed class GraphPullRequestMenuTests
         Assert.True(s.Repo.BareHasBranch(s.Repo.Origin, "feat"));
         Assert.False(s.Repo.BareHasBranch(s.Repo.Fork, "feat"));
         Assert.Equal("origin/feat", s.Context.State.Branches.Single(b => !b.IsRemote && b.Name == "feat").UpstreamName);
+    }
+
+    [AvaloniaFact]
+    public async Task Push_and_create_uses_the_upstream_branch_name()
+    {
+        using var s = CreateGraph(withForkUpstream: true, forkBranch: "feature-x");
+
+        Click(FeatItem(s, "Push and create pull request…"));
+        await PumpUntilAsync(() => s.Dialogs.Requests.Count > 0, "the dialog");
+
+        Assert.True(s.Repo.BareHasBranch(s.Repo.Fork, "feature-x"));
+        Assert.False(s.Repo.BareHasBranch(s.Repo.Fork, "feat"));
+        Assert.Equal("fork/feature-x", s.Context.State.Branches.Single(b => !b.IsRemote && b.Name == "feat").UpstreamName);
+    }
+
+    [AvaloniaFact]
+    public async Task Cancelling_a_dialog_push_cancels_the_run()
+    {
+        using var s = CreateGraph(mode: RunMode.Hold);
+        await ((IGraphMenuActions)s.Graph).CreatePullRequest("origin", "main");
+        await PumpUntilAsync(() => s.Dialogs.Requests.Count > 0, "the dialog");
+
+        using var closing = new CancellationTokenSource();
+        var push = s.Dialogs.Requests[0].Push("feat", "origin", closing.Token);
+        Assert.False(push.IsCompleted);
+        closing.Cancel();
+
+        Assert.False(await push);
+        Assert.Equal(1, s.Runner.CancelCount);
+        Assert.False(s.Repo.BareHasBranch(s.Repo.Origin, "feat"));
     }
 
     [AvaloniaFact]
