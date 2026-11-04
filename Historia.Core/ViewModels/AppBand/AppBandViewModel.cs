@@ -15,6 +15,9 @@ public sealed partial class AppBandViewModel : ViewModelBase
     /// <summary>The average width of one character, used to cap a dynamic-width tab's name.</summary>
     public const double ApproxCharPx = 7.2;
 
+    /// <summary>The share of a normal tab's width a submodule-linked tab gets.</summary>
+    public const double LinkedTabWidthFactor = 0.5;
+
     private readonly IUiDispatcher _ui;
     private readonly IWorkspaceService _workspace;
     private readonly IAutoFetchService _autoFetch;
@@ -361,12 +364,13 @@ public sealed partial class AppBandViewModel : ViewModelBase
         var tabs = new List<AppBandItemViewModel>(open.Count + 1);
         foreach (var repository in open)
         {
+            var linkFactor = repository.LinkOwner is not null ? LinkedTabWidthFactor : 1.0;
             tabs.Add(new RepoTabViewModel(
                 this,
                 repository,
                 ReferenceEquals(repository, focused),
-                bodyWidth,
-                nameMaxWidth,
+                bodyWidth * linkFactor,
+                nameMaxWidth * linkFactor,
                 _autoFetch.GetTabState(repository),
                 showBars));
         }

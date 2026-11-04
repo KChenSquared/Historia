@@ -1247,6 +1247,123 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
             n.Severity == NotificationSeverity.Warning && n.Message == "Stage changes and enter a message before committing."));
     }
 
+    private async Task<(TestRepositoryBuilder Repo, RepositoryContext Ctx, StagingPanelViewModel Vm)> ConflictedAsync()
+    {
+        var repo = NewRepo();
+        repo.Checkout("feature", create: true);
+        repo.WriteFile("a.txt", "feature\n").Stage();
+        repo.Commit("feature edit");
+        repo.Checkout("main");
+        repo.WriteFile("a.txt", "main\n").Stage();
+        repo.Commit("main edit");
+        try { repo.Git("merge", "feature"); } catch { /* expected to conflict */ }
+        var ctx = Open(repo);
+        await RefreshUntilAsync(ctx, () => ctx.State.Status.Conflicted.Count == 1, "the conflicted file");
+        return (repo, ctx, NewViewModel(ctx));
+    }
+
+    [Fact]
+    public async Task Commit_is_disabled_while_files_are_conflicted()
+    {
+        if (GitMissing) return;
+        var (_, ctx, vm) = await ConflictedAsync();
+
+        Assert.False(vm.CommitCommand.CanExecute(null));
+        Assert.False(vm.CommitAndPushCommand.CanExecute(null));
+        Assert.Equal("Resolve the conflicts before committing.", vm.CommitBlockedTip);
+
+        var raised = 0;
+        vm.CommitCommand.CanExecuteChanged += (_, _) => raised++;
+        vm.CommitAndPushCommand.CanExecuteChanged += (_, _) => raised++;
+        await Task.Run(async () => await ctx.Gateway.StageAsync(["a.txt"]));
+        await RefreshUntilAsync(ctx, () => ctx.State.Status.Conflicted.Count == 0, "the resolved status");
+        await WaitUntilAsync(() => vm.CommitCommand.CanExecute(null), "the commit command to enable");
+
+        Assert.True(vm.CommitAndPushCommand.CanExecute(null));
+        Assert.Null(vm.CommitBlockedTip);
+        Assert.True(raised >= 2);
+    }
+
+    [Fact]
+    public async Task Commit_is_disabled_while_a_commit_runs()
+    {
+        if (GitMissing) return;
+        var (_, ctx, vm) = await ModifiedAsync();
+        await vm.StageAllChangesCommand.ExecuteAsync(null);
+        await WaitUntilAsync(() => Rows(vm.Staged).Count == 2);
+        vm.MessageText = "feat: held";
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holder = ctx.WithWriteLockAsync(async ct =>
+        {
+            entered.SetResult();
+            await release.Task.WaitAsync(ct);
+        }, label: "Index refresh");
+        await entered.Task;
+
+        var commit = vm.CommitCommand.ExecuteAsync(null);
+
+        Assert.False(vm.CommitCommand.CanExecute(null));
+        Assert.False(vm.CommitAndPushCommand.CanExecute(null));
+        Assert.Null(vm.CommitBlockedTip);
+
+        release.SetResult();
+        await holder;
+        await commit;
+
+        Assert.True(vm.CommitCommand.CanExecute(null));
+        Assert.True(vm.CommitAndPushCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public async Task Commit_is_disabled_while_a_commit_waits_for_a_stage()
+    {
+        if (GitMissing) return;
+        var (repo, ctx, vm) = await ModifiedAsync();
+        vm.MessageText = "feat: after the stage";
+        var before = Head(repo);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holder = ctx.WithWriteLockAsync(async ct =>
+        {
+            entered.SetResult();
+            await release.Task.WaitAsync(ct);
+        }, label: "Index refresh");
+        await entered.Task;
+
+        var stage = vm.StageAllChangesCommand.ExecuteAsync(null);
+        var commit = vm.CommitAndPushCommand.ExecuteAsync(null);
+
+        Assert.False(vm.CommitCommand.CanExecute(null));
+        Assert.False(vm.CommitAndPushCommand.CanExecute(null));
+        Assert.Equal(before, Head(repo));
+
+        release.SetResult();
+        await holder;
+        await stage;
+        await commit;
+
+        Assert.NotEqual(before, Head(repo));
+        Assert.True(vm.CommitCommand.CanExecute(null));
+        Assert.True(vm.CommitAndPushCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public async Task Ctrl_enter_with_conflicts_says_why()
+    {
+        if (GitMissing) return;
+        var (repo, _, vm) = await ConflictedAsync();
+        var before = Head(repo);
+        vm.MessageText = "feat: blocked";
+
+        Assert.True(await Keyboard.DispatchAsync("Ctrl+Enter"));
+
+        Assert.Equal(before, Head(repo));
+        Assert.Contains(Notifications.Published, n =>
+            n.Severity == NotificationSeverity.Info && n.Message == "Resolve the conflicts before committing.");
+        Assert.Equal("feat: blocked", vm.MessageText);
+    }
+
     [Fact]
     public async Task The_author_override_names_the_commit_author()
     {
@@ -1443,31 +1560,6 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task A_busy_box_is_never_written_and_the_offer_waits_until_it_is_free()
-    {
-        if (GitMissing) return;
-        var ctx = Open(NewRepo());
-        var vm = NewViewModel(ctx);
-        vm.IsMessageReadOnly = true;
-
-        ctx.State.ProposeCommitMessage("feat: from an agent");
-
-        Assert.True(vm.IsOfferVisible);
-        Assert.Equal("", vm.MessageText);
-
-        await vm.UseOfferCommand.ExecuteAsync(null);
-
-        Assert.Equal("", vm.MessageText);
-        Assert.Equal("feat: from an agent", ctx.State.PendingCommitMessage);
-
-        vm.IsMessageReadOnly = false;
-        await vm.UseOfferCommand.ExecuteAsync(null);
-
-        Assert.Equal("feat: from an agent", vm.MessageText);
-        Assert.Empty(Dialogs.Calls);
-    }
-
-    [Fact]
     public async Task A_long_offer_is_cut_at_300_characters_in_the_tip()
     {
         if (GitMissing) return;
@@ -1610,12 +1702,11 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
         Assert.Equal("feat: from ai", vm.MessageText);
         Assert.Equal(false, _generator!.LastAmend);
         Assert.Empty(Dialogs.ConfirmDestructiveCalls);
-        Assert.False(vm.IsMessageReadOnly);
         Assert.False(vm.IsGenerating);
     }
 
     [Fact]
-    public async Task Generating_over_a_draft_asks_first_and_cancel_changes_nothing()
+    public async Task Generating_over_a_draft_asks_on_the_reply_and_declining_keeps_the_draft()
     {
         if (GitMissing) return;
         UseAi();
@@ -1629,17 +1720,19 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
 
         await vm.GenerateCommand.ExecuteAsync(null);
 
+        Assert.Equal(1, _generator!.Calls);
         var call = Assert.Single(Dialogs.ConfirmDestructiveCalls);
         Assert.Equal("Replace commit message", call.Title);
         Assert.Equal("Replace your commit message draft (8 characters) with an AI-generated message? Your draft is discarded.", call.Effect);
         Assert.Equal("my draft", vm.MessageText);
-        Assert.Equal(0, _generator!.Calls);
+        Assert.Contains(Notifications.Published, n =>
+            n.Severity == NotificationSeverity.Info && n.Message == "AI message discarded; your text was kept.");
 
         Dialogs.EnqueueConfirmDestructive(true);
         await vm.GenerateCommand.ExecuteAsync(null);
 
         Assert.Equal("feat: from ai", vm.MessageText);
-        Assert.Equal(1, _generator.Calls);
+        Assert.Equal(2, _generator.Calls);
     }
 
     [Fact]
@@ -1683,7 +1776,7 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task A_second_call_cancels_the_running_generation_and_keeps_the_draft()
+    public async Task A_second_call_asks_and_stopping_cancels_the_request_and_keeps_the_draft()
     {
         if (GitMissing) return;
         UseAi();
@@ -1693,7 +1786,7 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
         await StageChangeAsync(repo, ctx);
         var vm = NewViewModel(ctx);
         vm.MessageText = "keep me";
-        Dialogs.EnqueueConfirmDestructive(true);
+        Dialogs.EnqueueChoice(1);
         var gate = new TaskCompletionSource<CommitMessageResult>();
         _generator!.Behavior = ct =>
         {
@@ -1704,18 +1797,92 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
         var first = vm.GenerateCommand.ExecuteAsync(null);
         await WaitUntilAsync(() => vm.IsGenerating, "the generation to start");
 
-        Assert.True(vm.IsMessageReadOnly);
-        Assert.Equal("Generating… click to cancel", vm.WandTip);
+        Assert.Equal("Generating… click for options", vm.WandTip);
         Assert.True(vm.IsWandEnabled);
+        Assert.Matches(@"^Waiting for 1\. Gemini \(sent \d+ s ago\)$", vm.GeneratingTip);
 
         await vm.GenerateCommand.ExecuteAsync(null);
         await first;
 
+        var asked = Assert.Single(Dialogs.Calls, c => c.Method == nameof(IDialogService.ChooseAsync));
+        Assert.Equal("Still waiting", asked.Title);
+        Assert.Contains("hasn't answered yet. Requests give up after 4 minutes.", asked.Detail);
         Assert.True(_generator.LastToken.IsCancellationRequested);
         Assert.Equal("keep me", vm.MessageText);
-        Assert.False(vm.IsMessageReadOnly);
+        Assert.False(vm.IsGenerating);
         Assert.Equal("Generate Commit Message", vm.WandTip);
+        Assert.Empty(Dialogs.ConfirmDestructiveCalls);
         Assert.DoesNotContain(Notifications.Published, n => n.Severity is NotificationSeverity.Error or NotificationSeverity.Warning);
+    }
+
+    [Fact]
+    public async Task Sending_a_new_request_cancels_the_old_one_and_starts_another()
+    {
+        if (GitMissing) return;
+        UseAi();
+        await ActivateAsync();
+        var repo = NewRepo();
+        var ctx = Open(repo);
+        await StageChangeAsync(repo, ctx);
+        var vm = NewViewModel(ctx);
+        Dialogs.EnqueueChoice(0);
+        var tokens = new List<CancellationToken>();
+        var gate = new TaskCompletionSource<CommitMessageResult>();
+        _generator!.Behavior = ct =>
+        {
+            tokens.Add(ct);
+            if (tokens.Count == 1)
+            {
+                var first = new TaskCompletionSource<CommitMessageResult>();
+                ct.Register(() => first.TrySetCanceled(ct));
+                return first.Task;
+            }
+            return gate.Task;
+        };
+
+        var running = vm.GenerateCommand.ExecuteAsync(null);
+        await WaitUntilAsync(() => vm.IsGenerating, "the first request to start");
+
+        var second = vm.GenerateCommand.ExecuteAsync(null);
+        await WaitUntilAsync(() => tokens.Count == 2, "the new request to start");
+
+        Assert.True(tokens[0].IsCancellationRequested);
+        Assert.False(tokens[1].IsCancellationRequested);
+        Assert.True(vm.IsGenerating);
+
+        gate.SetResult(new CommitMessageResult("feat: second", null, null));
+        await second;
+        await running;
+
+        Assert.Equal("feat: second", vm.MessageText);
+        Assert.False(vm.IsGenerating);
+    }
+
+    [Fact]
+    public async Task Dismissing_the_prompt_keeps_waiting()
+    {
+        if (GitMissing) return;
+        UseAi();
+        await ActivateAsync();
+        var repo = NewRepo();
+        var ctx = Open(repo);
+        await StageChangeAsync(repo, ctx);
+        var vm = NewViewModel(ctx);
+        Dialogs.EnqueueChoice(-1);
+        var gate = new TaskCompletionSource<CommitMessageResult>();
+        _generator!.Behavior = _ => gate.Task;
+        var running = vm.GenerateCommand.ExecuteAsync(null);
+        await WaitUntilAsync(() => vm.IsGenerating);
+
+        await vm.GenerateCommand.ExecuteAsync(null);
+
+        Assert.False(_generator.LastToken.IsCancellationRequested);
+        Assert.True(vm.IsGenerating);
+
+        gate.SetResult(new CommitMessageResult("feat: late", null, null));
+        await running;
+
+        Assert.Equal("feat: late", vm.MessageText);
     }
 
     [Fact]
@@ -1735,11 +1902,10 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
         var error = Assert.Single(Notifications.Published, n => n.Severity == NotificationSeverity.Error);
         Assert.Equal("The AI service rejected the API key.", error.Message);
         Assert.Equal("HTTP 401", error.Details);
-        Assert.False(vm.IsMessageReadOnly);
     }
 
     [Fact]
-    public async Task Committing_during_a_generation_does_nothing()
+    public async Task Committing_during_a_generation_commits_the_box_and_cancels_the_request()
     {
         if (GitMissing) return;
         UseAi();
@@ -1748,8 +1914,7 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
         var ctx = Open(repo);
         await StageChangeAsync(repo, ctx);
         var vm = NewViewModel(ctx);
-        vm.MessageText = "feat: old draft";
-        Dialogs.EnqueueConfirmDestructive(true);
+        vm.MessageText = "feat: typed meanwhile";
         var gate = new TaskCompletionSource<CommitMessageResult>();
         _generator!.Behavior = ct =>
         {
@@ -1761,10 +1926,46 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
         await WaitUntilAsync(() => vm.IsGenerating);
 
         await vm.CommitCommand.ExecuteAsync(null);
+        await running;
 
-        Assert.Equal(before, Head(repo));
-        Assert.Equal("feat: old draft", vm.MessageText);
+        Assert.NotEqual(before, Head(repo));
+        Assert.Equal("feat: typed meanwhile", repo.Git("log", "-1", "--format=%s").Trim());
+        Assert.True(_generator.LastToken.IsCancellationRequested);
+        Assert.False(vm.IsGenerating);
+        Assert.Equal("", vm.MessageText);
+    }
 
+    [Fact]
+    public async Task A_proposal_and_Use_it_work_while_a_request_runs()
+    {
+        if (GitMissing) return;
+        UseAi();
+        await ActivateAsync();
+        var repo = NewRepo();
+        var ctx = Open(repo);
+        await StageChangeAsync(repo, ctx);
+        var vm = NewViewModel(ctx);
+        var gate = new TaskCompletionSource<CommitMessageResult>();
+        _generator!.Behavior = ct =>
+        {
+            ct.Register(() => gate.TrySetCanceled(ct));
+            return gate.Task;
+        };
+        var running = vm.GenerateCommand.ExecuteAsync(null);
+        await WaitUntilAsync(() => vm.IsGenerating);
+
+        ctx.State.ProposeCommitMessage("feat: from an agent");
+
+        Assert.Equal("feat: from an agent", vm.MessageText);
+
+        vm.MessageText = "my own text";
+        ctx.State.ProposeCommitMessage("feat: another");
+        Assert.True(vm.IsOfferVisible);
+        Dialogs.EnqueueConfirmDestructive(true);
+        await vm.UseOfferCommand.ExecuteAsync(null);
+        Assert.Equal("feat: another", vm.MessageText);
+
+        Dialogs.EnqueueChoice(1);
         await vm.GenerateCommand.ExecuteAsync(null);
         await running;
     }
@@ -1780,7 +1981,6 @@ public sealed class StagingPanelViewModelTests : IAsyncDisposable
         await StageChangeAsync(repo, ctx);
         var vm = NewViewModel(ctx);
         vm.MessageText = "old draft";
-        Dialogs.EnqueueConfirmDestructive(true);
         var gate = new TaskCompletionSource<CommitMessageResult>();
         _generator!.Behavior = ct =>
         {

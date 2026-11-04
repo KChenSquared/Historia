@@ -143,6 +143,16 @@ public sealed partial class CommitGraphControl : IGraphMenuActions
         return Task.CompletedTask;
     }
 
+    Task IGraphMenuActions.PushAndCreatePullRequest(string localBranch)
+        => _context is { } ctx && PullRequestFlow.From(_services) is { } flow
+            ? flow.PushAndOpenAsync(ctx, localBranch)
+            : Task.CompletedTask;
+
+    Task IGraphMenuActions.CreatePullRequest(string remote, string branch)
+        => _context is { } ctx && PullRequestFlow.From(_services) is { } flow
+            ? flow.OpenAsync(ctx, remote, branch)
+            : Task.CompletedTask;
+
     /// <summary>The push/pull/fast-forward items for a branch against its counterpart: a local
     /// branch against its upstream, a remote branch against the local branch of the same name.</summary>
     async Task<IReadOnlyList<Control>> IGraphMenuActions.DivergenceItemsAsync(GraphMenuRef branch)
@@ -154,11 +164,8 @@ public sealed partial class CommitGraphControl : IGraphMenuActions
         if (branch.Type == DecorationType.LocalBranch)
         {
             var local = _state?.Branches.FirstOrDefault(b => !b.IsRemote && b.Name == name);
-            if (local?.UpstreamName is { } upstream)
-            {
-                counterpartRef = upstream;
-                remoteAlias = _state?.Branches.FirstOrDefault(b => b.IsRemote && b.Name == upstream)?.RemoteName;
-            }
+            if (local is not null && _state is { } state)
+                (counterpartRef, remoteAlias) = BranchMenu.UpstreamCounterpart(local.UpstreamName, state.Branches);
         }
         else if (branch.Remote is { } remote)
         {
@@ -166,7 +173,7 @@ public sealed partial class CommitGraphControl : IGraphMenuActions
                 counterpartRef = name;
             remoteAlias = remote;
         }
-        if (counterpartRef is null || remoteAlias is null)
+        if (counterpartRef is null)
             return [];
 
         var isLocal = branch.Type == DecorationType.LocalBranch;

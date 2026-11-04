@@ -107,6 +107,41 @@ public sealed partial class FileRowViewModel : StagingPathRowViewModel
         DiscardCommand = new AsyncRelayCommand(() => _owner.DiscardCommand.ExecuteAsync(this));
     }
 
+    private bool CanRunMenuAction => !_owner.IsStagingBusy;
+
+    /// <summary>Stages this file alone. Used from the Changes list.</summary>
+    [RelayCommand(CanExecute = nameof(CanRunMenuAction))]
+    private Task StageAsync() => _owner.StageOneAsync(this);
+
+    /// <summary>Unstages this file alone. Used from the Staged list.</summary>
+    [RelayCommand(CanExecute = nameof(CanRunMenuAction))]
+    private Task UnstageAsync() => _owner.UnstageOneAsync(this);
+
+    /// <summary>Stages or unstages every checked file of this row's list, as the arrow does.</summary>
+    [RelayCommand(CanExecute = nameof(CanRunMenuAction))]
+    private Task MoveSelectedAsync() => _owner.MoveSelectedAsync(IsStaged);
+
+    /// <summary>Adds this file alone to the root <c>.gitignore</c>.</summary>
+    [RelayCommand(CanExecute = nameof(CanRunMenuAction))]
+    private Task IgnoreAsync() => _owner.IgnoreAsync([Path]);
+
+    /// <summary>Adds every checked file of this row's list to the root <c>.gitignore</c>.</summary>
+    [RelayCommand(CanExecute = nameof(CanRunMenuAction))]
+    private Task IgnoreSelectedAsync() => _owner.IgnoreCheckedAsync(IsStaged);
+
+    /// <summary>Re-evaluates the menu commands after the panel's busy state changed.</summary>
+    internal void NotifyBusyChanged()
+    {
+        StageCommand.NotifyCanExecuteChanged();
+        UnstageCommand.NotifyCanExecuteChanged();
+        MoveSelectedCommand.NotifyCanExecuteChanged();
+        IgnoreCommand.NotifyCanExecuteChanged();
+        IgnoreSelectedCommand.NotifyCanExecuteChanged();
+    }
+
+    /// <summary>True when the row is checked: the menu then offers the "selected" items too.</summary>
+    public bool ShowSelectedItems => IsChecked;
+
     public FileStatusEntry Entry { get; }
 
     public FileChangeKind Kind => Entry.Kind;
@@ -124,6 +159,7 @@ public sealed partial class FileRowViewModel : StagingPathRowViewModel
 
     /// <summary>The row's checkbox, which marks the file for the Stage / Unstage arrows.</summary>
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowSelectedItems))]
     public partial bool IsChecked { get; set; }
 
     /// <summary>New, or added.</summary>

@@ -451,6 +451,155 @@ public class AiClientTests
     }
 
     [Fact]
+    public async Task A_503_with_a_long_retry_after_fails_as_a_server_error()
+    {
+        var delays = new List<TimeSpan>();
+        var h = new FakeHandler()
+            .Enqueue(HttpStatusCode.ServiceUnavailable, "overloaded", r => r.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(60)));
+
+        var ex = await Assert.ThrowsAsync<AiException>(() => new OpenAiCompatibleClient(Http(h, delays: delays)).CompleteAsync(Req(Server), default));
+
+        Assert.Equal(AiErrorKind.Server, ex.Kind);
+        Assert.DoesNotContain("rate limit", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(h.Requests);
+        Assert.Empty(delays);
+    }
+
+    private static string GeminiQuotaBody(string retryDelay = "48s", string quotaValue = "\"250000\"") => $$"""
+        {
+          "error": {
+            "code": 429,
+            "message": "You exceeded your current quota, please check your plan and billing details.",
+            "status": "RESOURCE_EXHAUSTED",
+            "details": [
+              {
+                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                "violations": [
+                  {
+                    "quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_input_token_count",
+                    "quotaId": "GenerateContentInputTokensPerModelPerMinute-FreeTier",
+                    "quotaDimensions": { "location": "global", "model": "gemini-2.5-pro" },
+                    "quotaValue": {{quotaValue}}
+                  }
+                ]
+              },
+              { "@type": "type.googleapis.com/google.rpc.Help", "links": [ { "description": "Learn more about Gemini API quotas" } ] },
+              { "@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "{{retryDelay}}" }
+            ]
+          }
+        }
+        """;
+
+    private static async Task<AiException> RateLimitedFrom(string body, Action<HttpResponseMessage>? configure = null)
+    {
+        // A 429 is retried twice when the wait is short, so queue enough replies for all attempts.
+        var h = new FakeHandler()
+            .Enqueue((HttpStatusCode)429, body, configure)
+            .Enqueue((HttpStatusCode)429, body, configure)
+            .Enqueue((HttpStatusCode)429, body, configure);
+        return await Assert.ThrowsAsync<AiException>(() => new GeminiClient(Http(h)).CompleteAsync(Req(GeminiServer), default));
+    }
+
+    [Fact]
+    public async Task RateLimited_summary_names_retry_delay_from_body()
+    {
+        var ex = await RateLimitedFrom(GeminiQuotaBody(retryDelay: "47.2s"));
+
+        Assert.Equal(AiErrorKind.RateLimited, ex.Kind);
+        Assert.Contains("Try again in 48 s.", ex.Message);
+        Assert.Contains("RESOURCE_EXHAUSTED", ex.Details);
+    }
+
+    [Fact]
+    public async Task RateLimited_summary_names_quota_metric_and_limit()
+    {
+        var ex = await RateLimitedFrom(GeminiQuotaBody());
+
+        Assert.Equal(
+            "The AI service's rate limit or quota was reached (free-tier input tokens, limit 250000). Try again in 48 s.",
+            ex.Message);
+        Assert.DoesNotContain("://", ex.Message);
+        Assert.DoesNotContain("googleapis", ex.Message);
+    }
+
+    [Fact]
+    public async Task RateLimited_accepts_a_numeric_quota_value()
+    {
+        var ex = await RateLimitedFrom(GeminiQuotaBody(quotaValue: "250000"));
+
+        Assert.Contains("limit 250000", ex.Message);
+    }
+
+    [Fact]
+    public async Task RateLimited_prefers_the_retry_after_header_over_the_body()
+    {
+        var ex = await RateLimitedFrom(GeminiQuotaBody(), r => r.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(30)));
+
+        Assert.Contains("Try again in 30 s.", ex.Message);
+    }
+
+    [Fact]
+    public async Task RateLimited_with_short_body_delay_retries()
+    {
+        var delays = new List<TimeSpan>();
+        var h = new FakeHandler()
+            .Enqueue((HttpStatusCode)429, GeminiQuotaBody(retryDelay: "2s"))
+            .Enqueue(HttpStatusCode.OK, GeminiReply);
+
+        var text = await new GeminiClient(Http(h, delays: delays)).CompleteAsync(Req(GeminiServer), default);
+
+        Assert.Equal("feat: hi", text);
+        Assert.Equal(2, h.Requests.Count);
+        Assert.Equal([TimeSpan.FromSeconds(2)], delays);
+    }
+
+    [Fact]
+    public async Task RateLimited_after_the_retries_still_names_the_quota()
+    {
+        var h = new FakeHandler()
+            .Enqueue((HttpStatusCode)429, GeminiQuotaBody(retryDelay: "1s"))
+            .Enqueue((HttpStatusCode)429, GeminiQuotaBody(retryDelay: "1s"))
+            .Enqueue((HttpStatusCode)429, GeminiQuotaBody(retryDelay: "1s"));
+
+        var ex = await Assert.ThrowsAsync<AiException>(() => new GeminiClient(Http(h)).CompleteAsync(Req(GeminiServer), default));
+
+        Assert.Equal(AiErrorKind.RateLimited, ex.Kind);
+        Assert.Equal(3, h.Requests.Count);
+        Assert.Contains("free-tier input tokens", ex.Message);
+        Assert.Contains("Try again in 1 s.", ex.Message);
+    }
+
+    [Fact]
+    public async Task RateLimited_without_details_keeps_generic_text()
+    {
+        var ex = await RateLimitedFrom("""{"error":{"code":429,"message":"slow down","status":"RESOURCE_EXHAUSTED"}}""");
+
+        Assert.Equal(AiErrorKind.RateLimited, ex.Kind);
+        Assert.Equal("The AI service is rate limiting requests. Try again in a moment.", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("not json at all")]
+    [InlineData("")]
+    [InlineData("[1,2,3]")]
+    [InlineData("""{"error":{"details":"nope"}}""")]
+    [InlineData("""{"error":{"details":[1,"x",null,{"violations":"x","retryDelay":5},{"violations":[7],"retryDelay":"soon"}]}}""")]
+    [InlineData("""{"error":{"details":[{"violations":[{"quotaMetric":"a b","quotaValue":{"x":1}}],"retryDelay":"-3s"}]}}""")]
+    public async Task Malformed_429_body_does_not_throw(string body)
+    {
+        var ex = await RateLimitedFrom(body);
+
+        Assert.Equal(AiErrorKind.RateLimited, ex.Kind);
+        Assert.Equal("The AI service is rate limiting requests. Try again in a moment.", ex.Message);
+    }
+
+    [Fact]
+    public void The_overall_deadline_is_four_minutes()
+    {
+        Assert.Equal(TimeSpan.FromMinutes(4), AiHttp.OverallDeadline);
+    }
+
+    [Fact]
     public async Task A_400_is_not_retried()
     {
         var h = new FakeHandler().Enqueue(HttpStatusCode.BadRequest, "bad");

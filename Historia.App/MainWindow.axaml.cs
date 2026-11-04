@@ -10,7 +10,7 @@ public partial class MainWindow : Window
     private readonly IThemeService? _theme;
     private readonly IKeyboardCommandRouter? _keyboard;
     private readonly IScrollDirectionProbe? _scrollProbe;
-    private readonly AtomicFileWriter? _placementWriter;
+    private AtomicFileWriter? _placementWriter;
     private readonly AppBandView? _appBand;
     private readonly ShortcutsBarView? _leftShortcuts;
     private readonly ShortcutsBarView? _rightShortcuts;
@@ -42,7 +42,7 @@ public partial class MainWindow : Window
                 Activated += (_, _) => workspace.SetAppActive(true);
                 Deactivated += (_, _) => workspace.SetAppActive(false);
             }
-            _placementWriter = new AtomicFileWriter(AppPaths.WindowPlacementFile);
+            AttachPlacementWriter(new AtomicFileWriter(AppPaths.WindowPlacementFile));
             if (_theme is not null)
                 _theme.ThemeChanged += OnThemeChanged;
 
@@ -88,6 +88,9 @@ public partial class MainWindow : Window
     protected override void OnOpened(EventArgs e)
     {
         base.OnOpened(e);
+        EnsureOnScreen();
+        if (WindowState == WindowState.Normal)
+            CaptureNormalBounds();
         if (_theme is not null)
             WindowChromeFor(_theme.Effective);
         ApplyBodyLayout();
@@ -330,25 +333,64 @@ public partial class MainWindow : Window
 
     // ── Window geometry ──
 
+    // The window's restored (normal) rectangle: position in pixels, size in DIPs. It changes only
+    // while the window is Normal, so a maximized or minimized window still saves a usable spot.
+    private WindowPlacement? _lastNormal;
+
+    /// <summary>Attaches the writer that persists the window's placement. The shell attaches it
+    /// during construction; tests attach one aimed at a temporary directory.</summary>
+    internal void AttachPlacementWriter(AtomicFileWriter writer) => _placementWriter = writer;
+
+    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
+    {
+        base.OnPropertyChanged(change);
+        if (change.Property == WindowStateProperty || change.Property == ClientSizeProperty)
+            QueuePlacementSave();
+    }
+
+    private bool _placementSavePosted;
+
+    // Win32 moves and resizes the window to its maximized or minimized rectangle before the
+    // WindowState property changes, so the save waits until the dispatcher has drained those
+    // events and reads the settled state.
     private void QueuePlacementSave()
     {
-        if (_placementWriter is null || !IsLoaded)
+        if (_placementSavePosted || _placementWriter is null || !IsLoaded)
+            return;
+        _placementSavePosted = true;
+        Dispatcher.UIThread.Post(SavePlacement, DispatcherPriority.Background);
+    }
+
+    private void SavePlacement()
+    {
+        _placementSavePosted = false;
+        if (_placementWriter is null || !IsLoaded || WindowState == WindowState.Minimized)
             return;
 
-        var maximized = WindowState == WindowState.Maximized;
-        var placement = new WindowPlacement
-        {
-            Left = Position.X,
-            Top = Position.Y,
-            Width = maximized ? Width : Bounds.Width,
-            Height = maximized ? Height : Bounds.Height,
-            Maximized = maximized,
-        };
-        if (placement.Width <= 0 || placement.Height <= 0)
+        if (WindowState == WindowState.Normal)
+            CaptureNormalBounds();
+        if (_lastNormal is not { } normal)
+            return;
+
+        var placement = normal with { Maximized = WindowState == WindowState.Maximized };
+        if (!WindowPlacementCalculator.IsPersistable(placement))
             return;
 
         try { _placementWriter.QueueWrite(JsonSerializer.Serialize(placement, HistoriaJson.Options)); }
         catch { /* best effort */ }
+    }
+
+    private void CaptureNormalBounds()
+    {
+        var candidate = new WindowPlacement
+        {
+            Left = Position.X,
+            Top = Position.Y,
+            Width = Bounds.Width,
+            Height = Bounds.Height,
+        };
+        if (WindowPlacementCalculator.IsPersistable(candidate))
+            _lastNormal = candidate;
     }
 
     private void RestorePlacement()
@@ -362,37 +404,90 @@ public partial class MainWindow : Window
         }
         catch { p = null; }
 
-        if (p is null)
+        if (p is null || !WindowPlacementCalculator.IsPersistable(p))
             return;
 
         WindowStartupLocation = WindowStartupLocation.Manual;
         Position = new PixelPoint((int)p.Left, (int)p.Top);
         Width = Math.Clamp(p.Width, 900, 10000);
         Height = Math.Clamp(p.Height, 600, 10000);
+
+        // Correct before the window is shown so it never appears on a disconnected screen. When the
+        // screens cannot be queried yet, fall back to centring; the Opened backstop runs the same check.
+        if (!EnsureOnScreen())
+            WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        _lastNormal = new WindowPlacement { Left = Position.X, Top = Position.Y, Width = Width, Height = Height };
+
         if (p.Maximized)
             WindowState = WindowState.Maximized;
+    }
 
-        // Re-centre if the saved spot is fully off every connected screen.
-        Opened += (_, _) =>
+    /// <summary>
+    /// Moves and shrinks a Normal window so its title bar lies on a connected screen; a window that
+    /// is already reachable is left alone. Returns false when the screens cannot be queried.
+    /// </summary>
+    internal bool EnsureOnScreen()
+    {
+        if (Screens is not { } screens || screens.All.Count == 0)
+            return false;
+        if (WindowState != WindowState.Normal)
+            return true;
+
+        var workAreas = new PixelArea[screens.All.Count];
+        var primaryIndex = 0;
+        for (var i = 0; i < workAreas.Length; i++)
         {
-            var onScreen = Screens?.All.Any(s => s.Bounds.Intersects(
-                new PixelRect(Position, PixelSize.FromSize(new Size(Bounds.Width, 40), 1.0)))) ?? true;
-            if (!onScreen)
+            var wa = screens.All[i].WorkingArea;
+            workAreas[i] = new PixelArea(wa.X, wa.Y, wa.Width, wa.Height);
+            if (screens.All[i].IsPrimary)
+                primaryIndex = i;
+        }
+
+        // A minimized or not-yet-restored window reports a sentinel position; its last normal
+        // rectangle is the better description of where it belongs.
+        var position = Position;
+        var sizeDip = CurrentSizeDip();
+        if (position.X <= WindowPlacementCalculator.SentinelThreshold
+            || position.Y <= WindowPlacementCalculator.SentinelThreshold)
+        {
+            if (_lastNormal is { } known)
             {
-                var screen = Screens?.Primary ?? Screens?.All.FirstOrDefault();
-                if (screen is not null)
-                {
-                    var workArea = screen.WorkingArea;
-                    var x = workArea.X + Math.Max(0, (workArea.Width - (int)Bounds.Width) / 2);
-                    var y = workArea.Y + Math.Max(0, (workArea.Height - (int)Bounds.Height) / 2);
-                    Position = new PixelPoint(x, y);
-                }
-                else
-                {
-                    WindowStartupLocation = WindowStartupLocation.CenterScreen;
-                }
+                position = new PixelPoint((int)known.Left, (int)known.Top);
+                sizeDip = new Size(known.Width, known.Height);
             }
-        };
+        }
+
+        var scaling = (screens.ScreenFromPoint(position) ?? screens.Primary)?.Scaling ?? 1.0;
+        var window = new PixelArea(
+            position.X,
+            position.Y,
+            Math.Max(1, (int)Math.Round(sizeDip.Width * scaling)),
+            Math.Max(1, (int)Math.Round(sizeDip.Height * scaling)));
+
+        var fitted = WindowPlacementCalculator.Fit(window, workAreas, primaryIndex);
+        if (fitted == window && position == Position)
+            return true;
+
+        var targetScaling = (screens.ScreenFromPoint(new PixelPoint(fitted.X, fitted.Y)) ?? screens.Primary)?.Scaling ?? scaling;
+        AppLog.Write(AppLogLevel.Info, "window",
+            $"corrected window placement from {window.X},{window.Y} {window.Width}x{window.Height} " +
+            $"to {fitted.X},{fitted.Y} {fitted.Width}x{fitted.Height} (screens: {workAreas.Length})");
+
+        if (fitted.Width != window.Width)
+            Width = fitted.Width / targetScaling;
+        if (fitted.Height != window.Height)
+            Height = fitted.Height / targetScaling;
+        Position = new PixelPoint(fitted.X, fitted.Y);
+        return true;
+    }
+
+    private Size CurrentSizeDip()
+    {
+        if (Bounds.Width > 0 && Bounds.Height > 0)
+            return Bounds.Size;
+        return new Size(
+            double.IsFinite(Width) ? Width : 0,
+            double.IsFinite(Height) ? Height : 0);
     }
 
     protected override async void OnClosing(WindowClosingEventArgs e)

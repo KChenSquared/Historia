@@ -20,8 +20,6 @@ public sealed partial class HomeViewModel : ViewModelBase
     private readonly CloneDialogPresenter _showCloneDialog;
     private readonly IClipboardService _clipboard;
 
-    private bool _busy;
-
     /// <param name="showCloneDialog">Shows the clone dialog. It is a window, so the view supplies it.</param>
     public HomeViewModel(
         string intent,
@@ -102,6 +100,10 @@ public sealed partial class HomeViewModel : ViewModelBase
     [ObservableProperty]
     public partial bool IsCloneVisible { get; private set; }
 
+    /// <summary>True while a repository is being opened or created; the recent list is disabled meanwhile.</summary>
+    [ObservableProperty]
+    public partial bool IsOpening { get; private set; }
+
     [ObservableProperty]
     public partial string CloneStatusText { get; private set; } = "";
 
@@ -176,7 +178,7 @@ public sealed partial class HomeViewModel : ViewModelBase
 
     private async Task OpenPathCoreAsync(string path)
     {
-        _busy = true;
+        IsOpening = true;
         try
         {
             await _workspace.OpenAsync(path);
@@ -186,7 +188,7 @@ public sealed partial class HomeViewModel : ViewModelBase
         {
             Fail("Could not open repository", ex);
         }
-        finally { _busy = false; }
+        finally { IsOpening = false; }
     }
 
     [RelayCommand]
@@ -199,7 +201,7 @@ public sealed partial class HomeViewModel : ViewModelBase
             var branch = await _dialogs.PromptAsync("Initial branch", "Name for the initial branch:", "main");
             if (branch is null) return;
 
-            _busy = true;
+            IsOpening = true;
             try
             {
                 await _workspace.InitAsync(path, string.IsNullOrWhiteSpace(branch) ? "main" : branch.Trim());
@@ -209,7 +211,7 @@ public sealed partial class HomeViewModel : ViewModelBase
             {
                 Fail("Could not initialize repository", ex);
             }
-            finally { _busy = false; }
+            finally { IsOpening = false; }
         }
         catch (Exception ex)
         {
@@ -292,11 +294,11 @@ public sealed partial class HomeViewModel : ViewModelBase
         }
     }
 
-    // A row is opened by clicking it, which is ignored while the row is missing, another open is
-    // in flight or a clone is running.
+    // A row is opened by clicking it, which is ignored while the row is missing or another open is
+    // in flight. A running clone does not matter: opening a repository does not touch it.
     internal async Task OpenRecentAsync(RecentRepoViewModel row)
     {
-        if (row.IsStale || _busy || _cloneService.IsRunning)
+        if (row.IsStale || IsOpening)
             return;
         await OpenPathCoreAsync(row.Path);
     }

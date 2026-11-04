@@ -1,0 +1,50 @@
+name: Release notes sync
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/release-notes/*.md'
+  workflow_dispatch:
+    inputs:
+      resync_all:
+        description: 'Resync every release from its notes file'
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-notes-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    # A manual run from another branch would publish that branch's unmerged notes.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: '3.12'
+
+      - name: Update the matching releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+          RESYNC_ALL: ${{ inputs.resync_all }}
+        run: >
+          python -I .github/scripts/release_notes.py
+          --repo "$GITHUB_REPOSITORY"
+          --before "$BEFORE"
+          --after "$AFTER"
+          --resync-all "$RESYNC_ALL"

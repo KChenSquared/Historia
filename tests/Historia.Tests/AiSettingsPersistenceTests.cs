@@ -20,7 +20,7 @@ public class AiSettingsPersistenceTests : IDisposable
             ReasoningEffort = "low",
             AdditionalPrompt = "- keep it short",
             ExtraHeaders = "X-Team: core",
-            DiffCapUnits = 2,
+            DiffCapTokens = 50_000,
             CreatedUtc = new DateTime(2026, 10, 6, 1, 0, 0, DateTimeKind.Utc),
         };
         var second = new AiServiceProfile
@@ -39,6 +39,29 @@ public class AiSettingsPersistenceTests : IDisposable
         var reloaded = SettingsService.Load();
         Assert.Equal([first, second], reloaded.Current.AiServices);
         Assert.Equal(second.Id, reloaded.Current.ActiveAiServiceId);
+    }
+
+    [Fact]
+    public async Task DiffCapTokens_round_trips()
+    {
+        var profile = new AiServiceProfile { Name = "A", DiffCapTokens = 0 };
+        var svc = SettingsService.Load();
+        await svc.UpdateAsync(s => s with { AiServices = [profile] });
+        await svc.FlushAsync();
+
+        Assert.Equal(0, SettingsService.Load().Current.AiServices.Single().DiffCapTokens);
+    }
+
+    [Fact]
+    public void Old_DiffCapUnits_loads_with_default_tokens()
+    {
+        File.WriteAllText(AppPaths.SettingsFile,
+            "{ \"schemaVersion\": 21, \"aiServices\": [ { \"id\": \"old\", \"name\": \"Old\", \"diffCapUnits\": 3 } ] }");
+
+        var loaded = SettingsService.Load().Current.AiServices.Single();
+
+        Assert.Equal("Old", loaded.Name);
+        Assert.Equal(AiDiffCap.DefaultTokens, loaded.DiffCapTokens);
     }
 
     [Fact]

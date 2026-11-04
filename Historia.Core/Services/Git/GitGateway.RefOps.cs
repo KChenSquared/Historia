@@ -230,6 +230,128 @@ public sealed partial class GitGateway
         }, ct).ConfigureAwait(false);
     }
 
+    // `git merge-base --is-ancestor` exits 1 when the first commit is not an ancestor of the
+    // second; any other non-zero code is an error.
+    private const int NotAncestorExitCode = 1;
+
+    /// <summary>Whether a rebase or bisect in any worktree of the repository started from
+    /// <paramref name="branch"/>. HEAD is detached while either runs, so neither HEAD nor
+    /// <c>%(worktreepath)</c> names the branch, yet the operation writes the branch when it ends.
+    /// These are the markers <c>git branch -f</c> checks.</summary>
+    private static bool IsBeingRebasedOrBisected(string gitDir, string branch)
+    {
+        var commonDir = RefStateToken.ResolveCommonDir(gitDir);
+        var worktreesDir = Path.Combine(commonDir, "worktrees");
+        IEnumerable<string> gitDirs = Directory.Exists(worktreesDir)
+            ? [commonDir, .. Directory.EnumerateDirectories(worktreesDir)]
+            : [commonDir];
+
+        var branchRef = $"refs/heads/{branch}";
+        foreach (var dir in gitDirs)
+        {
+            if (ReadMarker(Path.Combine(dir, "rebase-merge", "head-name")) == branchRef
+                || ReadMarker(Path.Combine(dir, "rebase-apply", "head-name")) == branchRef
+                // BISECT_START holds the short name of the branch bisect returns to.
+                || ReadMarker(Path.Combine(dir, "BISECT_START")) == branch)
+                return true;
+        }
+        return false;
+    }
+
+    private static string? ReadMarker(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? File.ReadAllText(path).Trim() : null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    public async Task FastForwardBranchAsync(string branch, string target, CancellationToken ct = default)
+    {
+        using var _ = context.BeginSelfOperation();
+
+        await context.WithWriteLockAsync(async innerCt =>
+        {
+            var branchRef = $"refs/heads/{branch}";
+            var oldResult = await cli.RunAsync(new GitCliRequest
+            {
+                Arguments = ["rev-parse", "--verify", "-q", branchRef],
+                WorkingDirectory = context.RepositoryPath,
+            }, innerCt).ConfigureAwait(false);
+
+            if (!oldResult.IsSuccess)
+                throw new HistoriaGitException(GitErrorKind.RefNotFound, $"Branch '{branch}' not found.");
+            var oldId = oldResult.StandardOutput.Trim();
+
+            var headCheck = await cli.RunAsync(new GitCliRequest
+            {
+                Arguments = ["symbolic-ref", "-q", "HEAD"],
+                WorkingDirectory = context.RepositoryPath,
+            }, innerCt).ConfigureAwait(false);
+
+            if (headCheck.IsSuccess && headCheck.StandardOutput.Trim() == branchRef)
+                throw new InvalidOperationException($"{branch} is checked out; pull it instead.");
+
+            // Moving a branch another worktree has checked out would leave that worktree's index
+            // and files behind its HEAD.
+            var worktreeCheck = await cli.RunAsync(new GitCliRequest
+            {
+                Arguments = ["for-each-ref", "--format=%(worktreepath)", branchRef],
+                WorkingDirectory = context.RepositoryPath,
+            }, innerCt).ConfigureAwait(false);
+
+            if (!worktreeCheck.IsSuccess)
+                throw HistoriaGitException.FromCli(worktreeCheck, "Fast-forward");
+            if (!string.IsNullOrWhiteSpace(worktreeCheck.StandardOutput))
+                throw new InvalidOperationException($"{branch} is checked out in another worktree.");
+            if (IsBeingRebasedOrBisected(context.GitDirectory, branch))
+                throw new InvalidOperationException($"{branch} is being rebased or bisected; finish that first.");
+
+            var newResult = await cli.RunAsync(new GitCliRequest
+            {
+                Arguments = ["rev-parse", "--verify", "-q", "--end-of-options", $"{target}^{{commit}}"],
+                WorkingDirectory = context.RepositoryPath,
+            }, innerCt).ConfigureAwait(false);
+
+            if (!newResult.IsSuccess)
+                throw new HistoriaGitException(GitErrorKind.RefNotFound, $"'{target}' not found.");
+            var newId = newResult.StandardOutput.Trim();
+
+            if (newId == oldId)
+                return;
+
+            var ancestorCheck = await cli.RunAsync(new GitCliRequest
+            {
+                Arguments = ["merge-base", "--is-ancestor", oldId, newId],
+                WorkingDirectory = context.RepositoryPath,
+            }, innerCt).ConfigureAwait(false);
+
+            if (ancestorCheck.ExitCode == NotAncestorExitCode)
+                throw new InvalidOperationException($"{branch} has commits {target} lacks; it can't be fast-forwarded.");
+            if (!ancestorCheck.IsSuccess)
+                throw HistoriaGitException.FromCli(ancestorCheck, "Fast-forward");
+
+            // The old value makes the write a compare-and-swap: git refuses it if the branch
+            // moved since it was read.
+            var updateResult = await cli.RunAsync(new GitCliRequest
+            {
+                Arguments = ["update-ref", "-m", $"fast-forward to {target}", branchRef, newId, oldId],
+                WorkingDirectory = context.RepositoryPath,
+            }, innerCt).ConfigureAwait(false);
+
+            if (!updateResult.IsSuccess)
+                throw HistoriaGitException.FromCli(updateResult, "Fast-forward");
+        }, ct).ConfigureAwait(false);
+    }
+
     public async Task RenameBranchAsync(string oldName, string newName, CancellationToken ct = default)
     {
         using var _ = context.BeginSelfOperation();

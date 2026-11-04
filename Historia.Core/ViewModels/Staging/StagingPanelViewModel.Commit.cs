@@ -4,16 +4,15 @@ public sealed partial class StagingPanelViewModel
 {
     private readonly ICommitDraftStore _drafts;
     private bool _committing;
+    // Set while a commit runs, so an AI reply that lands meanwhile waits for its outcome.
+    private TaskCompletionSource? _commitRunning;
+    private int _commitsCreated;
     private string? _offered;
     private string? _agentNoteText;
 
     /// <summary>The commit message being written. It is kept per tab in the draft store when the panel goes away.</summary>
     [ObservableProperty]
     public partial string MessageText { get; set; } = "";
-
-    /// <summary>True while the message box cannot be typed in, which a running generation sets.</summary>
-    [ObservableProperty]
-    public partial bool IsMessageReadOnly { get; set; }
 
     /// <summary>Amend the previous commit instead of creating a new one.</summary>
     [ObservableProperty]
@@ -47,6 +46,23 @@ public sealed partial class StagingPanelViewModel
     [ObservableProperty]
     public partial bool IsAgentNoteVisible { get; private set; }
 
+    private const string CommitBlockedByConflictsText = "Resolve the conflicts before committing.";
+
+    /// <summary>Why the commit buttons are disabled: the conflicts that still need resolving, or
+    /// null when nothing blocks a commit (a commit already running is obvious and has no tip).</summary>
+    [ObservableProperty]
+    public partial string? CommitBlockedTip { get; private set; }
+
+    private bool CanCommit => !_committing && _status.Conflicted.Count == 0;
+
+    /// <summary>Re-evaluates both commit commands and their tooltip against the current status and the running commit.</summary>
+    private void RefreshCommitState()
+    {
+        CommitBlockedTip = _status.Conflicted.Count > 0 ? CommitBlockedByConflictsText : null;
+        CommitCommand.NotifyCanExecuteChanged();
+        CommitAndPushCommand.NotifyCanExecuteChanged();
+    }
+
     partial void OnMessageTextChanged(string value)
     {
         UpdateCounter();
@@ -75,63 +91,72 @@ public sealed partial class StagingPanelViewModel
     // ── Commit ──
 
     /// <summary>Commits the staged changes with the message in the box.</summary>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanCommit))]
     private Task CommitAsync() => CommitCoreAsync(push: false);
 
     /// <summary>Commits, then asks for a push of the current branch.</summary>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanCommit))]
     private Task CommitAndPushAsync() => CommitCoreAsync(push: true);
 
     private async Task CommitCoreAsync(bool push)
     {
-        // A stage or unstage still running, or its status refresh, decides what is staged; the
-        // checks below must see its result.
-        if (!_pendingStage.IsCompleted)
-        {
-            await _pendingStage;
-            AdoptCurrentStatus();
-        }
-
-        // While a generated message is on its way, Ctrl+Enter must not commit the old draft just
-        // before the generated text replaces it.
-        if (_committing || _generateCts is not null || _status.Conflicted.Count > 0) return;
-        if (string.IsNullOrWhiteSpace(MessageText) || (_status.Staged.Count == 0 && !IsAmend))
-        {
-            _notifications.Publish(NotificationSeverity.Warning, "Stage changes and enter a message before committing.");
-            return;
-        }
-
-        // Amending a commit that's already on its upstream (as of the last
-        // fetch) rewrites published history — pushing it afterwards needs a force push. An
-        // unpushed commit's amend doesn't touch anything else and needs no prompt.
-        if (IsAmend)
-        {
-            var upstream = _ctx.State.CurrentBranch?.UpstreamName;
-            if (upstream is not null && _status.AheadBy == 0)
-            {
-                var headSha = _ctx.State.CurrentBranch?.TipCommitId?.ToString();
-                var shortSha = headSha is { Length: >= 7 } ? headSha[..7] : headSha ?? "HEAD";
-                try
-                {
-                    if (!await _dialogs.ConfirmDestructiveAsync("Amend a pushed commit",
-                            $"Amend {shortSha}, which is already on {upstream}? This rewrites " +
-                            "published history; pushing it afterwards needs a force push.", "Amend"))
-                        return;
-                }
-                catch (Exception ex)
-                {
-                    _notifications.Publish(NotificationSeverity.Error, ex.NotificationMessage("Commit"), ex.NotificationDetails());
-                    return;
-                }
-            }
-        }
-
+        // A repeated Ctrl+Enter while a commit runs is not worth a message. The commit counts as
+        // running from here, so both commit buttons stay disabled through the checks below.
+        if (_committing) return;
         _committing = true;
-        // A proposal that arrives while the commit runs is meant for the next commit; only the
-        // one already pending now is spent by this commit.
-        var pendingAtStart = _ctx.State.PendingCommitMessage;
+        _commitRunning = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        RefreshCommitState();
         try
         {
+            // A stage or unstage still running, or its status refresh, decides what is staged; the
+            // checks below must see its result.
+            if (!_pendingStage.IsCompleted)
+            {
+                await _pendingStage;
+                AdoptCurrentStatus();
+            }
+
+            if (_status.Conflicted.Count > 0)
+            {
+                _notifications.Publish(NotificationSeverity.Info, CommitBlockedByConflictsText);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(MessageText) || (_status.Staged.Count == 0 && !IsAmend))
+            {
+                _notifications.Publish(NotificationSeverity.Warning, "Stage changes and enter a message before committing.");
+                return;
+            }
+
+            // Amending a commit that's already on its upstream (as of the last
+            // fetch) rewrites published history — pushing it afterwards needs a force push. An
+            // unpushed commit's amend doesn't touch anything else and needs no prompt.
+            if (IsAmend)
+            {
+                var upstream = _ctx.State.CurrentBranch?.UpstreamName;
+                if (upstream is not null && _status.AheadBy == 0)
+                {
+                    var headSha = _ctx.State.CurrentBranch?.TipCommitId?.ToString();
+                    var shortSha = headSha is { Length: >= 7 } ? headSha[..7] : headSha ?? "HEAD";
+                    try
+                    {
+                        if (!await _dialogs.ConfirmDestructiveAsync("Amend a pushed commit",
+                                $"Amend {shortSha}, which is already on {upstream}? This rewrites " +
+                                "published history; pushing it afterwards needs a force push.", "Amend"))
+                            return;
+                    }
+                    catch (Exception ex)
+                    {
+                        _notifications.Publish(NotificationSeverity.Error, ex.NotificationMessage("Commit"), ex.NotificationDetails());
+                        return;
+                    }
+                }
+            }
+
+            // A proposal that arrives while the commit runs is meant for the next commit; only the
+            // one already pending now is spent by this commit.
+            var pendingAtStart = _ctx.State.PendingCommitMessage;
+
             var profile = _ctx.State.ActiveProfile;
             var name = profile?.GitUserName ?? "";
             var email = profile?.GitUserEmail ?? "";
@@ -167,9 +192,13 @@ public sealed partial class StagingPanelViewModel
                 AmendPreviousCommit = IsAmend,
                 Sign = sign,
             }, _ctx.Lifetime);
+            _commitsCreated++;
             MessageText = "";
             IsAmend = false;
             _drafts.Set(_ctx.Id, null);
+
+            // A reply still on its way would describe changes that are now committed.
+            _generateCts?.Cancel();
             if (pendingAtStart is not null)
                 _ctx.State.ClearPendingCommitMessage(onlyIf: pendingAtStart);
             if (_ctx.State.PendingCommitMessage is null)
@@ -191,8 +220,12 @@ public sealed partial class StagingPanelViewModel
         finally
         {
             _committing = false;
+            if (!IsDisposed)
+                RefreshCommitState();
             if (!IsDisposed && _ctx.State.PendingCommitMessage is { } pending)
                 ApplyProposal(pending);
+            _commitRunning?.TrySetResult();
+            _commitRunning = null;
         }
     }
 
@@ -235,9 +268,8 @@ public sealed partial class StagingPanelViewModel
     private void ApplyProposal(string proposal)
     {
         var current = MessageText ?? "";
-        var busy = IsMessageReadOnly || _committing;
-        if (!busy && (string.IsNullOrWhiteSpace(current)
-                      || string.Equals(current.Trim(), proposal.Trim(), StringComparison.Ordinal)))
+        if (!_committing && (string.IsNullOrWhiteSpace(current)
+                             || string.Equals(current.Trim(), proposal.Trim(), StringComparison.Ordinal)))
         {
             TakeProposal(proposal);
             return;
@@ -261,7 +293,7 @@ public sealed partial class StagingPanelViewModel
     [RelayCommand]
     private async Task UseOfferAsync()
     {
-        if (IsDisposed || _offered is null || IsMessageReadOnly || _committing)
+        if (IsDisposed || _offered is null || _committing)
             return;
 
         try
@@ -273,7 +305,7 @@ public sealed partial class StagingPanelViewModel
                 && !await ConfirmReplaceDraftAsync("the coding agent's message", draft.Length))
                 return;
 
-            if (IsDisposed || IsMessageReadOnly || _committing)
+            if (IsDisposed || _committing)
                 return;
 
             TakeProposal(_ctx.State.PendingCommitMessage ?? offer);
@@ -317,6 +349,7 @@ public sealed partial class StagingPanelViewModel
         // Cancelled before the draft is saved: the generated text would otherwise land in a dead
         // panel while the store kept the old text.
         _generateCts?.Cancel();
+        StopGeneratingTimer();
         _modelLoadCts?.Cancel();
         _modelLoadCts?.Dispose();
         _drafts.Set(_ctx.Id, MessageText);

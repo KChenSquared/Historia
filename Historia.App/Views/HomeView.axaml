@@ -78,7 +78,7 @@
                         <TextBlock Classes="text muted"
                                    Text="No repositories opened yet."
                                    IsVisible="{Binding HasNoRecents}" />
-                        <ItemsControl x:Name="RecentList" ItemsSource="{Binding Recents}">
+                        <ItemsControl x:Name="RecentList" ItemsSource="{Binding Recents}" IsEnabled="{Binding !IsOpening}">
                             <ItemsControl.ItemsPanel>
                                 <ItemsPanelTemplate>
                                     <views:UniformWidthStackPanel Spacing="4" />

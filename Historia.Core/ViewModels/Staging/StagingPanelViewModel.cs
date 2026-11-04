@@ -159,6 +159,15 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
     [NotifyCanExecuteChangedFor(nameof(UnstageCheckedCommand))]
     public partial bool IsStagingBusy { get; private set; }
 
+    // The rows are cached across renders and the menu commands on them are disabled while busy.
+    partial void OnIsStagingBusyChanged(bool value)
+    {
+        foreach (var row in _changesCache.Values)
+            row.NotifyBusyChanged();
+        foreach (var row in _stagedCache.Values)
+            row.NotifyBusyChanged();
+    }
+
     /// <summary>True once the busy state has lasted <see cref="BusyIndicatorDelay"/>; the spinner and <see cref="BusyText"/> show then.</summary>
     [ObservableProperty]
     public partial bool ShowBusyIndicator { get; private set; }
@@ -230,7 +239,7 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
 
     // The gateway labels of the writes this panel starts; their holder is the panel's own work.
     private static bool IsOwnWriteLabel(string label)
-        => label is "Stage" or "Unstage" or "Discard";
+        => label is "Stage" or "Unstage" or "Discard" or "Ignore";
 
     /// <summary>
     /// Turns a write-lock holder label into words for the user. A label is an explicit name such as
@@ -527,6 +536,7 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
 
     private void RefreshSelectionState()
     {
+        RefreshCommitState();
         StageCheckedCommand.NotifyCanExecuteChanged();
         UnstageCheckedCommand.NotifyCanExecuteChanged();
         StashStagedCommand.NotifyCanExecuteChanged();
@@ -578,7 +588,33 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
         if (checkedPaths.Count == 0) return;
         (stage ? _checkedChanges : _checkedStaged).Clear();
         RefreshSelectionState();
+        await MovePathsAsync(stage, checkedPaths);
+    }
 
+    /// <summary>Stages one row of the Changes list; the other checked rows stay checked.</summary>
+    internal Task StageOneAsync(FileRowViewModel row) => row.IsStaged ? Task.CompletedTask : MoveOneAsync(row, stage: true);
+
+    /// <summary>Unstages one row of the Staged list; the other checked rows stay checked.</summary>
+    internal Task UnstageOneAsync(FileRowViewModel row) => row.IsStaged ? MoveOneAsync(row, stage: false) : Task.CompletedTask;
+
+    private Task MoveOneAsync(FileRowViewModel row, bool stage)
+    {
+        if (IsStagingBusy) return Task.CompletedTask;
+        (stage ? _checkedChanges : _checkedStaged).Remove(row.Path);
+        row.SetCheckedFromPanel(false);
+        RefreshSelectionState();
+        return MovePathsAsync(stage, [row.Path]);
+    }
+
+    /// <summary>Does what the Stage or Unstage arrow does for the checked rows of the row's own list.</summary>
+    internal Task MoveSelectedAsync(bool staged)
+    {
+        var command = staged ? UnstageCheckedCommand : StageCheckedCommand;
+        return command.CanExecute(null) ? command.ExecuteAsync(null) : Task.CompletedTask;
+    }
+
+    private async Task MovePathsAsync(bool stage, IReadOnlyList<string> checkedPaths)
+    {
         // A checked rename must move both halves together — staging (or unstaging) only the
         // new path leaves the old path's deletion behind as a separate, unstaged entry instead of
         // one Renamed entry. Expand at send time only: the checked sets themselves stay keyed on
@@ -595,6 +631,64 @@ public sealed partial class StagingPanelViewModel : ViewModelBase
                 : _ctx.Gateway.UnstageAsync(paths, _ctx.Lifetime));
             return true;
         });
+    }
+
+    /// <summary>Adds the checked rows of the row's own list to the root <c>.gitignore</c>.</summary>
+    internal Task IgnoreCheckedAsync(bool staged)
+        => IgnoreAsync([.. (staged ? _checkedStaged : _checkedChanges).Order(StringComparer.Ordinal)]);
+
+    /// <summary>
+    /// Adds each path to the root <c>.gitignore</c>. Git keeps tracking a file that is already
+    /// tracked, so a note says so when any of the paths is.
+    /// </summary>
+    internal async Task IgnoreAsync(IReadOnlyList<string> paths)
+    {
+        if (IsStagingBusy || paths.Count == 0) return;
+
+        // A staged deletion has already left the index, so the ignore applies once it is committed.
+        var trackedPaths = new HashSet<string>(
+            _status.Unstaged.Concat(_status.Staged.Where(f => f.Kind != FileChangeKind.Deleted)).Select(f => f.Path),
+            StringComparer.Ordinal);
+        var anyTracked = paths.Any(p => GitIgnoreWriter.CanWrite(p) && trackedPaths.Contains(p));
+        var skipped = paths.Count(p => !GitIgnoreWriter.CanWrite(p));
+
+        await Run(DescribeBusy("Ignoring", paths.Count), async () =>
+        {
+            var added = await GitIgnoreWriter.AppendAsync(_ctx, paths, _ctx.Lifetime);
+            PublishIgnoreResult(added, skipped, anyTracked);
+            return added > 0;
+        });
+    }
+
+    private void PublishIgnoreResult(int added, int skipped, bool anyTracked)
+    {
+        var skippedNote = skipped switch
+        {
+            0 => "",
+            1 => "Skipped 1 file whose name contains a line break.",
+            _ => $"Skipped {skipped} files whose names contain a line break.",
+        };
+
+        if (added > 0)
+        {
+            var text = $"Added {added} {(added == 1 ? "entry" : "entries")} to .gitignore.";
+            _notifications.Publish(NotificationSeverity.Success, skipped == 0 ? text : $"{text} {skippedNote}");
+        }
+        else if (skipped > 0)
+        {
+            _notifications.Publish(NotificationSeverity.Warning, skippedNote);
+        }
+        else
+        {
+            _notifications.Publish(NotificationSeverity.Info, "Already in .gitignore.");
+        }
+
+        if (anyTracked)
+        {
+            _notifications.Publish(
+                NotificationSeverity.Info,
+                "Git keeps tracking files that are already tracked. Ignoring them takes effect once they are removed from the index.");
+        }
     }
 
     /// <summary>Stages every unstaged and untracked file except the case-collision rows that cannot be attributed to one name.</summary>

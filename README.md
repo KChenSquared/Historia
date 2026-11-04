@@ -142,6 +142,8 @@ the graph at 30k commits for lower memory use is available in settings.
 
 Download pre-built packages from [GitHub Releases](https://github.com/KChenSquared/Historia/releases). Windows is the only officially supported platform; pre-built release binaries are provided for `win-x64`.
 
+Each release is described by a notes file named after its tag in [`docs/release-notes/`](docs/release-notes/), for example `docs/release-notes/v0.11.0.md`. The text on a release page is that file followed by the generated changelog. Maintainers: the full procedure, including the pre-push hook that requires the file before a release tag can be pushed, is in [Releases](docs/contributing.md#5-releases).
+
 ### Windows (officially supported)
 - **Installer (`Historia-<version>-win-x64-setup.exe`):** Recommended. Provides a Start Menu shortcut and an **Add to PATH** option (enabled by default) for `Historia` and `historia-cmdr`. If the .NET 10 Desktop Runtime is not installed, the installer bundles and installs it during setup.
 - **Archive (`Historia-<version>-win-x64.zip`):** Extract and run. Requires [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download). Git 2.46+ is used when installed; otherwise the bundled fallback Git (MinGit + Git LFS) is used if enabled.
@@ -155,7 +157,7 @@ macOS and Linux packages are included in release downloads with `-experimental` 
 3. Click **Run workflow**, choose your branch or tag, and select the desired operating systems (`MacOSX-arm64` for Apple Silicon, `MacOSX-x64` for Intel, `linux-x64`) and package kinds (archives or installers).
 4. When the run finishes, download the package artifacts from the workflow summary.
 
-You can also package locally with `packaging/package.ps1` or build from source (see [Quick Start](#-quick-start)).
+You can also package locally (see [Packaging](#packaging)) or build from source (see [Quick Start](#-quick-start)).
 
 #### Installing macOS packages
 - **Disk Image (`Historia-<version>-MacOSX-<arch>-experimental.dmg`):** Open the `.dmg` and drag `Historia.app` to `Applications`. Builds are ad-hoc signed, so clear the quarantine attribute before first launch:
@@ -235,6 +237,44 @@ When packaged as a `Historia.app` bundle, sign the bundle root instead:
 codesign --force --deep --sign - Historia.app
 xattr -dr com.apple.quarantine Historia.app
 ```
+
+### Packaging
+
+`packaging/package.ps1` builds the release packages from a framework-dependent `Release` publish of
+`Historia.App`, so the target machine needs the .NET 10 Desktop Runtime. Run it in PowerShell from any
+directory; on macOS and Linux use PowerShell 7 (`pwsh`).
+
+```powershell
+# Windows: zip only
+.\packaging\package.ps1 -Rid win-x64 -Archives
+
+# Windows: zip and installer
+.\packaging\package.ps1 -Rid win-x64 -Archives -Installers
+```
+
+| Parameter | Meaning |
+| --- | --- |
+| `-Rid` | Required. The target: `win-x64`, `osx-arm64`, `osx-x64` or `linux-x64`. |
+| `-Archives` | Build the archive. |
+| `-Installers` | Build the installer. |
+| `-OutDir` | Where packages are written, relative to the repository root. Default `dist`. |
+| `-RuntimeInstaller` | Absolute path to a .NET Desktop Runtime installer (`.exe`) to bundle into the Windows installer, which runs it when the runtime is missing. Windows installer only. |
+
+Pass at least one of `-Archives` and `-Installers`. Packages land in `-OutDir`, named with the
+version MinVer resolves from the repository tags (`<version>`; `<debver>` is the same with `-`
+replaced by `~`):
+
+| `-Rid` | `-Archives` | `-Installers` |
+| --- | --- | --- |
+| `win-x64` | `Historia-<version>-win-x64.zip` | `Historia-<version>-win-x64-setup.exe` |
+| `osx-arm64`, `osx-x64` | `Historia-<version>-MacOSX-<arch>-experimental.tar.gz` | `Historia-<version>-MacOSX-<arch>-experimental.dmg` |
+| `linux-x64` | `Historia-<version>-linux-x64-experimental.tar.gz` | `historia_<debver>_amd64-experimental.deb` |
+
+Prerequisites: the .NET SDK pinned in `global.json`; for the macOS and Linux archives, `tar`; for
+the Windows installer, Inno Setup 6 (`ISCC.exe` on `PATH` or under Program Files); for the `.dmg`,
+macOS with `hdiutil`, `sips`, `iconutil` and `codesign`; for the `.deb`, `dpkg-deb`. Windows packages
+bundle a fallback Git: the script downloads MinGit and Git LFS on first use, verifies their SHA-256 against
+`packaging/bundled-git.json`, and caches them under `obj/bundled-git-cache`.
 
 ---
 

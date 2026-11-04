@@ -259,6 +259,8 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
     {
         RepoNetworkAction.DeleteRemoteBranch => "Delete remote branch",
         RepoNetworkAction.PushTag => "Push tag",
+        RepoNetworkAction.FastForwardBranch => "Fast-forward",
+        RepoNetworkAction.MergeAndPush => "Merge and push",
         _ => op.ToString(),
     };
 
@@ -340,37 +342,120 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
     private IReadOnlyList<NotificationAction> TagConflictActions(RepositoryContext repo, string remote, HistoriaGitException ex) =>
         TagConflictPrompt.ActionsFor(repo, remote, ex, this, _dialogs, _notifications);
 
-    /// <summary>
-    /// a push rejected as non-fast-forward means <c>remote/branch</c> has commits this
-    /// local branch doesn't. Offer the three ways out in a modal the user can't lose behind
-    /// later toasts — integrate then re-push (rebase or merge), or overwrite the remote
-    /// (force-with-lease). A rebase/merge that stops in conflicts leaves the push for the user
-    /// to retry once the resolver panel is dealt with. Returns true when the recovery ran git, so
-    /// the caller refreshes once the network gate is released.
-    /// </summary>
-    private async Task<bool> RecoverFromPushRejectionAsync(
-        RepositoryContext repo, string remote, string branch, HistoriaGitException ex,
+    private static bool IsCurrent(RepositoryContext repo, string branch) =>
+        string.Equals(branch, repo.State.CurrentBranch?.Name, StringComparison.Ordinal);
+
+    /// <summary>Checks out <paramref name="branch"/> for a merge-then-push. A failed checkout
+    /// reports itself (a dirty tree gets its usual card with "Stash &amp; retry", which only
+    /// finishes the checkout); false then means stop, and the user runs the merge-and-push again
+    /// from the now-current branch.</summary>
+    private async Task<bool> CheckOutForMergeAsync(RepositoryContext repo, string branch)
+    {
+        await BranchActions.CheckoutAsync(repo, _notifications, _stashes, branch);
+        return IsCurrent(repo, branch);
+    }
+
+    /// <summary>Merges <c>remote/remoteBranch</c> into the checked-out <paramref name="branch"/>
+    /// (a pull that never rebases), then pushes it, setting the upstream when it has none. A merge
+    /// that stops in conflicts is a warning and nothing is pushed; the refresh afterwards surfaces
+    /// the resolver panel. Any other failure propagates.</summary>
+    private async Task MergeThenPushAsync(RepositoryContext repo, string remote, string branch, string remoteBranch,
         IProgress<GitProgress> progress, CancellationToken ct)
     {
-        if (!string.Equals(branch, repo.State.CurrentBranch?.Name, StringComparison.Ordinal))
+        if (!await PullOrStopOnConflictAsync(repo, remote, remoteBranch, rebase: false, progress, ct))
+            return;
+
+        var hasUpstream = TargetHasUpstream(repo.State.Branches, branch);
+        await repo.Gateway.PushAsync(remote, BuildPushSpec(branch, remoteBranch, hasUpstream), progress, ct);
+        _notifications.Publish(NotificationSeverity.Success, $"Pushed to {remote}.");
+    }
+
+    /// <summary>Pulls <c>remote/remoteBranch</c> into the checked-out branch, merging or
+    /// rebasing. False, after a warning, when it stopped in conflicts; any other failure
+    /// propagates.</summary>
+    private async Task<bool> PullOrStopOnConflictAsync(RepositoryContext repo, string remote, string remoteBranch,
+        bool rebase, IProgress<GitProgress> progress, CancellationToken ct)
+    {
+        try
         {
-            _notifications.Publish(NotificationSeverity.Warning, ex.Message, ex.Details);
+            await repo.Gateway.PullAsync(remote, remoteBranch,
+                GitPullOptions.From(_settings.Current) with { Rebase = rebase }, progress, ct);
+            return true;
+        }
+        catch (HistoriaGitException ex)
+        {
+            if (ex.Kind != GitErrorKind.MergeConflict && !await HasConflictsAsync(repo, ct))
+                throw;
+            _notifications.Publish(NotificationSeverity.Warning,
+                "Resolve the conflicts, then push again.", ex.Details);
+            return false;
+        }
+    }
+
+    /// <summary>Whether the working tree has unmerged paths after a failed pull. Trap: a pull's
+    /// merge prints its conflicts to stdout, so its failure is not classified as a merge conflict;
+    /// the status decides. A status that cannot be read counts as no conflicts.</summary>
+    private static async Task<bool> HasConflictsAsync(RepositoryContext repo, CancellationToken ct)
+    {
+        try
+        {
+            return (await repo.Gateway.GetStatusAsync(ct)).Conflicted.Count > 0;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Asks before a merge-and-push and, when <paramref name="branch"/> is not checked
+    /// out, checks it out. False when the user declined or the checkout did not land.</summary>
+    private async Task<bool> PrepareMergeAndPushAsync(RepositoryContext repo, string remote, string branch, string remoteBranch)
+    {
+        var current = IsCurrent(repo, branch);
+        var effect = $"Merge {remote}/{remoteBranch} into {branch}, then push {branch} to {remote}."
+            + (current ? "" : $"\n\nThis checks out {branch} first.");
+        if (!await _dialogs.ConfirmAsync("Merge and push", effect, confirmLabel: "Merge and push"))
+        {
+            AppLog.Write(AppLogLevel.Info, "declined", $"Merge and push of {branch} declined");
             return false;
         }
 
-        // Left→right: Fetch & merge (blue default) · Fetch & rebase · Force push (red) · Cancel.
-        const int Merge = 0, Rebase = 1, Force = 2;
+        return current || await CheckOutForMergeAsync(repo, branch);
+    }
+
+    /// <summary>
+    /// A push rejected as non-fast-forward means <c>remote/remoteBranch</c> has commits this local
+    /// <paramref name="branch"/> doesn't. Offer the ways out in a modal the user can't lose behind
+    /// later toasts — integrate then re-push, or overwrite the remote (force-with-lease). The checked-out branch
+    /// can merge or rebase; a branch that is not checked out is offered only a merge, which checks
+    /// it out first, since a rebase would rewrite a branch the user is not on. A merge or rebase
+    /// that stops in conflicts leaves the push for the user to retry once the resolver panel is
+    /// dealt with. Returns true when the recovery ran git, so the caller refreshes once the
+    /// network gate is released.
+    /// </summary>
+    private async Task<bool> RecoverFromPushRejectionAsync(
+        RepositoryContext repo, string remote, string branch, string remoteBranch, HistoriaGitException ex,
+        IProgress<GitProgress> progress, CancellationToken ct)
+    {
+        var current = IsCurrent(repo, branch);
+
+        // Left→right: the merge (blue default) · Fetch & rebase (current branch only) ·
+        // Force push (red) · Cancel.
+        const int Merge = 0;
+        var rebase = current ? 1 : -1;
+        var force = current ? 2 : 1;
+        IReadOnlyList<string> options = current
+            ? ["Fetch & merge, then push", "Fetch & rebase, then push", "Force push (with lease)"]
+            : ["Check out, merge, then push", "Force push (with lease)"];
         var choice = await _dialogs.ChooseAsync(
             "Push rejected",
-            $"'{remote}/{branch}' has commits that aren't in your local '{branch}'. "
-            + "Bring them in and push again, or overwrite the remote with your local branch.",
-            [
-                "Fetch & merge, then push",
-                "Fetch & rebase, then push",
-                "Force push (with lease)",
-            ],
+            $"'{remote}/{remoteBranch}' has commits that aren't in your local '{branch}'. "
+            + (current
+                ? "Bring them in and push again, or overwrite the remote with your local branch."
+                : $"Check out '{branch}', bring them in and push again, or overwrite the remote with your local branch."),
+            options,
             defaultIndex: Merge,
-            destructiveIndex: Force);
+            destructiveIndex: force);
 
         if (choice < 0)
         {
@@ -380,18 +465,24 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
             return false;
         }
 
-        var setUpstream = !TargetHasUpstream(repo.State.Branches, branch);
+        var hasUpstream = TargetHasUpstream(repo.State.Branches, branch);
         try
         {
-            if (choice is Rebase or Merge)
+            if (choice == Merge)
             {
-                await repo.Gateway.PullAsync(remote, branch,
-                    GitPullOptions.From(_settings.Current) with { Rebase = choice == Rebase }, progress, ct);
-                await repo.Gateway.PushAsync(remote,
-                    new PushSpec { RefSpec = branch, SetUpstream = setUpstream }, progress, ct);
-                _notifications.Publish(NotificationSeverity.Success, $"Pushed to {remote}.");
+                if (!current && !await CheckOutForMergeAsync(repo, branch))
+                    return false;
+                await MergeThenPushAsync(repo, remote, branch, remoteBranch, progress, ct);
             }
-            else if (choice == Force)
+            else if (choice == rebase)
+            {
+                if (await PullOrStopOnConflictAsync(repo, remote, remoteBranch, rebase: true, progress, ct))
+                {
+                    await repo.Gateway.PushAsync(remote, BuildPushSpec(branch, remoteBranch, hasUpstream), progress, ct);
+                    _notifications.Publish(NotificationSeverity.Success, $"Pushed to {remote}.");
+                }
+            }
+            else if (choice == force)
             {
                 // Rewrites the *remote* ref: --force-with-lease/--force-if-includes stop us
                 // clobbering commits pushed since our last fetch, but not ones we've never had.
@@ -399,29 +490,22 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
                 // primary + Enter button) stands between the modal and an operation that can
                 // lose other people's work.
                 if (!await _dialogs.ConfirmDestructiveAsync("Force push — destructive",
-                        $"This force-pushes {branch} to {remote} and overwrites {remote}/{branch} "
+                        $"This force-pushes {branch} to {remote} and overwrites {remote}/{remoteBranch} "
                         + "with your local branch.\n\n"
-                        + $"Any commits on {remote}/{branch} that aren't in your local history — "
+                        + $"Any commits on {remote}/{remoteBranch} that aren't in your local history — "
                         + "including work pushed by other people — are permanently discarded. "
                         + "--force-with-lease only guards against changes made since your last fetch.\n\n"
                         + "Prefer \"Fetch & rebase\" unless you are certain you want to replace the remote branch.",
                         "Force push"))
                     return false;
                 await repo.Gateway.PushAsync(remote,
-                    new PushSpec { RefSpec = branch, ForceWithLease = true, SetUpstream = setUpstream }, progress, ct);
+                    BuildPushSpec(branch, remoteBranch, hasUpstream) with { ForceWithLease = true }, progress, ct);
                 _notifications.Publish(NotificationSeverity.Success, $"Force-pushed to {remote}.");
             }
         }
         catch (OperationCanceledException)
         {
             AppLog.Write(AppLogLevel.Info, "declined", "Push cancelled");
-        }
-        catch (HistoriaGitException retryEx) when (retryEx.Kind == GitErrorKind.MergeConflict)
-        {
-            // The rebase/merge stopped in conflicts — the refresh below surfaces the resolver
-            // panel; the push waits until the user finishes and triggers it again.
-            _notifications.Publish(NotificationSeverity.Warning,
-                "Resolve the conflicts, then push again.", retryEx.Details);
         }
         catch (Exception retryEx)
         {
@@ -494,6 +578,21 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
             AppLog.Write(AppLogLevel.Warn, "invalid_request", "PushTag requested without Remote or Tag specified.");
             return;
         }
+
+        if (op is RepoNetworkAction.FastForwardBranch or RepoNetworkAction.MergeAndPush
+            && (string.IsNullOrEmpty(request.Remote) || string.IsNullOrEmpty(request.Branch) || string.IsNullOrEmpty(request.RemoteBranch)))
+        {
+            _notifications.Publish(NotificationSeverity.Warning,
+                op == RepoNetworkAction.FastForwardBranch ? "No branch to fast-forward." : "No branch to merge and push.");
+            AppLog.Write(AppLogLevel.Warn, "invalid_request", $"{op} requested without Remote, Branch or RemoteBranch specified.");
+            return;
+        }
+
+        // Asked, and the branch checked out, before the gate is taken: neither the dialog nor the
+        // checkout holds it.
+        if (op == RepoNetworkAction.MergeAndPush
+            && !await PrepareMergeAndPushAsync(repo, request.Remote!, request.Branch!, request.RemoteBranch!))
+            return;
 
         string remote;
         if (request.Remote is { } targetRemote)
@@ -682,6 +781,21 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
                     _notifications.Publish(NotificationSeverity.Success, $"Pushed tag {request.Tag} to {remote}.");
                 };
                 break;
+            case RepoNetworkAction.FastForwardBranch:
+                // The full ref, so a local branch named like "<remote>/<branch>" cannot shadow it.
+                execute = async () =>
+                {
+                    await repo.Gateway.FastForwardBranchAsync(request.Branch!, $"refs/remotes/{remote}/{request.RemoteBranch}", ct);
+                    _notifications.Publish(NotificationSeverity.Success, $"Fast-forwarded {request.Branch} to {remote}/{request.RemoteBranch}.");
+                };
+                break;
+            case RepoNetworkAction.MergeAndPush:
+                execute = async () =>
+                {
+                    await MergeThenPushAsync(repo, remote, request.Branch!, request.RemoteBranch!, progress, ct);
+                    RefreshCommitGraphAfterFetch(repo, op);
+                };
+                break;
             default:
                 execute = () => ExecOpAsync(repo, op, remote, branch, request.RemoteBranch, progress, ct);
                 break;
@@ -749,9 +863,18 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
                         (p, pct) => repo.Gateway.PullAsync(remote, pullTarget, GitPullOptions.From(_settings.Current), p, pct)), "Pull")),
             ]);
         }
+        catch (HistoriaGitException ex) when (ex.Kind == GitErrorKind.UncommittedChanges && op == RepoNetworkAction.MergeAndPush)
+        {
+            _notifications.Publish(NotificationSeverity.Error, ex.Message, ex.Details,
+            [
+                new NotificationAction("Stash & retry", () => BranchActions.StashAndRetryAsync(repo, _notifications, _stashes,
+                    () => RunExclusiveAsync(repo, OpLabel(op),
+                        (p, pct) => MergeThenPushAsync(repo, remote, request.Branch!, request.RemoteBranch!, p, pct)), OpLabel(op))),
+            ]);
+        }
         catch (HistoriaGitException ex) when (ex.Kind == GitErrorKind.RemoteRejected && op == RepoNetworkAction.Push && branch is not null)
         {
-            if (await RecoverFromPushRejectionAsync(repo, remote, branch, ex, progress, ct))
+            if (await RecoverFromPushRejectionAsync(repo, remote, branch, request.RemoteBranch ?? branch, ex, progress, ct))
                 afterGate = () => RefreshAfterOperationAsync(repo, op);
         }
         catch (HistoriaGitException ex) when (ex.Kind == GitErrorKind.UnrelatedHistories && op == RepoNetworkAction.Pull && branch is not null)
@@ -811,6 +934,12 @@ public sealed class RepoNetworkActionRunner : IRepoNetworkActionRunner
                     return Task.CompletedTask;
                 }),
             ]);
+        }
+        catch (InvalidOperationException ex) when (op == RepoNetworkAction.FastForwardBranch)
+        {
+            // A refusal (not a fast-forward, or checked out here or in another worktree) changes
+            // nothing; its message says why.
+            _notifications.Publish(NotificationSeverity.Warning, ex.Message);
         }
         catch (HistoriaGitException ex) when (op == RepoNetworkAction.PushTag)
         {

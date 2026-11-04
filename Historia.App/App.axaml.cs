@@ -222,6 +222,7 @@ public sealed class App : Application
         {
             if (w.WindowState == WindowState.Minimized)
                 w.WindowState = WindowState.Normal;
+            (w as MainWindow)?.EnsureOnScreen();
             w.Activate();
         }
     }
@@ -233,6 +234,7 @@ public sealed class App : Application
         services.AddSingleton<IUiDispatcher, UiDispatcher>();
         services.AddSingleton<IClipboardService, ClipboardService>();
         services.AddSingleton<IRemoteDialogs, RemoteDialogs>();
+        services.AddSingleton<IPullRequestDialogs, PullRequestDialogs>();
         services.AddSingleton<ICommitDraftStore, CommitDraftStore>();
         services.AddSingleton<ISystemThemeProbe, PlatformSystemThemeProbe>();
         services.AddSingleton<IDialogService, AvaloniaDialogService>();
