@@ -307,7 +307,6 @@ public sealed partial class CommitGraphControl : Control
     internal ContextMenu? OpenMenuForTesting => _openMenu;
     internal bool RefListOpenForTesting => _refList.IsOpen;
     internal Control? RefListContentForTesting => _refList.Child;
-    internal bool RefListCloseTimerRunningForTesting => _refListCloseTimer?.IsEnabled == true;
     internal void OpenRefListForTesting(GraphDecoration head, Rect badgeRect) => OpenRefListFor(head, badgeRect);
     internal void TickRefListCloseTimerForTesting() => OnRefListCloseTick();
     internal bool HoverDwellTimerRunningForTesting => _hoverDwellTimer.IsEnabled;

@@ -226,12 +226,13 @@ public sealed class GraphRefListMenuTests
         var menu = s.Graph.OpenMenuForTesting;
         Assert.NotNull(menu);
         MovePointerAway(s);
+        s.Graph.TickRefListCloseTimerForTesting();
+        Assert.True(s.Graph.RefListOpenForTesting);
 
         menu.Close();
         Dispatcher.UIThread.RunJobs();
         Assert.Null(s.Graph.OpenMenuForTesting);
         Assert.True(s.Graph.RefListOpenForTesting);
-        Assert.True(s.Graph.RefListCloseTimerRunningForTesting);
 
         s.Graph.TickRefListCloseTimerForTesting();
         Assert.False(s.Graph.RefListOpenForTesting);
