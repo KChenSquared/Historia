@@ -141,10 +141,49 @@ public sealed class AppBandLinkedTabsTests : IAsyncDisposable
 
         Assert.Equal(RowHeight, ownerShell.Bounds.Height);
         Assert.Equal(LinkedHeight, childShell.Bounds.Height);
-        Assert.True(childShell.Bounds.Width < ownerShell.Bounds.Width);
 
         window.Close();
         band.Dispose();
+    }
+
+    [AvaloniaFact]
+    public async Task LinkedTab_GetsHalfBodyWidth_FixedMode()
+    {
+        _sp = CreateServices();
+        var settings = _sp.GetRequiredService<ISettingsService>();
+        var previous = settings.Current;
+        await settings.UpdateAsync(s => s with { TabWidthMode = TabWidthMode.Fixed, FixedTabWidth = 200 });
+        try
+        {
+            var workspace = _sp.GetRequiredService<IWorkspaceService>();
+            var owner = await workspace.OpenAsync(_ownerDir);
+            var sub = new SubmoduleInfo { Name = "vendor/lib", Path = "vendor/lib", Url = _childDir, Status = SubmoduleStatus.Clean };
+            var child = await workspace.OpenSubmoduleAsync(owner, sub);
+
+            var band = new AppBandView();
+            band.Initialize(_sp);
+
+            var window = new Window { Width = 1280, Height = 40, Content = band };
+            window.Show();
+            Dispatcher.UIThread.RunJobs();
+            window.UpdateLayout();
+
+            var bodies = band.GetVisualDescendants().OfType<Border>()
+                .Where(b => b.Classes.Contains("tabBody") && b.DataContext is RepoTabViewModel)
+                .ToList();
+            var ownerBody = bodies.Single(b => ReferenceEquals(((RepoTabViewModel)b.DataContext!).Context, owner));
+            var childBody = bodies.Single(b => ReferenceEquals(((RepoTabViewModel)b.DataContext!).Context, child));
+
+            Assert.Equal(200, ownerBody.Bounds.Width);
+            Assert.Equal(100, childBody.Bounds.Width);
+
+            window.Close();
+            band.Dispose();
+        }
+        finally
+        {
+            await settings.UpdateAsync(s => s with { TabWidthMode = previous.TabWidthMode, FixedTabWidth = previous.FixedTabWidth });
+        }
     }
 
     private sealed class FakeThemeProbe : ISystemThemeProbe
