@@ -7,9 +7,9 @@ param(
     [string]$Remote = 'origin'
 )
 
-# Tags HEAD and pushes the tag, which starts the Package workflow. The release notes file
-# docs/release-notes/<tag>.md must already be committed. Only the tag is pushed, after a
-# confirmation; no branch is pushed.
+# Tags HEAD and pushes the tag, which starts the Package workflow. When HEAD contains
+# docs/release-notes/<tag>.md the draft release starts from it; otherwise the draft release has a
+# blank body. Only the tag is pushed, after a confirmation; no branch is pushed.
 
 $ErrorActionPreference = 'Stop'
 
@@ -47,11 +47,6 @@ if ($Tag -notmatch '^v\d+\.\d+\.\d+([-+][0-9A-Za-z.+-]+)?$') {
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 
-$hooksPath = (& git -C $RepoRoot config --get core.hooksPath)
-if ($hooksPath -ne '.githooks') {
-    Write-Warning "core.hooksPath is not '.githooks', so the pre-push hook will not check the release notes. Enable it with: git config core.hooksPath .githooks"
-}
-
 $status = Invoke-Git -Arguments @('status', '--porcelain')
 if ($status) {
     throw "The working tree is not clean. Commit or stash your changes before releasing."
@@ -59,7 +54,7 @@ if ($status) {
 
 $notesPath = "docs/release-notes/$Tag.md"
 if (-not (Test-Git -Arguments @('cat-file', '-e', "HEAD:$notesPath"))) {
-    throw "HEAD has no $notesPath. Write the release notes from docs/release-notes/TEMPLATE.md and commit them first."
+    Write-Warning "HEAD has no $notesPath, so the draft release will have a blank body. Fill it in on GitHub, or commit the notes file to main later to sync it."
 }
 
 if (Test-Git -Arguments @('rev-parse', '--verify', '--quiet', "refs/tags/$Tag")) {

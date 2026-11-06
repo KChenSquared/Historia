@@ -1,16 +1,15 @@
 # Release notes
 
-Every release of Historia has one notes file in this folder. The file name is the tag:
+A release of Historia can have one notes file in this folder. The file name is the tag:
 `docs/release-notes/<tag>.md`, where the tag is `v` plus the MinVer version (for example
 `docs/release-notes/v0.11.0.md` for tag `v0.11.0`).
 
 ## How the files are used
 
-- **The tagged commit must contain the file.** A pre-push hook (`.githooks/pre-push`) refuses to
-  push a `v*` tag whose commit lacks its notes file, and the `Package` workflow repeats the check
-  on every pushed `v*` tag and fails before packaging when the file is missing.
-- **The draft release starts from the file.** The `Package` workflow creates the draft GitHub
-  release with the file's text as the start of the body.
+- **The file is optional.** The `Package` workflow creates the draft GitHub release, named after
+  the tag, whether or not the tagged commit contains a notes file.
+- **The draft release starts from the file.** When the tagged commit contains the file, the draft
+  release body starts with its text. Without one, the body is blank for the maintainer to fill in.
 - **GitHub's generated changelog is appended automatically** below the file's text. Do not paste a
   changelog or a list of pull requests into the file.
 - **Edits on `main` resync the release.** When a change to `docs/release-notes/v*.md` reaches
@@ -24,6 +23,7 @@ Every release of Historia has one notes file in this folder. The file name is th
 1. Copy [`TEMPLATE.md`](TEMPLATE.md) to `docs/release-notes/<tag>.md`.
 2. Replace `vX.Y.Z` in the heading with the tag, fill in the sections and delete the empty ones.
 3. Keep the line about supported packages.
-4. Merge the file to `main` before tagging, so the tagged commit contains it.
+4. Merge the file to `main` before tagging so the draft release starts from it, or after the
+   release exists so the sync rewrites its body.
 
 This README and `TEMPLATE.md` do not match `v*.md`, so no check or workflow treats them as notes.

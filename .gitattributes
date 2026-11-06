@@ -9,4 +9,3 @@ Historia.ScenarioLab/templates/** binary
 
 packaging/linux/** text eol=lf
 packaging/macos/** text eol=lf
-.githooks/* text eol=lf

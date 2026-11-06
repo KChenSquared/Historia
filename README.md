@@ -142,7 +142,7 @@ the graph at 30k commits for lower memory use is available in settings.
 
 Download pre-built packages from [GitHub Releases](https://github.com/KChenSquared/Historia/releases). Windows is the only officially supported platform; pre-built release binaries are provided for `win-x64`.
 
-Each release is described by a notes file named after its tag in [`docs/release-notes/`](docs/release-notes/), for example `docs/release-notes/v0.11.0.md`. The text on a release page is that file followed by the generated changelog. Maintainers: the full procedure, including the pre-push hook that requires the file before a release tag can be pushed, is in [Releases](docs/contributing.md#5-releases).
+A release can be described by a notes file named after its tag in [`docs/release-notes/`](docs/release-notes/), for example `docs/release-notes/v0.11.0.md`. The text on such a release page is that file followed by the generated changelog. Maintainers: the full procedure is in [Releases](docs/contributing.md#5-releases).
 
 ### Windows (officially supported)
 - **Installer (`Historia-<version>-win-x64-setup.exe`):** Recommended. Provides a Start Menu shortcut and an **Add to PATH** option (enabled by default) for `Historia` and `historia-cmdr`. If the .NET 10 Desktop Runtime is not installed, the installer bundles and installs it during setup.

@@ -40,29 +40,7 @@ env:
   DOTNET_DESKTOP_RUNTIME_SHA512: 'd4decabfb31ed54898637f01a0c38d5ef581e99926aa448f2378ac40c4362f93b403305e10d8c5e5e764f8ec9c04cf50ff5f3e70ac98f05da2651eb5c85a8cd3'
 
 jobs:
-  notes-check:
-    if: github.ref_type == 'tag'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 1
-
-      - name: Require release notes in the tagged commit
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          notes="docs/release-notes/${TAG}.md"
-          if ! git cat-file -e "HEAD:${notes}"; then
-            echo "::error title=Release notes missing::Tag ${TAG} points at a commit without ${notes}. Delete the tag with 'git push --delete origin ${TAG}', add and merge the notes file, then tag the new commit and push the tag again."
-            exit 1
-          fi
-          echo "Found ${notes} in the tagged commit."
-
   plan:
-    needs: notes-check
-    if: ${{ !cancelled() && (needs.notes-check.result == 'success' || needs.notes-check.result == 'skipped') }}
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.build-plan.outputs.matrix }}
@@ -108,9 +86,6 @@ jobs:
 
   package:
     needs: plan
-    # A skipped notes-check (manual runs) would otherwise skip this job through the indirect
-    # dependency.
-    if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     # A failed experimental platform must not block the Windows release.
     continue-on-error: ${{ matrix.experimental == true }}
@@ -205,6 +180,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG" --draft --verify-tag \
-            --notes-file "docs/release-notes/${TAG}.md" --generate-notes \
-            dist/*
+          # With a notes file the body is that file followed by GitHub's generated changelog;
+          # without one the body is left blank for the maintainer to fill in.
+          notes="docs/release-notes/${TAG}.md"
+          if [ -f "$notes" ]; then
+            gh release create "$TAG" --draft --verify-tag --title "$TAG" \
+              --notes-file "$notes" --generate-notes \
+              dist/*
+          else
+            gh release create "$TAG" --draft --verify-tag --title "$TAG" \
+              --notes "" \
+              dist/*
+          fi

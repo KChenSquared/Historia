@@ -55,7 +55,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Test the release notes hook and sync script
+      - name: Test the release notes sync script
         run: python -I -m unittest discover -s .github/scripts -p "test_release_notes*.py"
 
   gitleaks:
