@@ -204,13 +204,18 @@ public sealed class GitLogStream : IEnumerator<RawCommit>
     }
 
     /// <summary>
-    /// Runs the git process at <c>BelowNormal</c> priority when <paramref name="low"/> is true and
-    /// at <c>Normal</c> otherwise, so a background walk yields the CPU to interactive work.
+    /// Windows: runs the git process at <c>BelowNormal</c> priority when <paramref name="low"/> is
+    /// true and at <c>Normal</c> otherwise, so a background walk yields the CPU to interactive work.
+    /// Linux and macOS: does nothing. Trap: an unprivileged process can raise its nice value but
+    /// cannot lower it again, so a walk lowered for a background tab would stay slow after its tab
+    /// came to the front.
     /// Idempotent and best-effort: a process that already exited, or a platform refusal, is
     /// ignored.
     /// </summary>
     public void SetLowPriority(bool low)
     {
+        if (!OperatingSystem.IsWindows())
+            return;
         if (_disposed || Interlocked.Exchange(ref _lowPriority, low ? 1 : 0) == (low ? 1 : 0))
             return;
         try
