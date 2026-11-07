@@ -321,7 +321,7 @@ public sealed partial class GitGateway(
 
     public async Task FetchAsync(string remote, GitFetchOptions options, IProgress<GitProgress>? progress, CancellationToken ct = default)
     {
-        await ThreadHop.LeaveUiThreadAsync().ConfigureAwait(false);
+        await ThreadHop.LeaveUiThreadAsync();
 
         if (options.All)
         {
@@ -486,7 +486,7 @@ public sealed partial class GitGateway(
         IReadOnlyList<string> args, string operation, SelfOperationKind scope, string? remote,
         IProgress<GitProgress>? progress, CancellationToken ct, bool background = false)
     {
-        await ThreadHop.LeaveUiThreadAsync().ConfigureAwait(false);
+        await ThreadHop.LeaveUiThreadAsync();
 
         string? remoteUrl = null;
         if (remote is not null)
