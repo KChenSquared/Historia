@@ -38,11 +38,19 @@ public sealed class ImmediateUiDispatcher : IUiDispatcher
 /// instead of running anything inline, so a test can control exactly when each fires and count
 /// how many were queued in between — the thing <see cref="ImmediateUiDispatcher"/> can't show,
 /// since it collapses a whole Post→Start→tick chain into one synchronous call.</summary>
+/// <summary>A UI dispatcher that queues posts until the test drains them. Posts may arrive from
+/// pool threads (a view model's background work marshals back through it) while the test drains,
+/// so the queue is guarded.</summary>
 public sealed class RecordingUiDispatcher : IUiDispatcher
 {
+    private readonly object _gate = new();
     private readonly Queue<Action> _posted = new();
+    private int _postCount;
 
-    public int PostCount { get; private set; }
+    public int PostCount
+    {
+        get { lock (_gate) return _postCount; }
+    }
 
     /// <summary>What <see cref="CheckAccess"/> reports; true by default, as if the caller were already
     /// on the UI thread. Set false to exercise the marshalling path.</summary>
@@ -52,17 +60,28 @@ public sealed class RecordingUiDispatcher : IUiDispatcher
 
     public void Post(Action action)
     {
-        PostCount++;
-        _posted.Enqueue(action);
+        lock (_gate)
+        {
+            _postCount++;
+            _posted.Enqueue(action);
+        }
     }
 
-    /// <summary>Runs every queued post, in order, until none remain (a post can itself queue
-    /// another — e.g. the terminal session's Start() call queues nothing further today, but
-    /// draining to a fixed point keeps the helper honest either way).</summary>
+    /// <summary>Runs every queued post, in order, on the calling thread until none remain. Each
+    /// action runs outside the lock, so it can queue another, which also runs.</summary>
     public void DrainPosted()
     {
-        while (_posted.Count > 0)
-            _posted.Dequeue()();
+        while (true)
+        {
+            Action next;
+            lock (_gate)
+            {
+                if (_posted.Count == 0)
+                    return;
+                next = _posted.Dequeue();
+            }
+            next();
+        }
     }
 
     /// <summary>The most recently created timer — a session creates exactly one.</summary>
