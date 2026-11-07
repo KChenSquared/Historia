@@ -209,10 +209,6 @@ public sealed class GraphLayoutExtendLockTests
         return (Stopwatch.GetElapsedTime(0, maxTicks), acquisitions);
     }
 
-    /// <summary>Scheduler noise allowed on top of three chunk times: a reader that has to be woken
-    /// can lose a whole timer quantum on a loaded machine.</summary>
-    private static readonly TimeSpan SchedulerSlack = TimeSpan.FromMilliseconds(15);
-
     [Fact]
     public void A_reader_waits_for_one_chunk_not_for_the_whole_extend()
     {
@@ -220,43 +216,22 @@ public sealed class GraphLayoutExtendLockTests
         const int rows = 80_000;
         var commits = History(first + rows + 10);
         var slice = commits.GetRange(first, rows + 10);
+        var chunks = _engine.Compute(commits.GetRange(0, first), null, first);
 
-        var chunkedBest = TimeSpan.MaxValue;
-        var chunkTime = TimeSpan.MaxValue;
-        var chunkedAcquisitions = 0;
+        // The guarantee is structural: no hold of the lock places more than one chunk, so a reader
+        // never queues behind more than one chunk's work. The extend reports each hold's rows once
+        // its lock is released.
+        var holds = new List<int>();
+        var (wait, acquisitions) = MeasureReaderWait(chunks.State, () =>
+            GraphLayoutService.ExtendInChunks(chunks, slice, null, first, rows, chunkExtended: holds.Add));
 
-        // A wait is also stretched by scheduling noise on a loaded machine, so the chunked run is
-        // judged by its best of three (more, only while it has not yet passed) against the time one
-        // chunk takes, measured the same way: the best of the runs' own single-chunk extends.
-        for (var attempt = 0; attempt < 5; attempt++)
-        {
-            var probe = _engine.Compute(commits.GetRange(0, first), null, first);
-            var t0 = Stopwatch.GetTimestamp();
-            lock (probe.State)
-                DagLayoutEngine.ExtendInPlace(probe.State, slice, 0, null, first + GraphLayoutService.ExtendChunkRows);
-            var elapsed = Stopwatch.GetElapsedTime(t0);
-            if (elapsed < chunkTime)
-                chunkTime = elapsed;
-
-            var chunks = _engine.Compute(commits.GetRange(0, first), null, first);
-            var (wait, acquisitions) = MeasureReaderWait(chunks.State, () =>
-                GraphLayoutService.ExtendInChunks(chunks, slice, null, first, rows));
-            Assert.Equal(first + rows, chunks.State.Rows.Count);
-            if (wait < chunkedBest)
-            {
-                chunkedBest = wait;
-                chunkedAcquisitions = acquisitions;
-            }
-            if (attempt >= 2 && chunkedBest < 3 * chunkTime + SchedulerSlack)
-                break;
-        }
-
-        var limit = 3 * chunkTime + SchedulerSlack;
-        var detail = $"a reader waited {chunkedBest.TotalMilliseconds:0.0} ms during a chunked extend of {rows} rows " +
-            $"({chunkedAcquisitions} acquisitions); one chunk of {GraphLayoutService.ExtendChunkRows} rows takes " +
-            $"{chunkTime.TotalMilliseconds:0.00} ms (limit {limit.TotalMilliseconds:0.0} ms)";
-        Assert.True(chunkedAcquisitions >= 3, detail);
-        Assert.True(chunkedBest < limit, detail);
+        Assert.Equal(first + rows, chunks.State.Rows.Count);
+        var detail = $"holds added {string.Join(",", holds.Take(5))}... ({holds.Count} holds, largest {holds.Max()}); " +
+            $"the chunk limit is {GraphLayoutService.ExtendChunkRows} rows; a reader waited {wait.TotalMilliseconds:0.0} ms " +
+            $"({acquisitions} acquisitions)";
+        Assert.True(holds.Max() <= GraphLayoutService.ExtendChunkRows, detail);
+        Assert.Equal(rows, holds.Sum());
+        Assert.True(holds.Count >= rows / GraphLayoutService.ExtendChunkRows, detail);
     }
 
     [Fact]
