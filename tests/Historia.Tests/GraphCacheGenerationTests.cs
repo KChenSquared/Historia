@@ -138,25 +138,36 @@ public sealed class GraphCacheGenerationTests : IAsyncDisposable
     public async Task Hibernate_during_a_foreground_extend_completes_without_fallback()
     {
         const int commitCount = 300;
+        const int iterations = 50;
         var repo = NewRepo("linear-300", commitCount);
         var expected = await InMemoryOrderAsync(repo.Path);
         var svc = DiskService();
 
-        for (var i = 0; i < 50; i++)
-        {
-            await using var ctx = _host.Open(repo.Path);
-            ctx.MarkFirstGraphPaintDone();
-            ctx.MarkFirstFullLoadDone();
+        // One tab for every round, as in a session: it is hibernated on each switch away and
+        // computes again on the switch back, so a round costs one walk and not a tab open too.
+        await using var ctx = _host.Open(repo.Path);
+        ctx.MarkFirstGraphPaintDone();
+        ctx.MarkFirstFullLoadDone();
+        string CacheState() => svc.GetCacheStateForTesting(ctx)?.ToString() ?? "none, or a cache lock was busy";
 
-            var layout = await svc.ComputeLayoutAsync(ctx, Q, 20);
+        var loop = System.Diagnostics.Stopwatch.StartNew();
+        var slowest = TimeSpan.Zero;
+        for (var i = 0; i < iterations; i++)
+        {
+            Assert.True(
+                loop.Elapsed < LoopBudget,
+                $"only {i} of {iterations} rounds ran in {loop.Elapsed.TotalSeconds:0} s (slowest round {slowest.TotalMilliseconds:0} ms): the runner is too slow for this loop, no step is stuck");
+            var round = System.Diagnostics.Stopwatch.StartNew();
+
+            var layout = await StepAsync(svc.ComputeLayoutAsync(ctx, Q, 20), "compute the painted window", i, CacheState);
             // The painted graph's own lease on the store: the tab switch releases the cache's.
             var lease = layout.Layout.Commits.AddRef();
             try
             {
                 var extend = Task.Run(() => svc.ExtendLayoutAsync(ctx, layout, additionalRows: 100));
                 await Task.Delay(i % 4);
-                await svc.Hibernate(ctx);
-                var extended = await extend;
+                await StepAsync(svc.Hibernate(ctx), "hibernate", i, CacheState);
+                var extended = await StepAsync(extend, "finish the extend that raced the hibernate", i, CacheState);
 
                 Assert.Equal(expected.Take(extended.Layout.RowCount), Ids(extended));
             }
@@ -164,6 +175,31 @@ public sealed class GraphCacheGenerationTests : IAsyncDisposable
             {
                 lease?.Dispose();
             }
+            if (round.Elapsed > slowest)
+                slowest = round.Elapsed;
         }
     }
+
+    /// <summary>How long one awaited step of the hibernate loop may take before the test names it.
+    /// A step is a walk or a teardown: seconds on a loaded runner, never this long unless stuck.</summary>
+    private static readonly TimeSpan StepDeadline = TimeSpan.FromSeconds(20);
+
+    /// <summary>The whole loop gives up here, naming how far it got, so a slow runner reads as slow
+    /// and not as the test timeout's silent kill.</summary>
+    private static readonly TimeSpan LoopBudget = TimeSpan.FromSeconds(100);
+
+    private static async Task<T> StepAsync<T>(Task<T> step, string name, int iteration, Func<string> state)
+    {
+        try { return await step.WaitAsync(StepDeadline); }
+        catch (TimeoutException) { throw StepStuck(name, iteration, state); }
+    }
+
+    private static async Task StepAsync(Task step, string name, int iteration, Func<string> state)
+    {
+        try { await step.WaitAsync(StepDeadline); }
+        catch (TimeoutException) { throw StepStuck(name, iteration, state); }
+    }
+
+    private static TimeoutException StepStuck(string name, int iteration, Func<string> state) =>
+        new($"iteration {iteration}: '{name}' did not finish within {StepDeadline.TotalSeconds:0} s. Cache: {state()}");
 }
