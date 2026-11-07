@@ -1721,15 +1721,30 @@ public class WorkspaceServiceRefreshPacingTests : WorkspaceServiceTestBase
         private readonly List<ManualTimer> _timers = [];
         private readonly List<(TimerCallback Callback, object? State)> _created = [];
         private long _now;
+        private int _timestampReads;
 
         public override long TimestampFrequency => TimeSpan.TicksPerSecond;
 
         public override long GetTimestamp()
         {
-            lock (_gate) return _now;
+            lock (_gate)
+            {
+                _timestampReads++;
+                return _now;
+            }
         }
 
-        public TimeSpan Now => TimeSpan.FromTicks(GetTimestamp());
+        /// <summary>How many times the code under test has read the clock. The test's own reads go
+        /// through <see cref="Now"/>, which is not counted.</summary>
+        public int TimestampReads
+        {
+            get { lock (_gate) return _timestampReads; }
+        }
+
+        public TimeSpan Now
+        {
+            get { lock (_gate) return TimeSpan.FromTicks(_now); }
+        }
 
         /// <summary>The callback and state of the n-th timer created, so a test can fire a timer that was already disposed.</summary>
         public (TimerCallback Callback, object? State) CreatedTimer(int index)
@@ -1855,6 +1870,21 @@ public class WorkspaceServiceRefreshPacingTests : WorkspaceServiceTestBase
                 Assert.True(await _callSignal.WaitAsync(TimeSpan.FromSeconds(20)), "no refresh started");
         }
 
+        /// <summary>Waits until the load's own status has ended. That refresh is not paced, so
+        /// <c>IsPacedRefreshRunningForTesting</c> never sees it; it opens the pacing window by
+        /// reading the clock once as it ends, on whichever thread finishes it. Moving the clock
+        /// before that read puts the window's start in the future, and a request meant to run at
+        /// once then joins a trailing refresh that the clock never reaches.</summary>
+        public async Task WaitForLoadStatusToEndAsync()
+        {
+            var deadline = Stopwatch.StartNew();
+            while (time.TimestampReads == 0)
+            {
+                Assert.True(deadline.Elapsed < TimeSpan.FromSeconds(20), "the load's status never ended");
+                await Task.Delay(1);
+            }
+        }
+
         public ValueTask DisposeAsync() => workspace.DisposeAsync();
     }
 
@@ -1883,6 +1913,7 @@ public class WorkspaceServiceRefreshPacingTests : WorkspaceServiceTestBase
         // that moment on the clock, then leave the pacing window behind.
         await rig.WaitForCallsAsync(1);
         time.Advance(statusCost);
+        await rig.WaitForLoadStatusToEndAsync();
         await rig.WaitForPacedRefreshToEndAsync();
         time.Advance(TimeSpan.FromSeconds(10));
         rig.ResetCalls();
@@ -2024,6 +2055,7 @@ public class WorkspaceServiceRefreshPacingTests : WorkspaceServiceTestBase
         rig.Workspace.SetAppActive(false);
 
         var first = rig.Request();
+        await rig.WaitForCallsAsync(1);
         rig.Time.Advance(TimeSpan.FromSeconds(1.5));
         await first;
         Assert.Single(rig.Calls);
@@ -2033,7 +2065,9 @@ public class WorkspaceServiceRefreshPacingTests : WorkspaceServiceTestBase
         await rig.WaitForCallsAsync(2);
 
         Assert.Equal(activatedAt, rig.Calls[1].At);
-        Assert.False(rig.Calls[1].Full);
+        // A tab whose watcher could not start (an exhausted inotify budget, say) is degraded and is
+        // refreshed in full on activation; a healthy one is not.
+        Assert.Equal(rig.Context.Watcher.IsDegraded, rig.Calls[1].Full);
         Assert.True(rig.Workspace.IsAppActive);
         rig.Time.Advance(TimeSpan.FromSeconds(2));
     }
