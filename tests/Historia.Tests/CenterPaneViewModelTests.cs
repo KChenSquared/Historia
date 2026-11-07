@@ -198,13 +198,20 @@ public sealed class CenterPaneViewModelTests : IAsyncDisposable
     [Fact]
     public async Task An_open_diff_beats_the_resolver_and_closing_it_returns_to_the_resolver()
     {
-        var vm = Create();
+        // Every refresh runs on the test thread when it drains, as the UI thread would serialize
+        // them. An immediate dispatcher would also run the watcher's status events on pool threads,
+        // where a refresh computed before the diff opened can write its mode after this one.
+        var ui = new RecordingUiDispatcher { OnUiThread = false };
+        var vm = Create(ui);
         await StartSessionAsync();
+        ui.DrainPosted();
 
         _ctx.State.SetOpenDiff(Diff());
+        ui.DrainPosted();
         Assert.Equal(CenterPaneMode.Diff, vm.Mode);
 
         _ctx.State.SetOpenDiff(null);
+        ui.DrainPosted();
         Assert.Equal(CenterPaneMode.Conflict, vm.Mode);
     }
 
