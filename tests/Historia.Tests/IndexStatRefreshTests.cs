@@ -167,52 +167,50 @@ public sealed class IndexStatRefreshTests : IAsyncDisposable
         Assert.Equal(FileMtimeSeconds(repo, "t.txt"), IndexedMtimeSeconds(repo, "t.txt"));
     }
 
-    // An index entry is racily clean when its file's mtime is not older than the index file itself.
-    // Git then compares content instead of trusting the stat data, and smudges the recorded size
-    // whenever it writes such an entry (Documentation/technical/racy-git). The refresh rewrites
-    // the index, so it must leave an edit made right after it detectable. An mtime a minute ahead
-    // makes the entry racy whatever the clock does; offset 0 is the entry written in the same
-    // second as the refresh. When a second boundary passes between choosing that mtime and git
-    // writing the index, the entry is not racy and the scenario does not apply; it starts again,
-    // and a loaded machine can need many starts.
-    [Theory(Timeout = 180000)]
+    // An index entry is racily clean when its file's mtime is not older than the index file's own
+    // mtime. Git then compares content instead of trusting the stat data (technical/racy-git), and
+    // an update-index --refresh leaves the entries it just verified with their real size. So the
+    // refresh must leave an edit made right after it detectable. Offset 0 is an index stamped with
+    // the entry's own mtime, the state a refresh that finishes in the second of the edit leaves
+    // behind; offset 60 gives the entry an mtime a minute ahead of the index, which is racy whatever
+    // the clock does. Trap: waiting for the refresh to land in the same wall-clock second as the
+    // edit's mtime never converged on a busy machine, because opening the repository and spawning
+    // git took most of a second, so a second boundary almost always fell in between.
+    [Theory(Timeout = 60000)]
     [InlineData(0)]
     [InlineData(60)]
     public async Task An_edit_made_in_the_same_second_as_the_refresh_is_still_reported_modified(int offsetSeconds)
     {
-        for (var attempt = 0; attempt < 30; attempt++)
-        {
-            using var repo = NewRepo();
-            Write(repo, "f.txt", "aaaa\n", Past);
-            Write(repo, "u.txt", "uuuu\n", Past.AddMinutes(1));
-            repo.Stage();
-            repo.Commit("init");
-            var blobsBefore = repo.Git("ls-files", "-s");
+        using var repo = NewRepo();
+        Write(repo, "f.txt", "aaaa\n", Past);
+        Write(repo, "u.txt", "uuuu\n", Past.AddMinutes(1));
+        repo.Stage();
+        repo.Commit("init");
+        var blobsBefore = repo.Git("ls-files", "-s");
 
-            var racy = DateTime.UtcNow.AddSeconds(offsetSeconds);
-            File.SetLastWriteTimeUtc(Path.Combine(repo.Path, "f.txt"), racy);
+        var racy = DateTime.UtcNow.AddSeconds(offsetSeconds);
+        File.SetLastWriteTimeUtc(Path.Combine(repo.Path, "f.txt"), racy);
 
-            var (ctx, _) = Open(repo);
-            await ctx.Gateway.RefreshIndexStatAsync();
+        var (ctx, cli) = Open(repo);
+        await ctx.Gateway.RefreshIndexStatAsync();
+        Assert.Equal(1, RefreshCount(cli));
+        if (offsetSeconds == 0)
+            File.SetLastWriteTimeUtc(IndexPath(repo), racy);
 
-            var racySeconds = new DateTimeOffset(racy).ToUnixTimeSeconds();
-            var indexSeconds = new DateTimeOffset(File.GetLastWriteTimeUtc(IndexPath(repo))).ToUnixTimeSeconds();
-            if (offsetSeconds == 0 && indexSeconds != racySeconds)
-                continue;
+        var racySeconds = new DateTimeOffset(racy).ToUnixTimeSeconds();
+        var indexSeconds = new DateTimeOffset(File.GetLastWriteTimeUtc(IndexPath(repo))).ToUnixTimeSeconds();
+        var racyCase = offsetSeconds == 0 ? indexSeconds == racySeconds : indexSeconds < racySeconds;
+        Assert.True(racyCase, $"The entry is not racy: file mtime second {racySeconds}, index mtime second {indexSeconds}.");
+        Assert.Equal(racySeconds, FileMtimeSeconds(repo, "f.txt"));
+        Assert.Equal(racySeconds, IndexedMtimeSeconds(repo, "f.txt"));
+        Assert.Empty((await ctx.Gateway.GetStatusAsync()).Unstaged);
 
-            Assert.Equal(FileMtimeSeconds(repo, "f.txt"), IndexedMtimeSeconds(repo, "f.txt"));
-            Assert.Empty((await ctx.Gateway.GetStatusAsync()).Unstaged);
+        repo.WriteFile("f.txt", "bbbb\n");
+        File.SetLastWriteTimeUtc(Path.Combine(repo.Path, "f.txt"), racy);
 
-            repo.WriteFile("f.txt", "bbbb\n");
-            File.SetLastWriteTimeUtc(Path.Combine(repo.Path, "f.txt"), racy);
-
-            var status = await ctx.Gateway.GetStatusAsync();
-            Assert.True(IsModified(status, "f.txt"));
-            Assert.Equal(blobsBefore, repo.Git("ls-files", "-s"));
-            return;
-        }
-
-        Assert.Fail("The refresh never wrote the index in the second of the edit.");
+        var status = await ctx.Gateway.GetStatusAsync();
+        Assert.True(IsModified(status, "f.txt"), repo.Git("ls-files", "--debug", "--", "f.txt"));
+        Assert.Equal(blobsBefore, repo.Git("ls-files", "-s"));
     }
 
     [Fact(Timeout = 60000)]

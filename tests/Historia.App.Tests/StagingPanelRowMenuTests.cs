@@ -211,7 +211,9 @@ public class StagingPanelRowMenuTests : IDisposable
         var panel = ShowPanel(out _);
 
         await Row(panel, "one.txt").IgnoreCommand.ExecuteAsync(null);
-        await WaitUntilAsync(() => _context.State.Status.Untracked.All(f => f.Path != "one.txt"));
+        // The panel rebuilds its rows after the status lands, so wait for the row to go too.
+        await WaitUntilAsync(() => _context.State.Status.Untracked.All(f => f.Path != "one.txt")
+            && panel.ViewModel.Changes.OfType<FileRowViewModel>().All(r => r.Path != "one.txt"));
 
         Assert.Equal("/one.txt\n", await File.ReadAllTextAsync(FilePath(".gitignore")));
         Assert.DoesNotContain(panel.ViewModel.Changes.OfType<FileRowViewModel>(), r => r.Path == "one.txt");
@@ -312,7 +314,9 @@ public class StagingPanelRowMenuTests : IDisposable
         Dispatcher.UIThread.RunJobs();
 
         Assert.False(panel.ViewModel.IsStagingBusy);
-        await WaitUntilAsync(() => _context.State.Status.Staged.Count == 3);
+        // The panel rebuilds its rows after the status lands, so wait for the row itself.
+        await WaitUntilAsync(() => _context.State.Status.Staged.Count == 3
+            && panel.ViewModel.Staged.OfType<FileRowViewModel>().Any(r => r.Path == "one.txt"));
         var staged = Row(panel, "one.txt", staged: true);
         Assert.True(staged.UnstageCommand.CanExecute(null));
         Assert.True(staged.IgnoreCommand.CanExecute(null));

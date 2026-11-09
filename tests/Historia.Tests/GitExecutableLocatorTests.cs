@@ -104,8 +104,8 @@ public class GitExecutableLocatorTests
         var root = TestScratch.NewDirectory("historia-locator-");
         try
         {
-            var launcher = TouchGit(root, launcherDirectory);
-            var direct = TouchGit(root, "mingw64", "bin");
+            var launcher = TouchWindowsGit(root, launcherDirectory);
+            var direct = TouchWindowsGit(root, "mingw64", "bin");
 
             Assert.Equal(direct, GitExecutableLocator.PreferDirectGit(launcher));
         }
@@ -121,10 +121,10 @@ public class GitExecutableLocatorTests
         var root = TestScratch.NewDirectory("historia-locator-");
         try
         {
-            var launcher = TouchGit(root, "cmd");
-            TouchGit(root, "mingw64", "bin");
-            TouchGit(root, "clangarm64", "bin");
-            var ucrt = TouchGit(root, "ucrt64", "bin");
+            var launcher = TouchWindowsGit(root, "cmd");
+            TouchWindowsGit(root, "mingw64", "bin");
+            TouchWindowsGit(root, "clangarm64", "bin");
+            var ucrt = TouchWindowsGit(root, "ucrt64", "bin");
 
             Assert.Equal(ucrt, GitExecutableLocator.PreferDirectGit(launcher));
         }
@@ -140,8 +140,8 @@ public class GitExecutableLocatorTests
         var root = TestScratch.NewDirectory("historia-locator-");
         try
         {
-            var launcher = TouchGit(root, "cmd");
-            var arm = TouchGit(root, "clangarm64", "bin");
+            var launcher = TouchWindowsGit(root, "cmd");
+            var arm = TouchWindowsGit(root, "clangarm64", "bin");
 
             Assert.Equal(arm, GitExecutableLocator.PreferDirectGit(launcher));
         }
@@ -157,9 +157,9 @@ public class GitExecutableLocatorTests
         var root = TestScratch.NewDirectory("historia-locator-");
         try
         {
-            var launcher = TouchGit(root, "cmd");
-            var elsewhere = TouchGit(root, "tools");
-            var direct = TouchGit(root, "mingw64", "bin");
+            var launcher = TouchWindowsGit(root, "cmd");
+            var elsewhere = TouchWindowsGit(root, "tools");
+            var direct = TouchWindowsGit(root, "mingw64", "bin");
 
             Assert.Equal(elsewhere, GitExecutableLocator.PreferDirectGit(elsewhere));
             Assert.Equal(direct, GitExecutableLocator.PreferDirectGit(direct));
@@ -178,8 +178,8 @@ public class GitExecutableLocatorTests
         var root = TestScratch.NewDirectory("historia-locator-");
         try
         {
-            var launcher = TouchGit(root, "cmd");
-            TouchGit(root, "mingw64", "bin");
+            var launcher = TouchWindowsGit(root, "cmd");
+            TouchWindowsGit(root, "mingw64", "bin");
 
             var info = await new GitExecutableLocator().ResolveAsync(launcher);
 
@@ -197,8 +197,8 @@ public class GitExecutableLocatorTests
         var root = TestScratch.NewDirectory("historia-locator-");
         try
         {
-            var launcher = Path.Combine(root, "launcher.cmd");
-            var direct = WriteCmd(root, "direct.cmd", "@echo C:\\fake\\libexec\\git-core");
+            var launcher = Path.Combine(root, OperatingSystem.IsWindows() ? "launcher.cmd" : "launcher");
+            var direct = WriteScript(root, "direct", "@echo C:\\fake\\libexec\\git-core", "echo /fake/libexec/git-core");
 
             var chosen = await GitExecutableLocator.ChooseGitPathAsync(launcher, direct, TimeSpan.FromSeconds(30));
 
@@ -216,11 +216,11 @@ public class GitExecutableLocatorTests
         var root = TestScratch.NewDirectory("historia-locator-");
         try
         {
-            var launcher = Path.Combine(root, "launcher.cmd");
-            var failing = WriteCmd(root, "failing.cmd", "@exit /b 3");
+            var launcher = Path.Combine(root, OperatingSystem.IsWindows() ? "launcher.cmd" : "launcher");
+            var failing = WriteScript(root, "failing", "@exit /b 3", "exit 3");
 
             Assert.Equal(launcher, await GitExecutableLocator.ChooseGitPathAsync(launcher, failing, TimeSpan.FromSeconds(30)));
-            Assert.Equal(launcher, await GitExecutableLocator.ChooseGitPathAsync(launcher, Path.Combine(root, "missing.exe"), TimeSpan.FromSeconds(30)));
+            Assert.Equal(launcher, await GitExecutableLocator.ChooseGitPathAsync(launcher, Path.Combine(root, OperatingSystem.IsWindows() ? "missing.exe" : "missing"), TimeSpan.FromSeconds(30)));
         }
         finally
         {
@@ -234,7 +234,7 @@ public class GitExecutableLocatorTests
         var root = TestScratch.NewDirectory("historia-locator-");
         try
         {
-            var fake = WriteCmd(root, "git.cmd", "@echo git version 2.51.0.windows.2");
+            var fake = WriteScript(root, "git", "@echo git version 2.51.0.windows.2", "echo 'git version 2.51.0.windows.2'");
 
             var version = await GitExecutableLocator.CaptureVersionAsync(fake, TimeSpan.FromSeconds(30));
 
@@ -252,7 +252,7 @@ public class GitExecutableLocatorTests
         var root = TestScratch.NewDirectory("historia-locator-");
         try
         {
-            var hung = WriteCmd(root, "hung.cmd", "@ping -n 120 127.0.0.1 >nul");
+            var hung = WriteScript(root, "hung", "@ping -n 120 127.0.0.1 >nul", "sleep 120");
 
             var started = Stopwatch.StartNew();
             var version = await GitExecutableLocator.CaptureVersionAsync(hung, TimeSpan.FromSeconds(1));
@@ -463,7 +463,7 @@ public class GitExecutableLocatorTests
         try
         {
             var cmdDir = Path.Combine(root, "shim");
-            var shim = WriteCmd(cmdDir, "git.cmd", "@echo git version 2.56.0");
+            var shim = WriteNamedScript(cmdDir, "git.cmd", "@echo git version 2.56.0", "echo 'git version 2.56.0'");
             var real = TouchGit(root, "real", "tools");
             var pathVar = string.Join(Path.PathSeparator, cmdDir, Path.GetDirectoryName(real));
             var locator = FakeLocator(Path.Combine(root, "app"), pathVar, new() { [shim] = "2.56.0", [real] = "2.50.0" });
@@ -487,7 +487,7 @@ public class GitExecutableLocatorTests
         try
         {
             var appDir = Path.Combine(root, "app");
-            var shim = WriteCmd(Path.Combine(appDir, "git", "ucrt64", "bin"), "git.cmd", "@echo git version 2.56.0");
+            var shim = WriteNamedScript(Path.Combine(appDir, "git", "ucrt64", "bin"), "git.cmd", "@echo git version 2.56.0", "echo 'git version 2.56.0'");
             var locator = FakeLocator(appDir, "", new() { [shim] = "2.56.0" });
 
             Assert.False((await locator.ResolveAsync(null)).Found);
@@ -574,7 +574,7 @@ public class GitExecutableLocatorTests
         {
             var appDir = Path.Combine(root, "app");
             var bundled = TouchGit(appDir, "git", "ucrt64", "bin");
-            var missing = Path.Combine(root, "missing", "git.exe");
+            var missing = Path.Combine(root, "missing", GitExecutableLocator.ExecutableName);
             var locator = FakeLocator(appDir, "", new() { [bundled] = "2.56.0" });
 
             var info = await locator.ResolveAsync(missing);
@@ -596,7 +596,7 @@ public class GitExecutableLocatorTests
         var root = TestScratch.NewDirectory("historia-locator-user-none-");
         try
         {
-            var missing = Path.Combine(root, "missing", "git.exe");
+            var missing = Path.Combine(root, "missing", GitExecutableLocator.ExecutableName);
             var locator = FakeLocator(Path.Combine(root, "app"), "", []);
 
             var info = await locator.ResolveAsync(missing);
@@ -612,20 +612,42 @@ public class GitExecutableLocatorTests
         }
     }
 
-    private static string TouchGit(string root, params string[] directories)
+    private static string TouchGit(string root, params string[] directories) =>
+        TouchFile(GitExecutableLocator.ExecutableName, root, directories);
+
+    /// <summary>An empty <c>git.exe</c> in a Git for Windows directory layout, on every OS: the
+    /// launcher swap is path logic keyed on that file name.</summary>
+    private static string TouchWindowsGit(string root, params string[] directories) =>
+        TouchFile("git.exe", root, directories);
+
+    private static string TouchFile(string fileName, string root, string[] directories)
     {
         var directory = Path.Combine([root, .. directories]);
         Directory.CreateDirectory(directory);
-        var path = Path.Combine(directory, "git.exe");
+        var path = Path.Combine(directory, fileName);
         File.WriteAllText(path, "");
         return path;
     }
 
-    private static string WriteCmd(string root, string name, string body)
+    /// <summary>Writes an executable script: <c>&lt;name&gt;.cmd</c> running <paramref name="windowsBody"/>
+    /// on Windows, <c>&lt;name&gt;</c> running <paramref name="unixBody"/> under <c>/bin/sh</c> elsewhere.</summary>
+    private static string WriteScript(string root, string name, string windowsBody, string unixBody) =>
+        WriteNamedScript(root, OperatingSystem.IsWindows() ? name + ".cmd" : name, windowsBody, unixBody);
+
+    private static string WriteNamedScript(string root, string fileName, string windowsBody, string unixBody)
     {
         Directory.CreateDirectory(root);
-        var path = Path.Combine(root, name);
-        File.WriteAllText(path, body + Environment.NewLine);
+        var path = Path.Combine(root, fileName);
+        if (OperatingSystem.IsWindows())
+        {
+            File.WriteAllText(path, windowsBody + Environment.NewLine);
+        }
+        else
+        {
+            File.WriteAllText(path, "#!/bin/sh\n" + unixBody + "\n");
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
         return path;
     }
 }

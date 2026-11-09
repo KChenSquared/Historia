@@ -223,6 +223,12 @@ internal sealed class QueuedLineWriter : IDisposable
         }
     }
 
+    /// <summary>Characters currently counted against <see cref="MaxBacklogChars"/>.</summary>
+    internal long BacklogCharsForTesting => Volatile.Read(ref _backlogChars);
+
+    /// <summary>Lines refused since the writer last reported a drop count.</summary>
+    internal long DroppedForTesting => Interlocked.Read(ref _dropped);
+
     private void Write(string path, string line)
     {
         try

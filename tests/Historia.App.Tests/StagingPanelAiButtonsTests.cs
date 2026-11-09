@@ -811,9 +811,7 @@ public class StagingPanelAiButtonsTests : IDisposable
     {
         await ActivateAsync();
         await StageChangeAsync();
-        var hooks = System.IO.Path.Combine(_repoDir, ".git", "hooks");
-        Directory.CreateDirectory(hooks);
-        File.WriteAllText(System.IO.Path.Combine(hooks, "pre-commit"), "#!/bin/sh\nexit 1\n");
+        WritePreCommitHook("#!/bin/sh\nexit 1\n");
         var panel = NewPanel();
         panel.MessageInput.Text = "feat: will be rejected";
         panel.ViewModel.AuthorOverride = "Test <test@example.com>";
@@ -836,11 +834,20 @@ public class StagingPanelAiButtonsTests : IDisposable
     /// <summary>A pre-commit hook that waits until the test creates <c>.git/release</c>.</summary>
     private string HoldCommits()
     {
+        WritePreCommitHook("#!/bin/sh\nwhile [ ! -f .git/release ]; do sleep 0.05; done\nexit 0\n");
+        return System.IO.Path.Combine(_repoDir, ".git", "release");
+    }
+
+    /// <summary>Installs <paramref name="script"/> as the repository's pre-commit hook. Trap: off
+    /// Windows git skips a hook that is not executable, so the commit would go through.</summary>
+    private void WritePreCommitHook(string script)
+    {
         var hooks = System.IO.Path.Combine(_repoDir, ".git", "hooks");
         Directory.CreateDirectory(hooks);
-        File.WriteAllText(System.IO.Path.Combine(hooks, "pre-commit"),
-            "#!/bin/sh\nwhile [ ! -f .git/release ]; do sleep 0.05; done\nexit 0\n");
-        return System.IO.Path.Combine(_repoDir, ".git", "release");
+        var hook = System.IO.Path.Combine(hooks, "pre-commit");
+        File.WriteAllText(hook, script);
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(hook, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
     }
 
     [AvaloniaFact]

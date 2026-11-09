@@ -447,7 +447,10 @@ public sealed class RepositoryWriteLockTests : IAsyncDisposable
             await holding.Task;
 
             var waiter = Task.Run(() => ctx.WithWriteLockAsync(ct => Task.CompletedTask, label: "Waiter"));
-            await Task.Delay(100);
+            // Release only once the waiter is queued on the lock, and keep holding well past the
+            // logging threshold: a release before the waiter arrives, or just after, writes no mark.
+            await WaitUntilAsync(() => ctx.WaitingWriters == 1, "the waiter did not queue for the lock");
+            await Task.Delay(50);
             release.SetResult();
             await Task.WhenAll(holder, waiter);
 

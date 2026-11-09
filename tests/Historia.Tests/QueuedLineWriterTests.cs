@@ -209,6 +209,13 @@ public sealed class QueuedLineWriterTests : IDisposable
             // Each line is a fresh megacharacter string: kept whole, 100 of them would hold 200 MB.
             for (var i = 0; i < 100; i++)
                 writer.Enqueue(path, new string('x', 1_000_000));
+
+            // Every line is counted at its cut length, and a hundred of them fit under the cap.
+            var cutLength = QueuedLineWriter.MaxLineChars + "… [984000 more characters not logged]".Length;
+            Assert.Equal(100L * cutLength, writer.BacklogCharsForTesting);
+            Assert.True(writer.BacklogCharsForTesting <= QueuedLineWriter.MaxBacklogChars);
+            Assert.Equal(0, writer.DroppedForTesting);
+
             var retained = LowestRetained(before, 40L * 1024 * 1024);
 
             Assert.True(retained < 40L * 1024 * 1024, $"the queue retained {retained / (1024 * 1024)} MB behind a stalled write");
@@ -240,11 +247,26 @@ public sealed class QueuedLineWriterTests : IDisposable
             var before = GC.GetTotalMemory(forceFullCollection: true);
             // 1,000 lines, far fewer than the line cap and each under the line-length cap: only the
             // character backlog can stop them. Kept whole they would hold about 30 MB.
-            for (var i = 0; i < 1_000; i++)
-                writer.Enqueue(path, new string('z', 15_000));
-            var retained = LowestRetained(before, 12L * 1024 * 1024);
+            const int lineChars = 15_000;
+            const int lines = 1_000;
+            for (var i = 0; i < lines; i++)
+                writer.Enqueue(path, new string('z', lineChars));
 
-            Assert.True(retained < 12L * 1024 * 1024, $"the queue retained {retained / (1024 * 1024)} MB behind a stalled write");
+            // The writer's own accounting is the exact guarantee: it holds no more than the cap and
+            // refuses every line beyond it.
+            var mostAccepted = (QueuedLineWriter.MaxBacklogChars + lineChars - 1) / lineChars;
+            Assert.True(writer.BacklogCharsForTesting <= QueuedLineWriter.MaxBacklogChars);
+            Assert.True(writer.DroppedForTesting >= lines - mostAccepted,
+                $"only {writer.DroppedForTesting} of {lines} lines were refused");
+
+            // The heap reading is a coarse guard against a second copy of the backlog that the
+            // accounting would not see. The capped backlog is about 8 MB (4 M chars at 2 bytes) and
+            // the whole input about 30 MB; 19 MB sits halfway between, so the process-wide heap
+            // moving by a few megabytes cannot fail it while a queue that kept every line would.
+            const long limit = 19L * 1024 * 1024;
+            var retained = LowestRetained(before, limit);
+
+            Assert.True(retained < limit, $"the queue retained {retained / (1024 * 1024)} MB behind a stalled write");
         }
         finally
         {

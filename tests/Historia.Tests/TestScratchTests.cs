@@ -121,6 +121,11 @@ public sealed class TestScratchTests
             Assert.Equal(0, Git(dir, "init"));
             Assert.Equal(0, Git(dir, "config", "user.name", "Test"));
             Assert.Equal(0, Git(dir, "config", "user.email", "test@example.com"));
+            // Trap: a commit can start git's auto-maintenance detached, which creates and removes
+            // objects/maintenance.lock while the scan below reads attributes, and can write files
+            // after the delete. Turned off so the test sees only read-only objects.
+            Assert.Equal(0, Git(dir, "config", "maintenance.auto", "false"));
+            Assert.Equal(0, Git(dir, "config", "gc.auto", "0"));
             File.WriteAllText(Path.Combine(dir, "f.txt"), "hello");
             Assert.Equal(0, Git(dir, "add", "."));
             Assert.Equal(0, Git(dir, "commit", "-m", "initial", "--no-gpg-sign"));

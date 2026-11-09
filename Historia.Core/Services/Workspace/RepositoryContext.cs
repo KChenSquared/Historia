@@ -326,7 +326,7 @@ public sealed class RepositoryContext : IAsyncDisposable
         // The pre-checks and Process.Start in the work delegate must not run on a UI thread.
         // Everything below, including the wait timing and the holder bookkeeping, therefore runs
         // after the hop, and the AsyncLocal below is set after it.
-        await ThreadHop.LeaveUiThreadAsync().ConfigureAwait(false);
+        await ThreadHop.LeaveUiThreadAsync();
 
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, Lifetime);
         var holderAtWaitStart = Volatile.Read(ref _writeHolder);

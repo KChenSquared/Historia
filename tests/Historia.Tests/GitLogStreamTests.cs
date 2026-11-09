@@ -351,6 +351,7 @@ public sealed class GitLogStreamProcessTests : IAsyncDisposable
         using var stream = GitLogStream.TryStart(Locator, big.Path, [big.HeadSha]);
         Assert.NotNull(stream);
         Assert.True(stream.MoveNext());
+        var started = stream.PriorityClassForTesting();
 
         stream.SetLowPriority(true);
         stream.SetLowPriority(true);
@@ -359,8 +360,18 @@ public sealed class GitLogStreamProcessTests : IAsyncDisposable
         stream.SetLowPriority(false);
         var restored = stream.PriorityClassForTesting();
 
-        Assert.Equal(ProcessPriorityClass.BelowNormal, low);
-        Assert.Equal(ProcessPriorityClass.Normal, restored);
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Equal(ProcessPriorityClass.BelowNormal, low);
+            Assert.Equal(ProcessPriorityClass.Normal, restored);
+        }
+        else
+        {
+            Assert.NotNull(started);
+            Assert.True(started == low, "off Windows SetLowPriority must leave the priority alone: an unprivileged process cannot restore a lowered one");
+            Assert.True(started == restored, "off Windows SetLowPriority must leave the priority alone: an unprivileged process cannot restore a lowered one");
+        }
+
         Assert.Equal(3_000, 1 + Drain(stream).Count);
     }
 

@@ -62,7 +62,7 @@ public sealed class GitCliService : IGitCliService
 
         // Resolving git, building the process and Process.Start itself cost milliseconds that must
         // not land on a UI thread.
-        await ThreadHop.LeaveUiThreadAsync().ConfigureAwait(false);
+        await ThreadHop.LeaveUiThreadAsync();
 
         await _locator.WhenResolvedAsync(ct).ConfigureAwait(false);
 

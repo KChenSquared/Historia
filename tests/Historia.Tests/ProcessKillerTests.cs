@@ -1,9 +1,9 @@
 namespace Historia.Tests;
 
 /// <summary>
-/// A burst of tree kills is drained by several threads at once rather than one after another.
-/// Serial: the test floods the process-wide <see cref="ProcessKiller"/> queue, which would delay
-/// every other test's kills if it ran alongside them.
+/// A burst of tree kills is drained by every killer thread at once rather than one after another.
+/// Serial: the test floods the process-wide <see cref="ProcessKiller"/> queue and holds its threads
+/// in a process-wide hook, which would delay every other test's kills if it ran alongside them.
 /// </summary>
 [Trait("tier", "git")]
 [Collection("serial")]
@@ -12,33 +12,47 @@ public sealed class ProcessKillerTests
     private const int Trees = 24;
 
     [WindowsFact(Timeout = 120000)]
-    public async Task A_burst_of_tree_kills_finishes_well_under_the_one_at_a_time_time()
+    public async Task A_burst_of_tree_kills_is_drained_by_every_killer_thread_at_once()
     {
-        // Reference: the same kill, inline and one tree at a time.
-        var reference = StartTrees(8);
-        var serial = Stopwatch.StartNew();
-        foreach (var tree in reference)
-            tree.Kill(entireProcessTree: true);
-        serial.Stop();
-        DisposeAll(reference);
-        var perTree = serial.Elapsed / reference.Count;
+        // Each kill holds its killer thread until ThreadCount kills are inside at the same time, so
+        // the test passes only if the queue is drained by that many threads in parallel. With fewer
+        // threads the first wait gives up, releases every later kill and the peak says how many ran.
+        var inside = 0;
+        var peak = 0;
+        var gaveUp = false;
+        var gate = new object();
+        using var allInside = new ManualResetEventSlim();
+        ProcessKiller.KillStartingForTesting = () =>
+        {
+            lock (gate)
+            {
+                inside++;
+                peak = Math.Max(peak, inside);
+                if (inside >= ProcessKiller.ThreadCount)
+                    allInside.Set();
+            }
+            if (!allInside.Wait(TimeSpan.FromSeconds(10)))
+            {
+                gaveUp = true;
+                allInside.Set();
+            }
+            lock (gate)
+                inside--;
+        };
 
         var trees = StartTrees(Trees);
         try
         {
-            var pooled = Stopwatch.StartNew();
-            await Task.WhenAll(trees.Select(ProcessKiller.KillAsync)).WaitAsync(TimeSpan.FromSeconds(60));
-            pooled.Stop();
+            await Task.WhenAll(trees.Select(ProcessKiller.KillAsync)).WaitAsync(TimeSpan.FromSeconds(90));
 
-            // One killer thread would need Trees x perTree; four threads need about a quarter of
-            // that. The bound sits well between the two.
-            var oneAtATime = perTree * Trees;
-            Assert.True(pooled.Elapsed < oneAtATime * 0.7,
-                $"{Trees} kills took {pooled.Elapsed}; one at a time would take about {oneAtATime}");
+            Assert.False(gaveUp, $"at most {peak} of {ProcessKiller.ThreadCount} killer threads ran a kill at once");
+            Assert.Equal(ProcessKiller.ThreadCount, peak);
             Assert.All(trees, t => Assert.True(t.WaitForExit(10_000)));
         }
         finally
         {
+            ProcessKiller.KillStartingForTesting = null;
+            allInside.Set();
             DisposeAll(trees);
         }
     }

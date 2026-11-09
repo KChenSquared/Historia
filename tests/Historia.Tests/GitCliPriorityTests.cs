@@ -2,7 +2,9 @@ namespace Historia.Tests;
 
 /// <summary>
 /// Background git work is capped at two processes app-wide and runs at below-normal priority;
-/// foreground work, network work and writes never wait for a slot. The processes are git aliases
+/// foreground work, network work and writes never wait for a slot. Every other git process keeps
+/// the priority class it inherits from the host: an app started at low priority keeps its git
+/// children low, so priorities are compared with the test host's own class, never with Normal. The processes are git aliases
 /// that announce themselves with a marker file and then hold until the test writes a release file,
 /// so the assertions depend on what is running, never on how long anything takes. The class is in
 /// the serial collection: the cap is shared by every <see cref="GitCliService"/> in the process.
@@ -19,11 +21,14 @@ public sealed class GitCliPriorityTests : IAsyncLifetime
     private readonly List<(string Id, Task<GitCliResult> Task)> _calls = [];
     private GitCliService? _cli;
     private bool _gitFound;
+    private ProcessPriorityClass _hostPriority;
 
     public async Task InitializeAsync()
     {
         var git = await new GitExecutableLocator().ResolveAsync(null);
         _gitFound = git.Found;
+        using (var host = Process.GetCurrentProcess())
+            _hostPriority = host.PriorityClass;
         _cli = new GitCliService(new FixedLocator(git))
         {
             ProcessStarted = process =>
@@ -105,10 +110,16 @@ public sealed class GitCliPriorityTests : IAsyncLifetime
 
         var results = await ReleaseAllAsync();
         Assert.All(results, r => Assert.True(r.IsSuccess, r.StandardError));
-        Assert.Equal(ProcessPriorityClass.BelowNormal, _priorities["background"]);
-        Assert.Equal(ProcessPriorityClass.BelowNormal, _priorities["network"]);
-        Assert.NotEqual(ProcessPriorityClass.BelowNormal, _priorities["normal"]);
-        Assert.NotEqual(ProcessPriorityClass.BelowNormal, _priorities["interactive"]);
+        var host = $"test host runs at {_hostPriority}";
+        Assert.True(_priorities["normal"] == _hostPriority, $"normal ran at {_priorities["normal"]}; {host}");
+        Assert.True(_priorities["interactive"] == _hostPriority, $"interactive ran at {_priorities["interactive"]}; {host}");
+
+        // From an Idle host, raising a child to BelowNormal can be refused, and the best-effort
+        // lowering leaves it as it is.
+        if (_hostPriority == ProcessPriorityClass.Idle)
+            return;
+        Assert.True(_priorities["background"] == ProcessPriorityClass.BelowNormal, $"background ran at {_priorities["background"]}; {host}");
+        Assert.True(_priorities["network"] == ProcessPriorityClass.BelowNormal, $"network ran at {_priorities["network"]}; {host}");
     }
 
     [Fact]
