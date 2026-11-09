@@ -192,7 +192,8 @@ public sealed partial class GraphLayoutService
             {
                 if (stream is null)
                     return -1;
-                // A background walk: it yields the CPU to interactive work.
+                // A background walk: on Windows it yields the CPU to interactive work. On Linux
+                // and macOS SetLowPriority does nothing, so the walk runs at normal priority.
                 stream.SetLowPriority(true);
                 while (stream.MoveNext())
                 {
