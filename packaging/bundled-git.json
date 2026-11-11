@@ -1,10 +1,10 @@
 {
   "minimumGitVersion": "2.46",
   "mingit": {
-    "version": "v2.56.0.windows.4",
-    "asset": "MinGit-2.56.0.4-64-bit.zip",
-    "url": "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.4/MinGit-2.56.0.4-64-bit.zip",
-    "sha256": "e3bf78351fe777fba47ddee5950082f8a98bb0f02604fdc7ba3ee2cb68ffa877"
+    "version": "v2.56.1.windows.1",
+    "asset": "MinGit-2.56.1-64-bit.zip",
+    "url": "https://github.com/git-for-windows/git/releases/download/v2.56.1.windows.1/MinGit-2.56.1-64-bit.zip",
+    "sha256": "4a92850b6e917da4fd010669b614b55dccf5b0ec333a534cc4be4700dfefdafd"
   },
   "gitLfs": {
     "version": "v3.8.1",
@@ -13,4 +13,3 @@
     "sha256": "5bb771c12b3dacc535e912d0270a010c209d4da2e63819c5918e3547c2defed9"
   }
 }
-
