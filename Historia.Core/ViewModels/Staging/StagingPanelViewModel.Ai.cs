@@ -298,7 +298,7 @@ public sealed partial class StagingPanelViewModel
         var choice = await _dialogs.ChooseAsync(
             "Still waiting",
             $"The last request was sent {sentSeconds} s ago and hasn't answered yet. " +
-            $"Requests give up after {DescribeDeadline(AiHttp.OverallDeadline)}.",
+            $"Requests give up after {AiHttp.DescribeLimit(AiHttp.OverallDeadline)}.",
             ["Send a new request", "Stop waiting"],
             defaultIndex: 0);
 
@@ -324,18 +324,6 @@ public sealed partial class StagingPanelViewModel
             waiting.Cancel();
 #pragma warning restore S6966
         }
-    }
-
-    private static string DescribeDeadline(TimeSpan deadline)
-    {
-        if (deadline.TotalMinutes >= 1 && deadline.Seconds == 0)
-        {
-            var minutes = (int)deadline.TotalMinutes;
-            return minutes == 1 ? "1 minute" : $"{minutes} minutes";
-        }
-
-        var seconds = (int)Math.Ceiling(deadline.TotalSeconds);
-        return seconds == 1 ? "1 second" : $"{seconds} seconds";
     }
 
     private void UpdateGeneratingTip()

@@ -696,7 +696,7 @@ public class AiClientTests
 
         Assert.Equal(AiErrorKind.Timeout, ex.Kind);
         Assert.Equal("The AI service took too long to respond.", ex.Message);
-        Assert.Equal("No reply within 1 s.", ex.Details);
+        Assert.Equal("No reply within 1 second.", ex.Details);
     }
 
     [Fact]
@@ -707,7 +707,26 @@ public class AiClientTests
         var ex = await Assert.ThrowsAsync<AiException>(() => new OpenAiCompatibleClient(http).CompleteAsync(Req(Server), default));
 
         Assert.Equal(AiErrorKind.Timeout, ex.Kind);
-        Assert.Equal("No reply within 1 s, retries included.", ex.Details);
+        Assert.Equal("No reply within 1 second, retries included.", ex.Details);
+    }
+
+    [Theory]
+    [InlineData(4 * 60_000L, "4 minutes")]
+    [InlineData(60_000L, "1 minute")]
+    [InlineData(180_000L, "3 minutes")]
+    [InlineData(90_000L, "90 seconds")]
+    [InlineData(1_000L, "1 second")]
+    [InlineData(50L, "1 second")]
+    [InlineData(1_500L, "2 seconds")]
+    public void Limits_read_as_whole_minutes_or_rounded_up_seconds(long milliseconds, string expected)
+    {
+        Assert.Equal(expected, AiHttp.DescribeLimit(TimeSpan.FromMilliseconds(milliseconds)));
+    }
+
+    [Fact]
+    public void A_limit_a_tick_past_a_minute_reads_as_seconds()
+    {
+        Assert.Equal("61 seconds", AiHttp.DescribeLimit(TimeSpan.FromMinutes(1) + TimeSpan.FromTicks(1)));
     }
 
     [Fact]

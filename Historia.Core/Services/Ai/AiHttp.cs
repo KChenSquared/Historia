@@ -173,16 +173,18 @@ public sealed class AiHttp
         }
     }
 
-    /// <summary>"4 minutes" or "90 s": whole minutes read as minutes, anything else as seconds.</summary>
-    private static string DescribeLimit(TimeSpan limit)
+    /// <summary>A limit in words: "4 minutes" for whole minutes, otherwise "90 seconds", with
+    /// any fraction of a second rounded up.</summary>
+    internal static string DescribeLimit(TimeSpan limit)
     {
-        if (limit.TotalMinutes >= 1 && limit.Seconds == 0 && limit.Milliseconds == 0)
+        if (limit >= TimeSpan.FromMinutes(1) && limit.Ticks % TimeSpan.TicksPerMinute == 0)
         {
-            var minutes = (int)limit.TotalMinutes;
+            var minutes = (long)limit.TotalMinutes;
             return minutes == 1 ? "1 minute" : $"{minutes} minutes";
         }
 
-        return $"{Math.Max(1, (long)Math.Ceiling(limit.TotalSeconds))} s";
+        var seconds = Math.Max(1, (long)Math.Ceiling(limit.TotalSeconds));
+        return seconds == 1 ? "1 second" : $"{seconds} seconds";
     }
 
     internal static AiErrorKind Classify(int status, string body) => status switch
