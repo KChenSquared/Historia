@@ -12,10 +12,16 @@ public sealed class AiHttp
     private const int MaxDetailsBytes = 2048;
     private static readonly TimeSpan MaxRetryAfter = TimeSpan.FromSeconds(10);
 
-    public static AiHttp Shared { get; } = new();
+    /// <summary>How long one attempt may wait for its response before it is given up on.</summary>
+    public static TimeSpan AttemptTimeout => TimeSpan.FromSeconds(180);
 
     /// <summary>How long a whole request, retries included, may take before it is given up on.</summary>
-    public static TimeSpan OverallDeadline { get; } = TimeSpan.FromMinutes(4);
+    public static TimeSpan OverallDeadline => TimeSpan.FromMinutes(4);
+
+    // Trap: static initializers run in declaration order, so a Shared built above a static it
+    // reads gets that static's default. A zero overall deadline cancelled every request the
+    // moment it started and was reported as a timeout. Keep Shared below every other static.
+    public static AiHttp Shared { get; } = new();
 
     private readonly HttpClient _client;
     private readonly TimeSpan _attemptTimeout;
@@ -34,10 +40,14 @@ public sealed class AiHttp
         {
             Timeout = Timeout.InfiniteTimeSpan,
         };
-        _attemptTimeout = attemptTimeout ?? TimeSpan.FromSeconds(180);
+        _attemptTimeout = attemptTimeout ?? AttemptTimeout;
         _overallDeadline = overallDeadline ?? OverallDeadline;
         _delay = delay ?? Task.Delay;
     }
+
+    internal TimeSpan AttemptTimeoutValue => _attemptTimeout;
+
+    internal TimeSpan OverallDeadlineValue => _overallDeadline;
 
     /// <summary>
     /// Sends the request built by <paramref name="createRequest"/> (called once per attempt) and
@@ -60,9 +70,9 @@ public sealed class AiHttp
             string reason;
             string body;
             TimeSpan? retryAfter;
+            using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(overall.Token);
             try
             {
-                using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(overall.Token);
                 attemptCts.CancelAfter(_attemptTimeout);
                 using var request = CreateRequest(createRequest);
                 using var response = await _client
@@ -79,9 +89,20 @@ public sealed class AiHttp
             {
                 throw;
             }
+            catch (OperationCanceledException ex) when (overall.IsCancellationRequested)
+            {
+                throw new AiException(AiErrorKind.Timeout, Summary(AiErrorKind.Timeout, 0),
+                    $"No reply within {DescribeLimit(_overallDeadline)}, retries included.", ex);
+            }
+            catch (OperationCanceledException ex) when (attemptCts.IsCancellationRequested)
+            {
+                throw new AiException(AiErrorKind.Timeout, Summary(AiErrorKind.Timeout, 0),
+                    $"No reply within {DescribeLimit(_attemptTimeout)}.", ex);
+            }
             catch (OperationCanceledException ex)
             {
-                throw new AiException(AiErrorKind.Timeout, "The AI service took too long to respond.", null, ex);
+                throw new AiException(AiErrorKind.Unknown, "The request to the AI service was cancelled unexpectedly.",
+                    Redact(ex.Message, secrets), ex);
             }
             catch (HttpRequestException ex)
             {
@@ -150,6 +171,18 @@ public sealed class AiHttp
         {
             throw Fail(Classify(status, body), status, reason, body, secrets, retryAfter);
         }
+    }
+
+    /// <summary>"4 minutes" or "90 s": whole minutes read as minutes, anything else as seconds.</summary>
+    private static string DescribeLimit(TimeSpan limit)
+    {
+        if (limit.TotalMinutes >= 1 && limit.Seconds == 0 && limit.Milliseconds == 0)
+        {
+            var minutes = (int)limit.TotalMinutes;
+            return minutes == 1 ? "1 minute" : $"{minutes} minutes";
+        }
+
+        return $"{Math.Max(1, (long)Math.Ceiling(limit.TotalSeconds))} s";
     }
 
     internal static AiErrorKind Classify(int status, string body) => status switch

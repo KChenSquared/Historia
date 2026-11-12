@@ -600,6 +600,21 @@ public class AiClientTests
     }
 
     [Fact]
+    public void The_shared_pipeline_uses_the_real_deadlines()
+    {
+        Assert.True(AiHttp.Shared.OverallDeadlineValue > TimeSpan.Zero);
+        Assert.True(AiHttp.Shared.AttemptTimeoutValue > TimeSpan.Zero);
+        Assert.Equal(AiHttp.OverallDeadline, AiHttp.Shared.OverallDeadlineValue);
+        Assert.Equal(AiHttp.AttemptTimeout, AiHttp.Shared.AttemptTimeoutValue);
+    }
+
+    [Fact]
+    public void The_attempt_timeout_is_three_minutes()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(180), AiHttp.AttemptTimeout);
+    }
+
+    [Fact]
     public async Task A_400_is_not_retried()
     {
         var h = new FakeHandler().Enqueue(HttpStatusCode.BadRequest, "bad");
@@ -680,6 +695,31 @@ public class AiClientTests
         var ex = await Assert.ThrowsAsync<AiException>(() => new OpenAiCompatibleClient(http).CompleteAsync(Req(Server), default));
 
         Assert.Equal(AiErrorKind.Timeout, ex.Kind);
+        Assert.Equal("The AI service took too long to respond.", ex.Message);
+        Assert.Equal("No reply within 1 s.", ex.Details);
+    }
+
+    [Fact]
+    public async Task The_overall_deadline_elapsing_mid_attempt_is_a_timeout()
+    {
+        var http = new AiHttp(new HangingHandler(), overallDeadline: TimeSpan.FromMilliseconds(50));
+
+        var ex = await Assert.ThrowsAsync<AiException>(() => new OpenAiCompatibleClient(http).CompleteAsync(Req(Server), default));
+
+        Assert.Equal(AiErrorKind.Timeout, ex.Kind);
+        Assert.Equal("No reply within 1 s, retries included.", ex.Details);
+    }
+
+    [Fact]
+    public async Task A_cancellation_nobody_asked_for_is_not_a_timeout()
+    {
+        var h = new FakeHandler().EnqueueThrow(new TaskCanceledException("boom sk-secret"));
+
+        var ex = await Assert.ThrowsAsync<AiException>(() => new OpenAiCompatibleClient(Http(h)).CompleteAsync(Req(Server), default));
+
+        Assert.Equal(AiErrorKind.Unknown, ex.Kind);
+        Assert.Equal("The request to the AI service was cancelled unexpectedly.", ex.Message);
+        Assert.Equal("boom •••", ex.Details);
     }
 
     [Fact]
