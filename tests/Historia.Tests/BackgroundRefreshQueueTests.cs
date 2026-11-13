@@ -244,7 +244,8 @@ public sealed class BackgroundRefreshQueueTests : IAsyncDisposable
     [Fact(Timeout = 60000)]
     public async Task Interrupted_focused_tab_still_jumps_the_queue()
     {
-        var ws = NewWorkspace();
+        var cli = new StatusStartRecorder(_host.Cli);
+        var ws = NewWorkspace(cli);
         var r0 = await ws.OpenAsync(CreateRepo("r0").Path);
         r0.MarkFirstGraphPaintDone();
         await r0.FirstFullLoad;
@@ -253,26 +254,26 @@ public sealed class BackgroundRefreshQueueTests : IAsyncDisposable
         r1.MarkFirstGraphPaintDone();
         await r1.FirstFullLoad;
 
+        await SettleOpeningRefreshesAsync(ws, r1, r0);
+
         // Open r2 and focus it, but do NOT complete its paint yet:
         var r2 = await ws.OpenAsync(CreateRepo("r2").Path);
 
         // Now focus r0 again while r2's initial load was in progress.
         // This interrupts r2 and puts it into the background queue with priority.
+        cli.Arm();
         ws.Focus(r0);
 
-        var drainOrder = new List<int>();
-        var r2Finished = r2.FirstFullLoad.ContinueWith(_ => { lock (drainOrder) drainOrder.Add(2); });
-
         // Enqueue r1 as well. In _open, r1 is index 1, r2 is index 2.
-        var t1 = ws.RequestBackgroundRefreshAsync(r1).ContinueWith(_ => { lock (drainOrder) drainOrder.Add(1); });
+        var t1 = ws.RequestBackgroundRefreshAsync(r1);
 
         // Mark r2 paint done so when the pump picks r2, it can complete:
         r2.MarkFirstGraphPaintDone();
 
-        await Task.WhenAll(r2Finished, t1);
+        await Task.WhenAll(r2.FirstFullLoad, t1).WaitAsync(TimeSpan.FromSeconds(30));
 
         // r2 should have drained before r1 even though r1 had a lower index in _open:
-        Assert.Equal([2, 1], drainOrder);
+        AssertDrainOrder(cli, [2, 1], (1, r1), (2, r2));
 
         await ws.DisposeAsync();
     }
