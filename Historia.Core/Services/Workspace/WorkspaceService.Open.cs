@@ -56,17 +56,39 @@ public sealed partial class WorkspaceService
 
         if (TestAfterTabAddedBeforeFocus is { } added)
             await added(context).ConfigureAwait(false);
+
+        // The new tab is the foreground load from before it takes focus. Trap: focusing it can
+        // requeue a displaced, still-loading tab and start the background pump; with the claim
+        // made only after the Recent-list write, the pump still saw the displaced tab as the
+        // foreground and re-ran it at once, alongside this tab's load.
+        if (initialize)
+            lock (_sync) SetForegroundInit(context);
         if (focus)
             FocusInternal(context);
         RaiseOpenChanged();
 
         if (recordRecent)
-            await _recents.AddAsync(context.RepositoryPath, context.DisplayName, ct).ConfigureAwait(false);
-        if (initialize)
         {
-            lock (_sync) SetForegroundInit(context);
-            _ = InitializeContextAsync(context, foreground: true);
+            try
+            {
+                await _recents.AddAsync(context.RepositoryPath, context.DisplayName, ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                // This tab's load never starts, so it must not keep holding the pump back.
+                if (initialize)
+                {
+                    lock (_sync)
+                    {
+                        if (ReferenceEquals(_foregroundInit, context))
+                            SetForegroundInit(null);
+                    }
+                }
+                throw;
+            }
         }
+        if (initialize)
+            _ = InitializeContextAsync(context, foreground: true);
 
         return context;
     }
@@ -537,10 +559,11 @@ public sealed partial class WorkspaceService
             _open.Insert(insertAt, context);
         }
 
+        // The foreground claim comes before focus, for the reason given in the shared open path.
+        lock (_sync) SetForegroundInit(context);
         FocusInternal(context);
         RaiseOpenChanged();
 
-        lock (_sync) SetForegroundInit(context);
         _ = InitializeContextAsync(context, foreground: true);
 
         return context;

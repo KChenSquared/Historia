@@ -44,7 +44,34 @@ public sealed class WorkspaceFocusLossTests : IAsyncDisposable
         }
     }
 
-    private (WorkspaceService Workspace, RecordingIdentity Identity) NewWorkspace(IGitCliService cli)
+    /// <summary>Recent-list writes that hold, for one repository, until the test releases them.</summary>
+    private sealed class GatedRecents(IRecentRepositoryService inner, string gatedPath) : IRecentRepositoryService
+    {
+        public readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public IReadOnlyList<RecentRepository> Items => inner.Items;
+        public Task RemoveAsync(string path, CancellationToken ct = default) => inner.RemoveAsync(path, ct);
+        public Task ClearAsync(CancellationToken ct = default) => inner.ClearAsync(ct);
+
+        public event EventHandler? Changed
+        {
+            add => inner.Changed += value;
+            remove => inner.Changed -= value;
+        }
+
+        public async Task AddAsync(string path, string displayName, CancellationToken ct = default)
+        {
+            if (SamePath(path, gatedPath))
+            {
+                Entered.TrySetResult();
+                await Release.Task.ConfigureAwait(false);
+            }
+            await inner.AddAsync(path, displayName, ct).ConfigureAwait(false);
+        }
+    }
+
+    private (WorkspaceService Workspace, RecordingIdentity Identity) NewWorkspace(IGitCliService cli, IRecentRepositoryService? recents = null)
     {
         var sc = new ServiceCollection();
         sc.AddSingleton<ISettingsService>(_host.Settings);
@@ -57,7 +84,7 @@ public sealed class WorkspaceFocusLossTests : IAsyncDisposable
 
         var identity = new RecordingIdentity(new RepoIdentityService(cli));
         var profiles = new ProfileService(_host.Settings, new FakeVault(), cli);
-        var ws = new WorkspaceService(provider, cli, new RecentRepositoryService(_host.Settings), profiles, identity);
+        var ws = new WorkspaceService(provider, cli, recents ?? new RecentRepositoryService(_host.Settings), profiles, identity);
         return (ws, identity);
     }
 
@@ -94,6 +121,46 @@ public sealed class WorkspaceFocusLossTests : IAsyncDisposable
         ctxB.MarkFirstGraphPaintDone();
         ctxA.MarkFirstGraphPaintDone();
         await ws.DisposeAsync();
+    }
+
+    /// <summary>Opening a tab displaces a still-loading one, which is requeued and the background
+    /// pump started. The new tab is the foreground load from that moment: the pump must not re-run
+    /// the displaced tab in the gap before the new tab's own load starts (here held open by its
+    /// Recent-list write), or the two loads compete.</summary>
+    [Fact(Timeout = 60000)]
+    public async Task A_displaced_tab_waits_for_the_tab_that_displaced_it_even_before_its_load_starts()
+    {
+        var a = CreateRepo("a");
+        var b = CreateRepo("b");
+        var cli = new BlockingGitCliService(_host.Cli, _ => false);
+        var recents = new GatedRecents(new RecentRepositoryService(_host.Settings), b.Path);
+        var (ws, identity) = NewWorkspace(cli, recents);
+        RepositoryContext? ctxB = null;
+        try
+        {
+            // A is focused and waits for its graph's first paint.
+            var ctxA = await ws.OpenAsync(a.Path);
+            var openB = ws.OpenAsync(b.Path);
+            await recents.Entered.Task.WaitAsync(TimeSpan.FromSeconds(20));
+
+            // B has focus and A is requeued; B's load has not started yet. A's graph paints now, so
+            // a re-run of A would go straight on to resolve its identity.
+            ctxA.MarkFirstGraphPaintDone();
+            Assert.False(await EventuallyAsync(() => identity.Resolved.Contains(ctxA), TimeSpan.FromSeconds(1.5)),
+                "the displaced tab was re-run before the tab that displaced it started loading");
+
+            recents.Release.TrySetResult();
+            ctxB = await openB.WaitAsync(TimeSpan.FromSeconds(20));
+            Assert.False(await EventuallyAsync(() => identity.Resolved.Contains(ctxA), TimeSpan.FromSeconds(1)),
+                "the displaced tab was re-run while the focused tab was still loading");
+            Assert.False(ctxA.FirstFullLoad.IsCompleted);
+        }
+        finally
+        {
+            recents.Release.TrySetResult();
+            ctxB?.MarkFirstGraphPaintDone();
+            await ws.DisposeAsync();
+        }
     }
 
     private static bool SamePath(string x, string y) =>

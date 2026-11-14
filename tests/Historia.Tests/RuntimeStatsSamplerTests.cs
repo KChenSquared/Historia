@@ -156,12 +156,22 @@ public sealed class RuntimeStatsSamplerTests
     }
 
     [Fact]
-    public void The_real_reading_describes_a_pool_and_a_heap()
+    public async Task The_real_reading_describes_a_pool_and_a_heap()
     {
+        // The pool can have retired every thread, and the heap size is an estimate the runtime
+        // computes without stopping a collection that is under way, so one reading can be off.
+        // A pool thread is started first and the reading is retried.
+        await Task.Run(() => { });
         var now = RuntimeStatsSampler.ReadCurrent();
+        var deadline = Stopwatch.StartNew();
+        while ((now.PoolThreads <= 0 || now.HeapBytes <= 0) && deadline.Elapsed < TimeSpan.FromSeconds(10))
+        {
+            await Task.Delay(10);
+            now = RuntimeStatsSampler.ReadCurrent();
+        }
 
-        Assert.True(now.PoolThreads > 0);
-        Assert.True(now.HeapBytes > 0);
-        Assert.True(now.GcPause >= TimeSpan.Zero);
+        Assert.True(now.PoolThreads > 0, $"pool threads={now.PoolThreads}");
+        Assert.True(now.HeapBytes > 0, $"heap bytes={now.HeapBytes}");
+        Assert.True(now.GcPause >= TimeSpan.Zero, $"gc pause={now.GcPause}");
     }
 }

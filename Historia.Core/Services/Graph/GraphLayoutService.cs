@@ -477,7 +477,8 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
     /// each commit completely), and a snapshot taken between chunks is bounded by its own row and
     /// edge counts, so a render between two chunks sees a layout that was valid before the extend.
     /// Returns null, having placed nothing, when the state has already moved past
-    /// <paramref name="consumed"/>.
+    /// <paramref name="consumed"/>. <paramref name="chunkExtended"/>, when given, is called with the
+    /// number of rows one hold added, after that hold's lock is released.
     /// </summary>
     internal static GraphLayoutResult? ExtendInChunks(
         GraphLayoutResult existing,
@@ -485,7 +486,8 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
         IReadOnlyDictionary<GitObjectId, IReadOnlyList<GraphDecorationInput>>? decorations,
         int consumed,
         int additionalRows,
-        int chunkRows = ExtendChunkRows)
+        int chunkRows = ExtendChunkRows,
+        Action<int>? chunkExtended = null)
     {
         var state = existing.State;
         var take = Math.Min(additionalRows, next.Count);
@@ -493,6 +495,8 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
         var done = 0;
         while (true)
         {
+            int added;
+            GraphLayoutResult? finished = null;
             lock (state)
             {
                 if (state.Rows.Count != consumed + done)
@@ -504,10 +508,14 @@ public sealed partial class GraphLayoutService : IGraphLayoutService
                 }
                 var end = Math.Min(done + chunkRows, take);
                 DagLayoutEngine.ExtendInPlace(state, next, done, decorations, consumed + end);
+                added = end - done;
                 done = end;
                 if (done >= take)
-                    return DagLayoutEngine.Snapshot(state, complete);
+                    finished = DagLayoutEngine.Snapshot(state, complete);
             }
+            chunkExtended?.Invoke(added);
+            if (finished is not null)
+                return finished;
             YieldToWaitingReaders(state);
         }
     }

@@ -17,6 +17,9 @@ internal static class ProcessKiller
 
     private static readonly BlockingCollection<(Process Process, TaskCompletionSource Done)> Queue = new();
 
+    /// <summary>Test seam: runs on the killer thread just before each kill.</summary>
+    internal static Action? KillStartingForTesting { get; set; }
+
     static ProcessKiller()
     {
         for (var i = 0; i < ThreadCount; i++)
@@ -45,6 +48,7 @@ internal static class ProcessKiller
         {
             try
             {
+                KillStartingForTesting?.Invoke();
                 if (!process.HasExited)
                     process.Kill(entireProcessTree: true);
             }

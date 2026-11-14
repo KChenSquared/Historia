@@ -292,7 +292,8 @@ public sealed class GraphBackgroundWriterTests : IAsyncDisposable
         lock (sync) Assert.Equal([1], order); // job 2 hasn't started — job 1 is still blocked
 
         gate1.SetResult();
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        // As patient as the start wait above: the loop exits as soon as both jobs have run.
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
         while (DateTime.UtcNow < deadline)
         {
             lock (sync) if (order.Count == 3) break;

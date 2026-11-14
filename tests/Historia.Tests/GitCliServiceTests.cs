@@ -435,18 +435,22 @@ public class GitCliServiceTests
     public async Task Raw_mode_honours_the_timeout()
     {
         var cli = await MakeAsync();
-        using var repo = TestRepositoryBuilder.FromTemplate("linear-3000", b => b.LinearHistory(3_000));
+        using var repo = TestRepositoryBuilder.FromTemplate("empty-repo", _ => { });
 
+        // A command that cannot finish on its own: a finite `git log` can exit before the timeout
+        // callback gets a pool thread on a busy host, and then the call rightly succeeds.
         var run = cli.RunAsync(new GitCliRequest
         {
-            Arguments = ["log", "--all", "-p"],
+            Arguments = ["-c", "alias.slow=!sleep 60", "slow"],
             WorkingDirectory = repo.Path,
             RawStandardOutput = true,
             Timeout = TimeSpan.FromMilliseconds(1),
         });
 
         Assert.Same(run, await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(30))));
-        Assert.Equal(GitErrorKind.TimedOut, (await run).ErrorKind);
+        var result = await run;
+        Assert.True(result.ErrorKind == GitErrorKind.TimedOut,
+            $"ErrorKind={result.ErrorKind} ExitCode={result.ExitCode} duration={result.Duration} stderr={result.StandardError}");
     }
 
     [Fact]

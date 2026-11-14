@@ -109,8 +109,10 @@ public class StagingPanelCommitGateTests : IDisposable
         Assert.False(CommitButton(panel).IsEffectivelyEnabled);
 
         _fixture.MarkResolved();
-        await RefreshUntilAsync(() => _context.State.Status.Conflicted.Count == 0, "the resolved status");
-        Dispatcher.UIThread.RunJobs();
+        // The panel re-evaluates its commit gate after the status lands, so wait for the buttons too.
+        await RefreshUntilAsync(() => _context.State.Status.Conflicted.Count == 0
+            && CommitButton(panel).IsEffectivelyEnabled && CommitPushButton(panel).IsEffectivelyEnabled,
+            "the resolved status to re-enable the commit buttons");
 
         foreach (var button in new[] { CommitButton(panel), CommitPushButton(panel) })
         {

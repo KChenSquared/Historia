@@ -13,6 +13,7 @@ namespace Historia.Tests;
 public class GitCliServicePoolTests
 {
     private const int Calls = 40;
+    private const int BacklogDepth = Calls / 4;
     private static readonly TimeSpan AliasSleep = TimeSpan.FromSeconds(3);
 
     private static async Task<GitExecutableInfo> ResolveGitAsync()
@@ -67,9 +68,11 @@ public class GitCliServicePoolTests
         Assert.True(total.Elapsed < AliasSleep + TimeSpan.FromSeconds(8), $"40 calls took {total.Elapsed}");
 
         Assert.NotEmpty(probes);
-        var busySamples = pending.Count(p => p > 0);
+        // A starved pool holds most of the 40 calls in its queue. A sample that catches one or two
+        // items between being queued and being picked up is ordinary work, not a backlog.
+        var busySamples = pending.Count(p => p > BacklogDepth);
         Assert.True(busySamples <= pending.Count * 0.1,
-            $"work items were queued in {busySamples} of {pending.Count} samples (max {pending.Max()})");
+            $"more than {BacklogDepth} work items were queued in {busySamples} of {pending.Count} samples (max {pending.Max()})");
 
         probes.Sort();
         var median = probes[probes.Count / 2];
@@ -88,6 +91,8 @@ public class GitCliServicePoolTests
 
         Task<GitCliResult>? call = null;
         var callerThread = 0;
+        using var started = new ManualResetEventSlim();
+        using var finished = new ManualResetEventSlim();
         var caller = new Thread(() =>
         {
             // A context that never runs what is posted to it: a hop through Task.Yield or an await
@@ -95,16 +100,30 @@ public class GitCliServicePoolTests
             SynchronizationContext.SetSynchronizationContext(new DiscardingContext());
             callerThread = Environment.CurrentManagedThreadId;
             call = cli.RunAsync(new GitCliRequest { Arguments = ["version"], WorkingDirectory = dir });
+            started.Set();
+            // Trap: a thread's managed id is reused once it exits. With a cold pool, the new pool
+            // thread that runs git could get this id and look like the caller, so the caller stays
+            // alive until the call has finished.
+            finished.Wait(TimeSpan.FromSeconds(90));
         });
         caller.Start();
-        caller.Join();
+        started.Wait();
 
-        var result = await call!.WaitAsync(TimeSpan.FromSeconds(60));
+        GitCliResult result;
+        try
+        {
+            result = await call!.WaitAsync(TimeSpan.FromSeconds(60));
+        }
+        finally
+        {
+            finished.Set();
+            caller.Join();
+        }
         TestScratch.Delete(dir);
 
         Assert.True(result.IsSuccess, result.StandardError);
         Assert.NotEmpty(locator.Threads);
-        Assert.DoesNotContain(callerThread, locator.Threads);
+        Assert.False(locator.Threads.Contains(callerThread), $"the caller's thread ran:{Environment.NewLine}{locator.CallsOn(callerThread)}");
     }
 
     private sealed class DiscardingContext : SynchronizationContext
@@ -129,14 +148,25 @@ public class GitCliServicePoolTests
     private sealed class ThreadRecordingLocator(GitExecutableInfo info) : IGitExecutableLocator
     {
         private readonly ConcurrentBag<int> _threads = [];
+        private readonly ConcurrentBag<(int Thread, string Stack)> _calls = [];
 
         public IReadOnlyCollection<int> Threads => _threads;
+
+        public string CallsOn(int thread) => string.Join(Environment.NewLine + "---" + Environment.NewLine,
+            _calls.Where(c => c.Thread == thread).Select(c => c.Stack));
+
+        private void Record()
+        {
+            _threads.Add(Environment.CurrentManagedThreadId);
+            var context = SynchronizationContext.Current?.GetType().Name ?? "none";
+            _calls.Add((Environment.CurrentManagedThreadId, $"context {context}{Environment.NewLine}{Environment.StackTrace}"));
+        }
 
         public GitExecutableInfo Current
         {
             get
             {
-                _threads.Add(Environment.CurrentManagedThreadId);
+                Record();
                 return info;
             }
         }
@@ -146,7 +176,7 @@ public class GitCliServicePoolTests
 
         public Task<GitExecutableInfo> WhenResolvedAsync(CancellationToken ct = default)
         {
-            _threads.Add(Environment.CurrentManagedThreadId);
+            Record();
             return Task.FromResult(info);
         }
     }
