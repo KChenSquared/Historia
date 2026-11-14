@@ -416,7 +416,7 @@ public sealed class ExternalControlHostTests : IAsyncLifetime
 
         Assert.True(response.Ok, response.Message);
         var item = Assert.Single(_queue.Items);
-        string[] expected = OperatingSystem.IsWindows() ? ["a.txt", "b.txt"] : ["A.TXT", "b.txt"];
+        string[] expected = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? ["a.txt", "b.txt"] : ["A.TXT", "b.txt"];
         Assert.Equal(expected, item.Paths);
         Assert.True(item.Staged);
         Assert.Equal(2, item.Line);
