@@ -589,8 +589,8 @@ SOFTWARE.
 
 ## Git for Windows (MinGit)
 
-On Windows, the package bundles MinGit (Git for Windows for Applications) at pinned tag `v2.56.0.windows.4` as a fallback Git.
-Source code is available at: https://github.com/git-for-windows/git/tree/v2.56.0.windows.4
+On Windows, the package bundles MinGit (Git for Windows for Applications) at pinned tag `v2.56.1.windows.1` as a fallback Git.
+Source code is available at: https://github.com/git-for-windows/git/tree/v2.56.1.windows.1
 Individual component and third-party licences for bundled tools and libraries are shipped under `git\ucrt64\share\licenses` and `git\usr\share\licenses`.
 
 `git\etc\package-versions.txt` lists every package and version MinGit contains. The tools in `git\usr\bin` include GNU coreutils, sed, grep, gawk, findutils and diffutils, licensed under GPL version 3 or later; the licence text ships at `git\usr\share\licenses\gcc-libs\COPYING3`. Their source is published per package and version at `https://repo.msys2.org/msys/sources/` (for example `coreutils-8.32-5.src.tar.zst`) and `https://repo.msys2.org/mingw/sources/`, with Git for Windows' packaging at https://github.com/git-for-windows/MSYS2-packages, https://github.com/git-for-windows/MINGW-packages and https://github.com/git-for-windows/build-extra.
